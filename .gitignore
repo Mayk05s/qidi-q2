@@ -1,0 +1,7 @@
+.env
+.DS_Store
+__pycache__/
+*.pyc
+tag_writer/backups/
+tag_writer/my_colors.json
+tag_writer/result.json

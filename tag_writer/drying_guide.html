@@ -1,0 +1,739 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сушка и пластик в QIDI Box</title>
+<style>
+:root{--bg:#f3f4f1;--card:#fff;--soft:#f0f1ed;--ink:#1d1d1b;--muted:#6b6b66;--line:#e2e2db;--accent:#1f5fd0;--on-accent:#fff;--ok:#1c7c3f;--warn:#a86a00;--err:#b3261e;--gel:#e8913a;--shadow:0 1px 2px rgba(20,20,15,.05),0 8px 24px rgba(20,20,15,.05);color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#131312;--card:#1e1e1c;--soft:#282825;--ink:#f1f1ec;--muted:#a3a39b;--line:#33332f;--accent:#7fa8f5;--on-accent:#10131a;--ok:#63c98a;--warn:#e0a83e;--err:#f2897f;--shadow:none;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.shell{display:grid;grid-template-columns:220px minmax(0,1fr);gap:28px;max-width:1500px;margin:0 auto;padding:24px clamp(16px,2.5vw,40px) 48px;align-items:start}
+.side{position:sticky;top:24px;display:grid;gap:18px}
+h1{font-size:19px;line-height:1.25;margin:0}
+nav{display:grid;gap:4px}
+.tab{font-weight:600;text-align:left;color:var(--muted);background:transparent;border:0;border-radius:12px;padding:9px 13px}
+.tab small{display:block;font-weight:400;font-size:12px;line-height:1.3}
+.tab:hover{color:var(--ink);background:var(--soft)}
+.tab[aria-selected=true]{background:var(--accent);color:var(--on-accent)}
+.tab[aria-selected=true] small{color:inherit;opacity:.8}
+.legend{font-size:12px;color:var(--muted);margin:0}
+.panel{display:grid;gap:16px;min-width:0}
+.panel[hidden]{display:none}
+.panel:focus{outline:0}
+.panel>h2{font-size:28px;line-height:1.15;letter-spacing:-.01em;margin:0}
+.intro{margin:-8px 0 0;color:var(--muted);max-width:75ch}
+.card{background:var(--card);border-radius:20px;padding:22px;min-width:0;box-shadow:var(--shadow);border:1px solid var(--line)}
+h3{font-size:17px;margin:0 0 4px}
+.hint{margin:0 0 12px;color:var(--muted);font-size:14px}
+.note{font-size:13px;color:var(--muted);margin:12px 0 0}
+.tag{display:inline-block;font-size:11px;font-weight:700;padding:1px 6px;border-radius:6px;border:1px solid currentColor;vertical-align:1px}
+.tag.qidi{color:var(--ok)}
+.tag.own{color:var(--warn)}
+.group-title{display:block;font-size:13px;font-weight:600;color:var(--muted);margin:0 0 8px}
+.pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}
+.pick{display:grid;justify-items:center;align-content:start;gap:4px;padding:12px 8px;background:var(--soft);border:2px solid transparent;border-radius:16px;text-align:center;transition:transform .12s,border-color .12s}
+.pick:hover{transform:translateY(-1px);border-color:var(--line)}
+.pick[aria-pressed=true]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,var(--card))}
+.pick svg{width:52px;height:52px;display:block}
+.pick b{font-size:14px;line-height:1.2}
+.pick small{font-size:12px;line-height:1.25;color:var(--muted)}
+.dry-layout{display:grid;grid-template-columns:minmax(300px,5fr) minmax(340px,6fr);gap:16px;align-items:start}
+.filters{display:grid;gap:20px}
+.hero{display:grid;gap:18px}
+.hero-top{display:grid;grid-template-columns:auto 1fr;gap:18px;align-items:center}
+.hero-spool svg{width:112px;height:112px;display:block;transition:transform .25s}
+.hero-spool.warp svg{transform:skewX(-9deg) scaleY(.82) rotate(-5deg)}
+.big{font-size:42px;font-weight:750;line-height:1.05;letter-spacing:-.015em}
+.big.long{font-size:28px}
+.state{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;margin-bottom:6px}
+.state i{width:10px;height:10px;border-radius:50%;background:currentColor}
+.state.ok{color:var(--ok)}.state.warn{color:var(--warn)}.state.stop{color:var(--err)}
+.hero p{margin:0;font-size:14px}
+.hero-notes{display:grid;gap:6px}
+.gauge{padding-top:24px}
+.bar-wrap{position:relative}
+.bar{position:relative;height:26px;border-radius:13px;background:var(--soft);overflow:hidden}
+.bar i{position:absolute;top:0;bottom:0;display:block}
+.bar .range{background:var(--accent)}
+.bar .over{background:repeating-linear-gradient(135deg,var(--err) 0 4px,transparent 4px 9px);opacity:.75}
+.pin{position:absolute;top:-24px;transform:translateX(-50%);font-size:13px;font-weight:700;white-space:nowrap}
+.pin::after{content:"";position:absolute;left:50%;top:20px;width:4px;height:30px;margin-left:-2px;background:var(--ink);border-radius:2px;outline:2px solid var(--card)}
+.ticks{position:relative;height:20px;margin-top:4px;font-size:12px;color:var(--muted)}
+.ticks span{position:absolute;transform:translateX(-50%)}
+.keys{display:flex;flex-wrap:wrap;gap:4px 14px;margin:6px 0 0;padding:0;list-style:none;font-size:13px;color:var(--muted)}
+.keys i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.link{color:var(--accent);background:none;border:0;padding:0;text-decoration:underline;font-size:14px;text-align:left}
+.action{font-size:14px;font-weight:600;padding:9px 15px;border-radius:12px;border:1px solid var(--accent);background:transparent;color:var(--accent)}
+.action.main{background:var(--accent);color:var(--on-accent)}
+.questions{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:8px}
+.q{display:grid;grid-template-columns:40px 1fr;gap:10px;align-items:center;padding:12px;background:var(--card);border:2px solid var(--line);border-radius:16px;text-align:left;font-weight:600;font-size:14px;line-height:1.25}
+.q svg{width:40px;height:40px}
+.q:hover{border-color:var(--muted)}
+.q[aria-selected=true]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,var(--card))}
+.answer-card{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:28px;align-items:center}
+.answer-card>*{min-width:0}
+.answer-card.single{grid-template-columns:minmax(0,1fr)}
+.lead{font-size:24px;font-weight:700;line-height:1.2;margin:0 0 8px}
+.numbered{list-style:none;margin:0;padding:0;display:grid;gap:10px;counter-reset:n}
+.numbered li{counter-increment:n;display:grid;grid-template-columns:28px 1fr;gap:10px;align-items:start;font-size:15px}
+.numbered li::before{content:counter(n);display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:700}
+.numbered small{display:block;color:var(--muted);font-size:13px}
+.bag-art{width:100%;max-width:200px;margin:0 auto;display:block}
+.scheme{width:100%;height:auto;display:block}
+.scheme .wall{fill:none;stroke:var(--muted);stroke-width:3}
+.scheme .sp{fill:var(--soft);stroke:var(--muted);stroke-width:2}
+.scheme .basket{fill:color-mix(in srgb,var(--gel) 20%,transparent);stroke:var(--gel);stroke-width:2;stroke-dasharray:5 4}
+.scheme .gel{fill:var(--gel)}
+.scheme .side-t{fill:var(--muted);font:13px sans-serif}
+.value{font-size:42px;font-weight:750;line-height:1.1}
+input[type=range]{width:100%;accent-color:var(--accent);margin:8px 0 0}
+.zones{display:flex;gap:2px;margin-top:6px;font-size:12px;text-align:center}
+.zones div{padding:4px 2px;border-radius:6px;min-width:0}
+.z-ok{background:color-mix(in srgb,var(--ok) 26%,transparent)}
+.z-warn{background:color-mix(in srgb,var(--warn) 26%,transparent)}
+.z-err{background:color-mix(in srgb,var(--err) 26%,transparent)}
+.verdict{margin-top:14px;padding:14px 16px;border-radius:14px;background:var(--soft);border-left:5px solid var(--ok)}
+.verdict.warn{border-left-color:var(--warn)}
+.verdict.stop{border-left-color:var(--err)}
+.verdict b{display:block;font-size:19px;line-height:1.2}
+.verdict p{margin:5px 0 0;font-size:14px}
+details.more{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
+details.more summary{cursor:pointer;font-weight:600}
+.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:10px}
+.fields label{font-size:13px;font-weight:600}
+.fields input{display:block;width:100%;margin-top:4px;font:inherit;font-weight:400;color:inherit;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.timeline{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:12px}
+.timeline li{position:relative;padding:14px;background:var(--soft);border-radius:16px}
+.timeline b{display:block;font-size:15px}
+.timeline span{display:block;font-size:13px;color:var(--muted);margin-top:3px}
+.timeline svg{width:34px;height:34px;margin-bottom:6px;display:block}
+.seg{display:flex;flex-wrap:wrap;gap:6px}
+.seg button{font-size:14px;font-weight:600;padding:8px 14px;background:var(--soft);border:0;border-radius:999px}
+.seg button[aria-pressed=true]{background:var(--accent);color:var(--on-accent)}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.steps label{display:grid;grid-template-columns:20px 1fr;gap:10px;padding:10px 12px;background:var(--soft);border-radius:12px;cursor:pointer}
+.steps input{margin:3px 0 0;width:17px;height:17px;accent-color:var(--ok)}
+.steps b{display:block;font-size:14px}
+.steps small{display:block;color:var(--muted);font-size:13px}
+.steps input:checked~span b{color:var(--muted);text-decoration:line-through}
+.progress{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:10px;font-size:14px;color:var(--muted)}
+.stages{display:flex;gap:3px;margin-bottom:12px}
+.stage{min-width:0;font-size:12px;color:var(--muted)}
+.stage i{display:block;height:8px;border-radius:4px;background:var(--soft);margin-bottom:4px;overflow:hidden}
+.stage i u{display:block;height:100%;background:var(--ok)}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,400px),1fr));gap:16px;align-items:start}
+.wizard{max-width:980px;width:100%}
+.wiz-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px;font-size:13px;color:var(--muted)}
+.dots{display:flex;gap:4px;flex:1;max-width:260px}
+.dots i{height:6px;flex:1;border-radius:3px;background:var(--soft)}
+.dots i.on{background:var(--accent)}
+.wiz-q{font-size:24px;font-weight:700;line-height:1.2;margin:10px 0 14px}
+.wiz-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.wiz-grid.small{grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}
+.wiz-grid .pick b{font-size:15px}
+.chip{padding:10px 12px;background:var(--soft);border:2px solid transparent;border-radius:12px;font-weight:600;font-size:14px;text-align:left}
+.chip:hover{border-color:var(--line)}
+.chip.first{background:color-mix(in srgb,var(--accent) 12%,var(--card))}
+.brand-chip{display:flex;align-items:center;gap:10px;line-height:1.25}
+.brand-badge{flex:none;display:grid;place-items:center;width:30px;height:30px;border-radius:9px;color:#fff;font-size:14px;font-weight:800}
+.back{margin-top:14px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
+.tile{padding:14px;background:var(--soft);border-radius:16px}
+.tile svg{width:30px;height:30px;display:block;margin-bottom:4px;color:var(--accent)}
+.tile small{display:block;font-size:13px;color:var(--muted)}
+.tile b{display:block;font-size:30px;font-weight:750;line-height:1.1}
+.tile b.text{font-size:18px;line-height:1.25}
+.res-title{font-size:15px;font-weight:700;margin:18px 0 0}
+.recs{margin:8px 0 0;padding:0;list-style:none;display:grid;gap:6px;font-size:14px}
+.recs li{padding:10px 12px;background:var(--soft);border-radius:12px}
+.btn-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.faq{columns:2 460px;column-gap:28px}
+details.q-item{border-top:1px solid var(--line);padding:10px 0;break-inside:avoid}
+details.q-item:first-child{border-top:0}
+details.q-item summary{cursor:pointer;font-weight:600}
+details.q-item p{margin:6px 0 0;font-size:14px}
+.sources{font-size:13px;color:var(--muted)}
+.sources a{color:var(--accent)}
+.sources ul{margin:6px 0 0;padding-left:18px;columns:2 320px}
+@media (max-width:1050px){.dry-layout{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:900px){
+  .shell{grid-template-columns:minmax(0,1fr);gap:14px;padding-top:16px}
+  .side{position:static;gap:10px}
+  nav{display:flex;gap:4px;overflow-x:auto;margin:0 -16px;padding:2px 16px;scrollbar-width:none}
+  nav::-webkit-scrollbar{display:none}
+  .tab{flex:none;white-space:nowrap}
+  .tab small{display:none}
+  .answer-card{grid-template-columns:minmax(0,1fr)}
+  .big{font-size:36px}
+  .panel>h2{font-size:24px}
+  .hero-spool svg{width:84px;height:84px}
+  .card{padding:16px}
+}
+</style></head><body><div class="shell">
+
+<aside class="side">
+<h1>Сушка и пластик в QIDI Box</h1>
+<nav role="tablist" aria-label="Разделы" aria-orientation="vertical" id="tabs"></nav>
+<p class="legend">Черновик. <span class="tag qidi">QIDI</span> написано у QIDI, <span class="tag own">оценка</span> мой совет, у QIDI такого нет.</p>
+</aside>
+
+<div>
+<section class="panel" id="plastic" role="tabpanel" aria-labelledby="tab-plastic" tabindex="-1">
+<h2>Как сушить мою катушку</h2>
+<div class="dry-layout">
+<div class="card filters">
+<div><span class="group-title">Пластик</span><div class="pick-grid" id="filament" role="group" aria-label="Пластик"></div></div>
+<div><span class="group-title">Катушка</span><div class="pick-grid" id="spool" role="group" aria-label="Катушка"></div></div>
+</div>
+<div class="card hero">
+<div class="hero-top">
+<div class="hero-spool" id="hero-spool" aria-hidden="true"></div>
+<div role="status"><div class="state" id="hero-state"></div><div class="big" id="hero-big"></div></div>
+</div>
+<div class="gauge">
+<div class="bar-wrap">
+<div class="pin" id="g-pin"></div>
+<div class="bar"><i class="range" id="g-range"></i><i class="over" id="g-over"></i></div>
+</div>
+<div class="ticks" id="g-ticks" aria-hidden="true"></div>
+<ul class="keys" id="g-keys"></ul>
+</div>
+<div class="hero-notes" id="hero-notes"></div>
+<button class="link" type="button" data-go="steps-panel">Как запустить сушку по шагам</button>
+</div>
+</div>
+</section>
+
+<section class="panel" id="gel-panel" role="tabpanel" aria-labelledby="tab-gel-panel" tabindex="-1" hidden>
+<h2>Силикагель</h2>
+<p class="intro">Выбери, что хочешь узнать.</p>
+<div class="questions" id="gel-questions" role="tablist" aria-label="Вопросы о силикагеле"></div>
+
+<div class="card" data-gel="where">
+<div class="answer-card">
+<div>
+<p class="lead">Пакет кладут в Box целиком</p>
+<ol class="numbered">
+<li><span>Сними внешний прозрачный пакет<small><span class="tag qidi">QIDI</span> Через него влага не проходит.</small></span></li>
+<li><span>Внутренний пакет не вскрывай<small><span class="tag qidi">QIDI</span> Он держит гранулы. Ничего не высыпай.</small></span></li>
+<li><span>Положи пакет внутрь Box<small><span class="tag own">оценка</span> Вероятно, в корзинку у задней стенки. Это со слов пользователей, QIDI место не называет.</small></span></li>
+</ol>
+</div>
+<svg class="scheme" viewBox="0 0 480 230" role="img" aria-label="Условная схема Box сверху: четыре катушки и две корзинки с силикагелем у задней стенки">
+<text class="side-t" x="24" y="20">задняя стенка</text>
+<text class="side-t" x="240" y="226" text-anchor="middle">перед</text>
+<rect class="wall" x="20" y="28" width="440" height="180" rx="14"/>
+<circle class="sp" cx="85" cy="145" r="42"/><circle class="sp" cx="85" cy="145" r="12"/><circle class="sp" cx="187" cy="145" r="42"/><circle class="sp" cx="187" cy="145" r="12"/><circle class="sp" cx="293" cy="145" r="42"/><circle class="sp" cx="293" cy="145" r="12"/><circle class="sp" cx="395" cy="145" r="42"/><circle class="sp" cx="395" cy="145" r="12"/>
+<rect class="basket" x="60" y="38" width="120" height="44" rx="8"/><rect class="basket" x="300" y="38" width="120" height="44" rx="8"/>
+<g class="gel"><circle cx="85" cy="55" r="5"/><circle cx="110" cy="66" r="5"/><circle cx="135" cy="55" r="5"/><circle cx="158" cy="66" r="5"/><circle cx="325" cy="55" r="5"/><circle cx="350" cy="66" r="5"/><circle cx="375" cy="55" r="5"/><circle cx="398" cy="66" r="5"/></g>
+</svg>
+</div>
+<p class="note">Схема условная и с твоим Box не сверена. Фото покажет точное место.</p>
+</div>
+
+<div class="card" data-gel="full" hidden>
+<div class="answer-card">
+<div>
+<p class="lead">Посмотри на цифру на экране</p>
+<p class="hint" style="margin:0">Box должен стоять закрытым сутки и без нагрева. При нагреве цифра падает сама и ни о чём не говорит.</p>
+</div>
+<div>
+<div class="value"><output id="rh-value">30</output>%</div>
+<input id="rh" type="range" min="5" max="80" value="30" aria-label="Влажность в Box, процентов">
+<div class="zones" aria-hidden="true"><div class="z-ok" style="width:20%">цель</div><div class="z-warn" style="width:26.67%">терпимо</div><div class="z-err" style="width:53.33%">менять</div></div>
+<div class="verdict" id="rh-result" role="status"></div>
+</div>
+</div>
+<details class="more"><summary>Проверить точнее, на весах</summary>
+<p class="hint" style="margin:8px 0 0">Новый пакет взвесь сразу и запиши вес. Подойдут кухонные весы, лучше с шагом 0,1 г.</p>
+<div class="fields">
+<label>Новый пакет, г<input id="w-dry" type="number" min="1" step="0.1" inputmode="decimal"></label>
+<label>Сейчас, г<input id="w-now" type="number" min="1" step="0.1" inputmode="decimal"></label>
+</div>
+<div class="verdict" id="w-result" role="status"></div>
+<p class="note"><span class="tag own">оценка</span> Порог +10% мой ориентир, у QIDI порога нет.</p>
+</details>
+</div>
+
+<div class="card" data-gel="often" hidden>
+<p class="lead">Проверяй раз в месяц</p>
+<p class="hint"><span class="tag own">оценка</span> QIDI пишет только «проверять регулярно», без срока.</p>
+<ol class="timeline">
+<li><svg viewBox="0 0 34 34" aria-hidden="true"><rect x="7" y="9" width="20" height="20" rx="4" fill="var(--gel)"/><path d="M12 9V6h10v3" fill="none" stroke="var(--muted)" stroke-width="2"/></svg><b>Новый пакет</b><span>Взвесь, запиши вес и положи в Box.</span></li>
+<li><svg viewBox="0 0 34 34" aria-hidden="true"><rect x="5" y="8" width="24" height="18" rx="4" fill="none" stroke="var(--accent)" stroke-width="2.5"/><path d="M11 20l4-5 3 3 5-6" fill="none" stroke="var(--accent)" stroke-width="2.5"/></svg><b>Перед печатью</b><span>Взгляни на цифру на экране.</span></li>
+<li><svg viewBox="0 0 34 34" aria-hidden="true"><rect x="6" y="8" width="22" height="20" rx="4" fill="none" stroke="var(--accent)" stroke-width="2.5"/><path d="M6 14h22M12 5v6M22 5v6" stroke="var(--accent)" stroke-width="2.5"/></svg><b>Раз в месяц</b><span>Сутки без нагрева, затем цифра или весы.</span></li>
+<li><svg viewBox="0 0 34 34" aria-hidden="true"><path d="M17 4c5 7 9 11 9 16a9 9 0 0 1-18 0c0-5 4-9 9-16z" fill="var(--err)"/></svg><b>Выше 35% или вес +10%</b><span>Пора заменить пакет.</span></li>
+</ol>
+</div>
+
+<div class="card" data-gel="old" hidden>
+<p class="lead">Что делать со старым пакетом</p>
+<div class="seg" id="gel" role="group" aria-label="Что делать со старым пакетом"></div>
+<div class="verdict" id="gel-result" role="status"></div>
+</div>
+</section>
+
+<section class="panel" id="steps-panel" role="tabpanel" aria-labelledby="tab-steps-panel" tabindex="-1" hidden>
+<h2>Сушка по шагам</h2>
+<div class="two">
+<div class="card">
+<div class="stages" id="stages" aria-hidden="true"></div>
+<ol class="steps" id="steps"></ol>
+<div class="progress"><span id="steps-count"></span><button class="action" id="steps-reset" type="button">Начать заново</button></div>
+<p class="note">Шаги 2, 4 и 5 пока не сверены с экраном принтера и с Box.</p>
+</div>
+<div class="card">
+<h3>Что ставить на экране</h3>
+<p class="hint" id="steps-choice"></p>
+<div class="big" id="steps-big"></div>
+<button class="link" style="margin-top:12px" type="button" data-go="plastic">Выбрать другой пластик или катушку</button>
+</div>
+</div>
+</section>
+
+<section class="panel" id="cheat" role="tabpanel" aria-labelledby="tab-cheat" tabindex="-1" hidden>
+<h2>Шпаргалка</h2>
+<p class="intro">Ответь на пару вопросов о пластике и получишь готовые настройки.</p>
+<div class="card wizard" id="wizard"></div>
+</section>
+
+<section class="panel" id="faq-panel" role="tabpanel" aria-labelledby="tab-faq-panel" tabindex="-1" hidden>
+<h2>Вопросы</h2>
+<div class="card faq">
+<details class="q-item" open><summary>Зачем открывать заднюю заглушку?</summary><p><span class="tag qidi">QIDI</span> Резиновая заглушка сзади выпускает влагу из Box во время сушки. Открыть, проветрить и сразу закрыть, иначе сушка становится хуже. При хранении она закрыта.</p><p class="note">Отсек на твоём Box я не видел. Пользователи описывают сзади ещё и крепление корзинок для силикагеля, поэтому пришли фото: если там другая деталь, поправлю этот ответ.</p></details>
+<details class="q-item"><summary>Почему испортились печатные катушки?</summary><p><span class="tag own">оценка</span> PETG сушат при 55–65 °C, а размягчается он около 70–80 °C. Запас маленький, и тонкая печатная катушка под весом пластика со временем плывёт. QIDI тоже предупреждает, что выше предела катушка деформируется необратимо. Обдув тут не главная причина, и есть ли он в Box, я не нашёл.</p></details>
+<details class="q-item"><summary>Можно ли сушить во время печати?</summary><p><span class="tag qidi">QIDI</span> Да, Box это поддерживает. Но это скорее поддержание сухости: нейлон, месяц пролежавший открытым, так не восстановить.</p></details>
+<details class="q-item"><summary>Как понять, что пора сушить?</summary><p><span class="tag own">оценка</span> Треск и пар из сопла, много паутины, шероховатая поверхность, ломкий PLA. Без этих признаков катушка из вакуума сушки обычно не требует.</p></details>
+<details class="q-item"><summary>Какие катушки подходят?</summary><p><span class="tag qidi">QIDI</span> Ширина 50–72 мм, диаметр 195–202 мм. Картонные не рекомендуются из-за пыли и трения, для них нужен переходник.</p></details>
+<details class="q-item"><summary>Почему в профилях сушка у всех пластиков одна?</summary><p><span class="tag qidi">QIDI</span> В профилях QIDI Studio у всех пластиков стоит 40 °C и 8 часов, а в списке материалов принтера 45 °C и 12 часов. Для разных пластиков эти цифры не различаются, поэтому на вкладке «Пластик» температуры взяты со страницы QIDI о сушке.</p></details>
+</div>
+<section class="sources">
+<strong>Откуда данные.</strong> Официальное руководство целиком прочитать не удалось: страницы с ним закрыты для автоматического чтения, фраза про заглушку, шаги сушки и совет «проверять силикагель регулярно» взяты из выдержек поиска. Настройки печати взяты из профилей QIDI Studio 02.07.02.73 для Q2 с соплом 0,4 мм.
+<ul>
+<li><a href="https://qidi3d.com/blogs/news/mastering-filament-drying-techniques">QIDI: температуры и время сушки</a></li>
+<li><a href="https://qidi3d.com/blogs/news/qidi-box-guide-multi-color-filament-system">QIDI: руководство по Box</a></li>
+<li><a href="https://uk.qidi3d.com/products/desiccant-for-qidi-box-4">QIDI: силикагель для Box</a></li>
+<li><a href="https://device.report/manual/17611115">Руководство QIDI Box на device.report</a></li>
+<li><a href="https://www.sigmaaldrich.com/product/mm/101969">Sigma-Aldrich: нагрев пакетов и силикагеля</a></li>
+<li><a href="https://www.printables.com/model/1537736-qidi-box-internal-desiccant-holder">Printables: держатель вместо двух корзинок Box (выдержка поиска)</a></li>
+<li><a href="https://www.printables.com/model/1392744-desiccant-module-for-qidi-box-keep-your-filament-a">Printables: модуль на винты задних лотков (выдержка поиска)</a></li>
+<li><a href="https://labresource.ucsf.edu/sites/labresource.ucsf.edu/files/drystoragecabinets_protocol.pdf">UCSF: порог 35% для сухих шкафов, не про Box</a></li>
+</ul>
+</section>
+</section>
+</div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const BOX_MAX=65;
+// min/max/use: QIDI's drying range and the value suggested inside it. color only tints the spool picture.
+const FILAMENTS={
+  PLA:{min:45,max:55,use:50,color:"#3fae74"},
+  PETG:{min:55,max:65,use:60,color:"#3f8fd8"},
+  "ABS / ASA":{min:60,max:70,use:65,color:"#e07f35"},
+  TPU:{min:40,max:50,use:45,color:"#a765d3",note:"TPU нет в списке пластиков, для которых QIDI заявляет сушку в Box."},
+  "Нейлон (PA)":{min:70,max:80,use:75,color:"#c6a93d",note:"Нужна сушилка или печь: QIDI указывает для PA 70–80 °C и 8–12 часов."}
+};
+// limit: my conservative estimate for a thin printed spool, not a QIDI figure.
+const SPOOLS={
+  "Заводская":{flange:"#55554f",sub:"пластиковая"},
+  "Картонная":{flange:"#b58a5b",sub:"нужен переходник",note:"QIDI не рекомендует картон в Box из-за пыли и трения. Нужен переходник."},
+  "Печатная PLA":{limit:45,flange:"#3fae74",printed:true,sub:"до 45 °C"},
+  "Печатная PETG":{limit:50,flange:"#3f8fd8",printed:true,sub:"до 50 °C"},
+  "Печатная ABS / ASA":{limit:65,flange:"#e07f35",printed:true,sub:"до 65 °C"}
+};
+function spoolArt(filament,flange,printed){
+  const lines=printed?[34,40,46,52,58,64,70].map(y=>`<path d="M${50-Math.sqrt(1600-(y-50)**2)} ${y}H${50+Math.sqrt(1600-(y-50)**2)}" stroke="#fff" stroke-opacity=".35" stroke-width="1.4"/>`).join(""):"";
+  return `<svg viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="46" fill="${flange}"/>${lines}<circle cx="50" cy="50" r="33" fill="${filament}"/><circle cx="50" cy="50" r="26" fill="none" stroke="#000" stroke-opacity=".13" stroke-width="1.5"/><circle cx="50" cy="50" r="19" fill="none" stroke="#000" stroke-opacity=".13" stroke-width="1.5"/><circle cx="50" cy="50" r="13" fill="${flange}"/><circle cx="50" cy="50" r="6" fill="var(--card)"/></svg>`;
+}
+
+const TABS=[["plastic","Пластик","Температура сушки"],["gel-panel","Силикагель","Куда и когда менять"],["steps-panel","По шагам","Сушка на принтере"],["cheat","Шпаргалка","Подбор настроек"],["faq-panel","Вопросы","И источники"]];
+const tabButtons=TABS.map(([id,title,sub])=>{
+  const b=document.createElement("button");
+  b.type="button";b.className="tab";b.id="tab-"+id;b.setAttribute("role","tab");b.setAttribute("aria-controls",id);
+  const s=document.createElement("small");s.textContent=sub;b.append(title,s);
+  b.onclick=()=>openTab(id);
+  $("tabs").append(b);return b;
+});
+function openTab(id,focus){
+  if(!TABS.some(t=>t[0]===id))id=TABS[0][0];
+  TABS.forEach(([t],i)=>{
+    const on=t===id;$(t).hidden=!on;
+    tabButtons[i].setAttribute("aria-selected",String(on));tabButtons[i].tabIndex=on?0:-1;
+  });
+  history.replaceState(null,"","#"+id);
+  const current=tabButtons.find(b=>b.tabIndex===0);
+  if(focus)current.focus();
+  current.scrollIntoView({block:"nearest",inline:"nearest"});
+}
+$("tabs").onkeydown=e=>{
+  const step={ArrowDown:1,ArrowRight:1,ArrowUp:-1,ArrowLeft:-1}[e.key];
+  if(!step)return;
+  e.preventDefault();
+  const i=tabButtons.indexOf(document.activeElement);
+  openTab(TABS[(i+step+TABS.length)%TABS.length][0],true);
+};
+document.addEventListener("click",e=>{
+  const go=e.target.closest("[data-go]");
+  if(!go)return;
+  openTab(go.dataset.go);
+  window.scrollTo(0,0);
+});
+
+// Single-choice group of picture buttons; returns {get,set}.
+function picker(host,items,initial,onchange){
+  let current=initial;
+  const buttons=items.map(({name,art,sub})=>{
+    const b=document.createElement("button");b.type="button";b.className="pick";b.dataset.name=name;
+    b.innerHTML=art;
+    const t=document.createElement("b");t.textContent=name;b.append(t);
+    if(sub){const s=document.createElement("small");s.textContent=sub;b.append(s)}
+    b.onclick=()=>set(name);
+    host.append(b);return b;
+  });
+  const paint=()=>buttons.forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.name===current)));
+  const set=name=>{current=name;paint();onchange(current)};
+  paint();
+  return {get:()=>current,set};
+}
+function dryingPlan(fil,spool){
+  const f=FILAMENTS[fil],s=SPOOLS[spool];
+  const notes=[f.note,s.note];
+  if(f.min>BOX_MAX)return {cls:"stop",big:"Box не подойдёт",limit:BOX_MAX,lines:[`Нужно от ${f.min} °C, а максимум Box ${BOX_MAX} °C.`,...notes]};
+  const limit=Math.min(BOX_MAX,s.limit===undefined?BOX_MAX:s.limit);
+  if(limit<f.min)return {cls:"stop",big:"Не сушить на этой катушке",limit,warp:true,
+    lines:[`${fil} сушат от ${f.min} °C, а катушка «${spool}» надёжна примерно до ${limit} °C (оценка).`,"Перемотай пластик на заводскую или ABS/ASA катушку.",...notes]};
+  const temp=Math.min(f.use,limit);
+  const lowered=temp<f.use;
+  return {cls:lowered||notes.some(Boolean)?"warn":"",big:`${temp} °C, ${lowered?"6":"4–6"} ч`,temp,limit,
+    lines:[`QIDI для ${fil}: ${f.min}–${f.max} °C, 4–6 часов.`,lowered?`Снижено из-за катушки: для неё предел около ${limit} °C (оценка), поэтому дольше.`:"",...notes]};
+}
+const G_MIN=35,G_MAX=85;
+const gaugePct=t=>(t-G_MIN)/(G_MAX-G_MIN)*100;
+[40,50,60,70,80].forEach(t=>{const s=document.createElement("span");s.style.left=gaugePct(t)+"%";s.textContent=t+"°";$("g-ticks").append(s)});
+function key(color,text){
+  const li=document.createElement("li"),i=document.createElement("i");
+  i.style.background=color;li.append(i,text);return li;
+}
+const STATE={"":["ok","Можно"],warn:["warn","Можно, с оговоркой"],stop:["stop","Нельзя"]};
+function paintDrying(){
+  const fil=filPick.get(),spool=spoolPick.get(),plan=dryingPlan(fil,spool),f=FILAMENTS[fil],s=SPOOLS[spool];
+  const [cls,word]=STATE[plan.cls];
+  $("hero-state").className="state "+cls;$("hero-state").replaceChildren(document.createElement("i"),word);
+  $("hero-big").textContent=plan.big;$("hero-big").className="big"+(plan.temp===undefined?" long":"");
+  $("hero-spool").className="hero-spool"+(plan.warp?" warp":"");
+  $("hero-spool").innerHTML=spoolArt(f.color,s.flange,s.printed);
+  $("hero-notes").replaceChildren(...plan.lines.filter(Boolean).map(t=>{const p=document.createElement("p");p.textContent=t;return p}));
+  $("g-range").style.left=gaugePct(f.min)+"%";$("g-range").style.width=gaugePct(f.max)-gaugePct(f.min)+"%";
+  $("g-over").style.left=gaugePct(plan.limit)+"%";$("g-over").style.right="0";
+  $("g-pin").style.display=plan.temp===undefined?"none":"";
+  if(plan.temp!==undefined){$("g-pin").style.left=gaugePct(plan.temp)+"%";$("g-pin").textContent=plan.temp+"°"}
+  const bySpool=s.limit===plan.limit;
+  $("g-keys").replaceChildren(
+    key("var(--accent)",`Нужно пластику ${f.min}–${f.max} °C`),
+    key("var(--err)",bySpool?`Выше ${plan.limit} °C катушка может поплыть`:`Выше ${plan.limit} °C Box не греет`)
+  );
+  $("steps-choice").textContent=`${fil}, катушка «${spool}».`;
+  $("steps-big").textContent=plan.big;$("steps-big").className="big"+(plan.temp===undefined?" long":"");
+}
+const filPick=picker($("filament"),Object.entries(FILAMENTS).map(([name,f])=>({name,art:spoolArt(f.color,"#55554f")})),"PETG",()=>paintDrying());
+const spoolPick=picker($("spool"),Object.entries(SPOOLS).map(([name,s])=>({name,sub:s.sub,art:spoolArt("var(--soft)",s.flange,s.printed)})),"Заводская",()=>paintDrying());
+paintDrying();
+
+function verdict(id,cls,big,lines){
+  const box=$(id);box.className="verdict"+(cls?" "+cls:"");
+  const b=document.createElement("b");b.textContent=big;
+  box.replaceChildren(b,...lines.filter(Boolean).map(t=>{const p=document.createElement("p");p.textContent=t;return p}));
+}
+const GEL_ICON={
+  where:'<rect x="9" y="8" width="22" height="26" rx="4" fill="#e8913a" opacity=".35"/><circle cx="16" cy="16" r="2.5" fill="#e8913a"/><circle cx="24" cy="20" r="2.5" fill="#e8913a"/><circle cx="17" cy="26" r="2.5" fill="#e8913a"/>',
+  full:'<path d="M20 5c6 8 10 13 10 19a10 10 0 0 1-20 0c0-6 4-11 10-19z" fill="#3f8fd8"/>',
+  often:'<rect x="7" y="9" width="26" height="24" rx="5" fill="none" stroke="#3f8fd8" stroke-width="3"/><path d="M7 16h26M14 5v7M26 5v7" stroke="#3f8fd8" stroke-width="3"/>',
+  old:'<path d="M11 13h18l-2 21H13zM8 13h24M16 13V7h8v6" fill="none" stroke="#e07f35" stroke-width="3"/>'
+};
+const GEL_Q=[["where","Куда положить?"],["full","Он уже набрал влагу?"],["often","Как часто проверять?"],["old","Что делать со старым?"]];
+const gelButtons=GEL_Q.map(([id,title])=>{
+  const b=document.createElement("button");
+  b.type="button";b.className="q";b.setAttribute("role","tab");b.dataset.q=id;
+  b.innerHTML=`<svg viewBox="0 0 40 40" aria-hidden="true">${GEL_ICON[id]}</svg>`;
+  b.append(title);b.onclick=()=>openGel(id);
+  $("gel-questions").append(b);return b;
+});
+function openGel(id){
+  gelButtons.forEach(b=>b.setAttribute("aria-selected",String(b.dataset.q===id)));
+  document.querySelectorAll("[data-gel]").forEach(c=>{c.hidden=c.dataset.gel!==id});
+}
+openGel("where");
+
+function paintHumidity(){
+  const v=+$("rh").value;$("rh-value").textContent=v;
+  if(v<=20)verdict("rh-result","","Менять не нужно",["Цель QIDI для хранения: ниже 20%, для нейлона ниже 15%."]);
+  else if(v<=35)verdict("rh-result","warn","Пока можно оставить",["Выше цели QIDI, но для нескольких дней терпимо (оценка). Проверь, что Box и заглушка закрыты."]);
+  else verdict("rh-result","stop","Пора менять пакет",["Если Box и заглушка закрыты, а цифра держится выше 35%, силикагель насытился (оценка)."]);
+}
+$("rh").oninput=paintHumidity;paintHumidity();
+
+const WEIGHT_STORE="qidi-gel-weight";
+function paintWeight(){
+  const dry=+$("w-dry").value,now=+$("w-now").value;
+  try{localStorage.setItem(WEIGHT_STORE,$("w-dry").value)}catch{}
+  if(!(dry>0)||!(now>0)){verdict("w-result","warn","Введи оба веса",[]);return}
+  const gain=(now-dry)/dry*100,shown=gain.toFixed(1).replace(".",",");
+  if(gain<0)verdict("w-result","warn","Вес меньше исходного",["Проверь весы и записанный вес."]);
+  else if(gain<5)verdict("w-result","",`+${shown}%: ещё работает`,[]);
+  else if(gain<10)verdict("w-result","warn",`+${shown}%: набирает влагу`,["Пока оставь, но следи за цифрой на экране."]);
+  else verdict("w-result","stop",`+${shown}%: пора менять`,[]);
+}
+try{$("w-dry").value=localStorage.getItem(WEIGHT_STORE)||""}catch{}
+$("w-dry").oninput=$("w-now").oninput=paintWeight;paintWeight();
+
+const GEL={
+  "Купить новый":["","Проще всего",["Четыре пакета QIDI стоят около £4 (артикул BOX018). QIDI не пишет, можно ли их восстанавливать."]],
+  "Сушить в духовке":["warn","Целым пакетом, до 80 °C",["Выше 80 °C плавится клей пакета (Sigma-Aldrich). Проверь духовку термометром и не оставляй её без присмотра.","Взвешивай каждый час, пока вес не вернётся к исходному. Остуди в закрытой банке (оценка)."]],
+  "Чего не делать":["stop","Три плохие идеи",["Вскрывать и высыпать: гранулы рассыпятся, QIDI просит не вскрывать. Россыпью прокаливают только гранулы из банки.","Сушить в камере принтера: просыпанные гранулы попадут в механику.","Надеяться на нагрев Box: 65 °C вернут лишь малую часть (оценка)."]]
+};
+const gelButtonsOld=Object.keys(GEL).map(name=>{
+  const b=document.createElement("button");b.type="button";b.textContent=name;
+  b.onclick=()=>paintGel(name);$("gel").append(b);return b;
+});
+function paintGel(name){
+  gelButtonsOld.forEach(b=>b.setAttribute("aria-pressed",String(b.textContent===name)));
+  const [cls,big,lines]=GEL[name];verdict("gel-result",cls,big,lines);
+}
+paintGel("Купить новый");
+
+const STEPS=[
+  ["Проверь катушку","Заводская или подходящая печатная: температура указана рядом."],
+  ["Сними внешний пакет с силикагеля и положи его в Box","QIDI место не называет, схема в разделе «Силикагель»."],
+  ["Закрой Box","Камера должна быть закрыта."],
+  ["На экране принтера открой BOX Drying","Раздел инструментов на экране."],
+  ["Выбери пластик, температуру и время, нажми Start","Цифры в профилях QIDI одинаковые, поэтому задавай их сам."],
+  ["Если нужно выпустить влагу, открой заглушку сзади и сразу закрой","Надолго не оставляй: сушка станет хуже."],
+  ["Дождись конца и закрой всё","Ориентир времени, а не цифра влажности: при нагреве она падает сама."]
+];
+const STORE="qidi-drying-steps";
+let done=[];
+try{done=JSON.parse(localStorage.getItem(STORE))||[]}catch{}
+const STAGES=[["Подготовка",[0,1,2]],["Запуск",[3,4]],["Нагрев",[5]],["Конец",[6]]];
+$("stages").replaceChildren(...STAGES.map(([name,items])=>{
+  const d=document.createElement("div"),i=document.createElement("i"),u=document.createElement("u");
+  d.className="stage";d.style.flex=String(items.length);i.append(u);d.append(i,name);return d;
+}));
+function paintCount(){
+  $("steps-count").textContent=`Сделано ${done.length} из ${STEPS.length}`;
+  STAGES.forEach(([,items],n)=>{$("stages").children[n].querySelector("u").style.width=items.filter(x=>done.includes(x)).length/items.length*100+"%"});
+}
+function saveSteps(){try{localStorage.setItem(STORE,JSON.stringify(done))}catch{}paintCount()}
+function renderSteps(){
+  $("steps").replaceChildren(...STEPS.map(([title,detail],i)=>{
+    const li=document.createElement("li"),label=document.createElement("label"),input=document.createElement("input"),text=document.createElement("span");
+    const b=document.createElement("b"),small=document.createElement("small");
+    input.type="checkbox";input.checked=done.includes(i);
+    input.onchange=()=>{done=input.checked?[...done,i]:done.filter(x=>x!==i);saveSteps()};
+    b.textContent=`${i+1}. ${title}`;small.textContent=detail;
+    text.append(b,small);label.append(input,text);li.append(label);return li;
+  }));
+  paintCount();
+}
+$("steps-reset").onclick=()=>{done=[];saveSteps();renderSteps()};
+renderSteps();
+
+// Generated from QIDI Studio's Q2 0.4 nozzle profiles:
+// name, family, nozzle, low, high, first layer, bed, chamber, fan min, fan max, max flow.
+const PRINT=[
+  ["Bambu ABS", "ABS", 260, 240, 280, 250, 90, 55, 20, 80, 24.5],
+  ["Bambu PETG", "PETG", 250, 220, 270, 240, 80, 0, 10, 40, 13],
+  ["Bambu PLA", "PLA", 210, 190, 240, 210, 60, 0, 100, 100, 24.5],
+  ["Generic ABS", "ABS", 250, 240, 280, 250, 90, 0, 10, 80, 17],
+  ["Generic PC", "PC", 280, 260, 290, 270, 110, 60, 10, 60, 10],
+  ["Generic PETG", "PETG", 250, 220, 270, 245, 80, 0, 40, 90, 12],
+  ["Generic PLA", "PLA", 220, 190, 240, 220, 60, 0, 100, 100, 14],
+  ["Generic PLA Silk", "PLA", 220, 190, 240, 220, 55, 0, 100, 100, 7.5],
+  ["Generic PLA+", "PLA", 230, 190, 240, 230, 60, 0, 100, 100, 12],
+  ["Generic TPU 95A", "TPU", 230, 200, 250, 230, 35, 0, 100, 100, 4],
+  ["QIDI ABS Odorless", "ABS", 260, 240, 280, 250, 90, 55, 10, 80, 22],
+  ["QIDI ABS Rapido", "ABS", 260, 240, 280, 250, 90, 55, 20, 80, 24.5],
+  ["QIDI ABS Rapido Metal", "ABS", 260, 240, 280, 250, 90, 55, 20, 80, 24.5],
+  ["QIDI ABS-GF", "ABS", 270, 240, 280, 260, 100, 0, 20, 20, 12],
+  ["QIDI ASA", "ASA", 270, 240, 280, 270, 90, 55, 10, 50, 16],
+  ["QIDI ASA-Aero", "ASA", 260, 240, 280, 250, 90, 60, 10, 50, 12],
+  ["QIDI ASA-CF20 Core", "ASA", 275, 260, 280, 275, 90, 55, 10, 25, 18],
+  ["QIDI PA12-CF", "PA", 280, 280, 300, 280, 80, 0, 20, 40, 8],
+  ["QIDI PA6-CF", "PA", 280, 280, 300, 280, 80, 0, 20, 40, 8],
+  ["QIDI PAHT-CF", "PA", 300, 300, 320, 300, 80, 0, 20, 40, 8],
+  ["QIDI PAHT-GF", "PA", 300, 300, 320, 300, 80, 0, 20, 20, 10],
+  ["QIDI PC/ABS-FR", "PC", 250, 240, 280, 250, 100, 55, 10, 40, 8],
+  ["QIDI PEBA 95A", "TPU", 250, 230, 260, 250, 35, 0, 100, 100, 6],
+  ["QIDI PET-CF", "PET", 280, 280, 320, 280, 80, 0, 20, 40, 8],
+  ["QIDI PET-GF", "PET", 300, 280, 320, 300, 80, 0, 20, 20, 10],
+  ["QIDI PETG Basic", "PETG", 250, 240, 280, 250, 80, 0, 10, 40, 15],
+  ["QIDI PETG Rapido", "PETG", 250, 240, 275, 250, 80, 0, 20, 40, 18],
+  ["QIDI PETG Tough", "PETG", 250, 220, 270, 240, 80, 0, 10, 40, 13],
+  ["QIDI PETG Translucent", "PETG", 250, 240, 280, 250, 80, 0, 10, 30, 8],
+  ["QIDI PETG-CF", "PETG", 255, 240, 270, 255, 80, 0, 5, 40, 11.5],
+  ["QIDI PETG-GF", "PETG", 255, 240, 270, 255, 80, 0, 20, 50, 8],
+  ["QIDI PLA Basic", "PLA", 210, 190, 240, 210, 60, 0, 100, 100, 18],
+  ["QIDI PLA Matte Basic", "PLA", 210, 190, 240, 210, 60, 0, 100, 100, 18],
+  ["QIDI PLA Rapido", "PLA", 210, 190, 240, 210, 60, 0, 100, 100, 24.5],
+  ["QIDI PLA Rapido Matte", "PLA", 210, 190, 240, 210, 60, 0, 100, 100, 24.5],
+  ["QIDI PLA Rapido Metal", "PLA", 210, 190, 240, 210, 60, 0, 100, 100, 24.5],
+  ["QIDI PLA Silk", "PLA", 220, 190, 240, 220, 55, 0, 100, 100, 7.5],
+  ["QIDI PLA-CF", "PLA", 220, 210, 250, 220, 60, 0, 100, 100, 15],
+  ["QIDI PPS-CF", "PPS", 320, 300, 350, 320, 110, 60, 0, 30, 6],
+  ["QIDI PPS-GF", "PPS", 320, 300, 350, 320, 90, 0, 10, 90, 10],
+  ["QIDI Support For PAHT", "Поддержка", 280, 260, 280, 280, 80, 0, 0, 60, 8],
+  ["QIDI Support For PET/PA", "Поддержка", 280, 260, 280, 280, 80, 0, 0, 60, 8],
+  ["QIDI TPU 95A-HF", "TPU", 230, 200, 250, 230, 35, 0, 100, 100, 4],
+  ["QIDI TPU-Aero", "TPU", 250, 230, 270, 250, 35, 0, 100, 100, 6],
+  ["QIDI TPU-GF", "TPU", 240, 240, 270, 240, 35, 0, 100, 100, 6],
+  ["QIDI UltraPA", "PA", 280, 250, 290, 280, 80, 0, 20, 40, 4],
+  ["QIDI UltraPA-CF25", "PA", 300, 300, 320, 300, 80, 0, 20, 40, 8],
+  ["QIDI WOOD Rapido", "PLA", 210, 190, 220, 210, 60, 0, 100, 100, 18]
+];
+// dry: key in FILAMENTS, absent where QIDI's drying page gives no figure. sub is my plain-language summary.
+const FAMILIES={
+  PLA:{dry:"PLA",color:"#3fae74",sub:"самый простой"},
+  PETG:{dry:"PETG",color:"#3f8fd8",sub:"прочнее PLA"},
+  ABS:{dry:"ABS / ASA",color:"#e07f35",sub:"держит нагрев"},
+  ASA:{dry:"ABS / ASA",color:"#d65f4a",sub:"как ABS, для улицы"},
+  TPU:{dry:"TPU",color:"#a765d3",sub:"гибкий"},
+  PA:{dry:"Нейлон (PA)",color:"#c6a93d",sub:"нейлон, очень прочный"},
+  PC:{color:"#6f8fa8",sub:"термостойкий"},
+  PET:{color:"#4aa7a0",sub:"инженерный"},
+  PPS:{color:"#8a7d6b",sub:"инженерный, жаростойкий"},
+  "Поддержка":{color:"#9a9a92",sub:"для поддержек"}
+};
+// Thresholds here are my estimate, QIDI gives none. wet: whether this answer calls for drying.
+const STORAGE=[
+  {name:"Новая, только из вакуумного пакета",wet:false,why:"Катушка только из вакуума: обычно сушка не нужна.",art:'<rect x="9" y="6" width="22" height="28" rx="4" fill="none" stroke="#3f8fd8" stroke-width="2.5" stroke-dasharray="4 3"/><circle cx="20" cy="20" r="7" fill="#3f8fd8"/>'},
+  {name:"Лежала в закрытом Box с силикагелем",wet:false,why:"Катушка хранилась в сухом Box: обычно сушка не нужна.",art:'<rect x="6" y="10" width="28" height="22" rx="4" fill="none" stroke="#3fae74" stroke-width="2.5"/><circle cx="20" cy="21" r="6" fill="#3fae74"/>'},
+  {name:"Лежала открытой неделю или дольше",wet:true,why:"Катушка лежала открытой: лучше просушить.",art:'<circle cx="20" cy="20" r="11" fill="#e07f35"/><path d="M28 6c2.5 3.500 4 5.500 4 7.500a4 4 0 0 1-8 0c0-2 1.500-4 4-7.500z" fill="#3f8fd8"/>'},
+  {name:"Уже печатает с треском, паром или нитями",wet:true,why:"Треск, пар и нити часто говорят о влаге: сначала просуши.",art:'<path d="M20 5l16 29H4z" fill="none" stroke="#d65f4a" stroke-width="2.5" stroke-linejoin="round"/><path d="M20 15v9M20 28v1" stroke="#d65f4a" stroke-width="3" stroke-linecap="round"/>'}
+];
+// Plain monograms, not the companies' logos.
+const BRANDS={QIDI:{mark:"Q",color:"#1f5fd0"},Bambu:{mark:"B",color:"#2e9e5b"},Generic:{mark:"G",color:"#77776f"}};
+function brandChip(label,mark,color,onclick,cls){
+  const b=el("button","chip brand-chip"+(cls?" "+cls:""));b.type="button";
+  const badge=el("span","brand-badge",mark);badge.style.background=color;
+  b.append(badge,el("span","",label));b.onclick=onclick;return b;
+}
+let wiz;
+function wizReset(){wiz={family:null,profile:null,spool:null,storage:null}}
+wizReset();
+const needsSpool=()=>{const k=FAMILIES[wiz.family]?.dry;return k&&FILAMENTS[k].min<=BOX_MAX};
+function wizStep(){
+  if(!wiz.family)return "family";
+  if(!wiz.profile)return "profile";
+  if(!wiz.storage)return "storage";
+  if(wiz.storage.wet&&needsSpool()&&!wiz.spool)return "spool";
+  return "result";
+}
+function wizBack(){
+  const s=wizStep();
+  if(s==="profile")wiz.family=null;
+  else if(s==="storage")wiz.profile=null;
+  else if(s==="spool")wiz.storage=null;
+  else if(wiz.spool)wiz.spool=null;
+  else wiz.storage=null;
+  renderWizard();
+}
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e}
+function wizFrame(n,total,question){
+  const head=el("div","wiz-head"),dots=el("div","dots");
+  for(let i=1;i<=total;i++)dots.append(el("i",i<=n?"on":""));
+  head.append(dots,`Шаг ${n} из ${total}`);
+  return [head,el("div","wiz-q",question)];
+}
+function pickButton(name,sub,art,onclick){
+  const b=el("button","pick");b.type="button";b.innerHTML=art||"";
+  b.append(el("b","",name));if(sub)b.append(el("small","",sub));b.onclick=onclick;return b;
+}
+function backButton(){const b=el("button","action back","Назад");b.type="button";b.onclick=wizBack;return b}
+function wizTotal(){return wiz.family&&!needsSpool()?3:4}
+function renderWizard(){
+  const host=$("wizard"),step=wizStep();
+  if(step==="result")return renderResult(host);
+  const total=step==="spool"?4:wizTotal(),grid=el("div","wiz-grid");
+  let parts;
+  if(step==="family"){
+    parts=wizFrame(1,total,"Какой у тебя пластик?");
+    Object.entries(FAMILIES).forEach(([name,f])=>grid.append(pickButton(name,f.sub,spoolArt(f.color,"#55554f"),()=>{wiz.family=name;renderWizard()})));
+  }else if(step==="profile"){
+    parts=wizFrame(2,total,"Какая марка?");
+    grid.className="wiz-grid small";
+    const rows=PRINT.filter(r=>r[1]===wiz.family),base=rows.find(r=>r[0].startsWith("Generic"))||rows[0];
+    grid.append(brandChip("Не знаю или другая","?","#a86a00",()=>{wiz.profile=base[0];wiz.unknownBrand=true;renderWizard()},"first"));
+    rows.forEach(r=>{
+      const brand=BRANDS[r[0].split(" ")[0]];
+      grid.append(brandChip(r[0],brand.mark,brand.color,()=>{wiz.profile=r[0];wiz.unknownBrand=false;renderWizard()}));
+    });
+  }else if(step==="storage"){
+    parts=wizFrame(3,total,"Что сейчас с катушкой?");
+    grid.className="wiz-grid small";
+    STORAGE.forEach(item=>grid.append(pickButton(item.name,"",`<svg viewBox="0 0 40 40" aria-hidden="true">${item.art}</svg>`,()=>{wiz.storage=item;renderWizard()})));
+  }else{
+    parts=wizFrame(4,total,"На какой катушке пластик?");
+    const c=FAMILIES[wiz.family].color;
+    Object.entries(SPOOLS).forEach(([name,s])=>grid.append(pickButton(name,s.sub,spoolArt(c,s.flange,s.printed),()=>{wiz.spool=name;renderWizard()})));
+  }
+  host.replaceChildren(...parts,grid,...(step==="family"?[]:[backButton()]));
+}
+const TILE_ICON={
+  nozzle:'<svg viewBox="0 0 30 30" aria-hidden="true"><path d="M9 4h12v10l-4 8h-4l-4-8z" fill="currentColor"/><path d="M15 25v3" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>',
+  bed:'<svg viewBox="0 0 30 30" aria-hidden="true"><rect x="3" y="19" width="24" height="6" rx="2" fill="currentColor"/><path d="M9 15q3-3 0-6t0-6M15 15q3-3 0-6t0-6M21 15q3-3 0-6t0-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  chamber:'<svg viewBox="0 0 30 30" aria-hidden="true"><rect x="4" y="4" width="22" height="22" rx="4" fill="none" stroke="currentColor" stroke-width="3"/><rect x="10" y="17" width="10" height="4" rx="1" fill="currentColor"/></svg>',
+  dry:'<svg viewBox="0 0 30 30" aria-hidden="true"><path d="M15 3c5 7 8 11 8 15a8 8 0 0 1-16 0c0-4 3-8 8-15z" fill="currentColor"/></svg>'
+};
+function tile(icon,label,value,isText){
+  const t=el("div","tile");t.innerHTML=TILE_ICON[icon];
+  t.append(el("small","",label),el("b",isText?"text":"",value));return t;
+}
+function renderResult(host){
+  const r=PRINT.find(x=>x[0]===wiz.profile),f=FAMILIES[wiz.family],key=f.dry,spool=wiz.spool||"Заводская";
+  const plan=key?dryingPlan(key,spool):null;
+  const head=el("div","wiz-head");head.append(el("span","",wiz.unknownBrand?`${wiz.family}, обычный профиль: ${r[0]}`:r[0]));
+  const parts=[head,el("div","wiz-q","Готовые настройки")];
+  const tiles=el("div","tiles");
+  tiles.append(tile("nozzle","Сопло",r[2]+" °C"),tile("bed","Стол",r[6]+" °C"),tile("chamber","Камера",r[7]?r[7]+" °C":"без подогрева",!r[7]));
+  parts.push(tiles,el("p","note",""));
+  parts[parts.length-1].innerHTML='<span class="tag qidi">QIDI</span> Значения из профиля QIDI Studio для Q2 с соплом 0,4 мм.';
+  // Drying block
+  parts.push(el("div","res-title","Сушка"));
+  const dry=el("div","verdict");
+  if(!plan){
+    dry.className="verdict warn";
+    dry.append(el("b","","Цифр QIDI нет"),el("p","",`На странице QIDI о сушке для ${wiz.family} значений нет. Смотри этикетку катушки.`));
+  }else if(!wiz.storage.wet){
+    dry.append(el("b","","Сушить не нужно"),el("p","",`${wiz.storage.why} Если появятся треск или нити, вернись сюда (оценка).`));
+  }else{
+    const lead=plan.temp===undefined?"":`${wiz.storage.why} (оценка)`;
+    dry.className="verdict"+(plan.cls?" "+plan.cls:"");
+    dry.append(el("b","",plan.big),...[lead,...plan.lines].filter(Boolean).map(t=>el("p","",t)));
+  }
+  parts.push(dry);
+  // Recommendations (own advice, marked)
+  const recs=el("ul","recs");
+  recs.append(el("li","",`Первый слой: ${r[5]} °C.`));
+  recs.append(el("li","",`Тянутся нити: снижай сопло шагом 5 °C, не ниже ${r[3]} °C. Слабые слои: повышай, не выше ${r[4]} °C.`));
+  if(/CF|GF/.test(r[0]))recs.append(el("li","","Волокно быстро истирает обычное сопло: проверь, что сопло закалённое."));
+  const rt=el("div","res-title","Рекомендации ");rt.innerHTML+='<span class="tag own">оценка</span>';
+  parts.push(rt,recs);
+  // Actions
+  const row=el("div","btn-row"),again=el("button","action main","Подобрать другой пластик");
+  again.type="button";again.onclick=()=>{wizReset();renderWizard()};row.append(again);
+  if(plan&&wiz.storage.wet&&plan.temp!==undefined){
+    const go=el("button","action","Открыть сушку по шагам");go.type="button";
+    go.onclick=()=>{filPick.set(key);spoolPick.set(spool);openTab("steps-panel");window.scrollTo(0,0)};row.append(go);
+  }
+  const back=backButton();back.classList.remove("back");row.append(back);
+  parts.push(row);
+  host.replaceChildren(...parts);
+}
+renderWizard();
+
+window.addEventListener("hashchange",()=>openTab(location.hash.slice(1)));
+openTab(location.hash.slice(1));
+</script>
+</body></html>
