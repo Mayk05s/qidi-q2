@@ -1,5 +1,6 @@
 // The installer window. All the work happens in qidi_backend.py; this only shows what it reports.
 import AppKit
+import Network
 import SwiftUI
 
 struct Feature: Identifiable {
@@ -66,6 +67,7 @@ final class Model: ObservableObject {
     @Published var configured = true
     @Published var customLogin = false
     @Published var networkBlocked = false
+    private var askedForNetwork = false
     @Published var installed: Set<String> = []
     @Published var chosen: Set<String> = []
     @Published var found: [FoundPrinter] = []
@@ -147,6 +149,36 @@ final class Model: ObservableObject {
 
     var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+    }
+
+    private var accessProbe: NWConnection?
+
+    /// macOS asks for the Local Network permission only when the app itself reaches a local
+    /// device: the backend runs in Python, so the app knocks on the printer once on its own.
+    /// After a refusal macOS does not ask again; then only the settings page helps.
+    func requestLocalNetwork() {
+        accessProbe?.cancel()
+        let connection: NWConnection
+        if host.isEmpty {
+            connection = NWConnection(host: "224.0.0.251", port: 5353, using: .udp)
+        } else {
+            connection = NWConnection(host: NWEndpoint.Host(host), port: 7125, using: .tcp)
+        }
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready, .failed:
+                DispatchQueue.main.async {
+                    self?.accessProbe?.cancel()
+                    self?.accessProbe = nil
+                    self?.refresh()
+                }
+            default:
+                break
+            }
+        }
+        accessProbe = connection
+        connection.start(queue: .main)
+        if host.isEmpty { connection.send(content: Data([0]), completion: .contentProcessed { _ in }) }
     }
 
     func openNetworkSettings() {
@@ -232,7 +264,12 @@ final class Model: ObservableObject {
             user = message["user"] as? String ?? ""
             configured = message["configured"] as? Bool ?? false
             customLogin = message["custom_login"] as? Bool ?? false
+            let wasBlocked = networkBlocked
             networkBlocked = message["network_blocked"] as? Bool ?? false
+            if networkBlocked && !wasBlocked && !askedForNetwork {
+                askedForNetwork = true
+                requestLocalNetwork()
+            }
             installed = Set(message["features"] as? [String] ?? [])
             chosen = installed
         case "printers":
@@ -421,12 +458,17 @@ struct PrinterSidebar: View {
                     Label("Нет доступа к локальной сети", systemImage: "wifi.exclamationmark")
                         .font(.callout.bold())
                         .foregroundStyle(.red)
-                    Text("macOS не пускает программу к принтеру. Включи «QIDI Q2 Patcher» в разделе «Локальная сеть», потом нажми ↻.")
+                    Text("macOS не пускает программу к принтеру. Нажми «Разрешить» и согласись в окне macOS. Если окно не появилось, доступ уже запрещён: включи «QIDI Q2 Patcher» в настройках «Локальная сеть».")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button("Открыть настройки") { model.openNetworkSettings() }
-                        .controlSize(.small)
+                    HStack {
+                        Button("Разрешить") { model.requestLocalNetwork() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        Button("Открыть настройки") { model.openNetworkSettings() }
+                            .controlSize(.small)
+                    }
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
