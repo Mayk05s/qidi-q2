@@ -1036,6 +1036,11 @@ struct ContentView: View {
                     .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
                 }
 
+                if model.isReinstall && !model.busy {
+                    Text("Выбранные пакеты будут переустановлены")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
                 HStack {
                     Button("Диагностика") { model.diagnose() }
                         .disabled(!model.canChange || model.installed.isDisjoint(with: ["bambu", "nfc", "spools", "usage"]))
@@ -1046,14 +1051,12 @@ struct ContentView: View {
                         .disabled(!model.canChange || model.installed.isEmpty)
                     Spacer()
                     if model.busy { ProgressView().controlSize(.small) }
-                    if model.isReinstall && !model.busy {
-                        Text("Выбранные пакеты будут переустановлены").font(.caption).foregroundStyle(.secondary)
-                    }
                     Button(model.actionTitle) { confirmApply = true }
                         .buttonStyle(.borderedProminent)
                         .tint(model.actionTitle == "Обновить" ? .orange : .accentColor)
                         .disabled(!model.canRunAction)
                         .help(model.isReinstall ? "Выбранные пакеты будут переустановлены" : "")
+                        .fixedSize()
                 }
             }
             .padding(18)
