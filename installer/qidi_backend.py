@@ -75,6 +75,26 @@ def list_backups(host):
     return found
 
 
+def import_backup(host, path):
+    """Take a backup archive from anywhere, made earlier or moved away, into this printer's list.
+    It gets a fresh name, so it is not pruned at once; its own time stays in the manifest."""
+    import tarfile
+    try:
+        with tarfile.open(str(path), "r:gz") as archive:
+            manifest = json.load(archive.extractfile(remote_setup.BACKUP_MANIFEST))
+    except (OSError, KeyError, ValueError, tarfile.TarError):
+        raise Failed("Это не резервная копия QIDI Q2 Patcher: %s" % (path,))
+    if not isinstance(manifest.get("present"), list):
+        raise Failed("В копии нет списка файлов: %s" % (path,))
+    folder = BACKUP_DIR / host
+    folder.mkdir(parents=True, exist_ok=True)
+    name = time.strftime("%Y-%m-%d_%H-%M-%S") + "_imported"
+    shutil.copy(str(path), str(folder / (name + ".tar.gz")))
+    manifest.update(id=name, imported_from=str(path))
+    (folder / (name + ".json")).write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    return manifest
+
+
 def prune_backups(folder):
     """Only the newest BACKUPS_KEPT stay; the very first one, from before any patch, stays too."""
     names = sorted(p.stem for p in folder.glob("*.json"))
@@ -599,11 +619,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("command", choices=("status", "apply", "diag", "save-connection", "discover",
-                                                "backup", "backups", "restore"))
+                                                "backup", "backups", "restore", "import-backup"))
     parser.add_argument("--features", help="the whole set of packages")
     parser.add_argument("--add", default="", help="packages to install or update")
     parser.add_argument("--remove", default="", help="packages to remove")
     parser.add_argument("--backup", help="the backup to restore")
+    parser.add_argument("--file", help="a backup archive to take into the list")
     args = parser.parse_args(argv)
     names = lambda value: {name for name in value.split(",") if name}
     change = Change(None if args.features is None else names(args.features), names(args.add), names(args.remove))
@@ -644,6 +665,8 @@ def main(argv=None):
             text = "Копия %s сохранена на этом компьютере." % (printer.backup()["id"],)
         elif args.command == "restore":
             text = restore(printer, args.backup)
+        elif args.command == "import-backup":
+            text = "Копия от %s добавлена в список." % (import_backup(printer.host, args.file).get("time", "?"),)
         else:
             require_idle(printer)
             if not printer.diagnose():

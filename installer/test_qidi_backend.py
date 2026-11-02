@@ -93,6 +93,32 @@ class BackupListTests(unittest.TestCase):
                 q.BACKUP_DIR = saved
 
 
+class ImportTests(unittest.TestCase):
+    def test_backup_from_anywhere_joins_the_list_and_junk_is_refused(self):
+        import io
+        import tarfile
+        with tempfile.TemporaryDirectory() as d:
+            saved = q.BACKUP_DIR
+            q.BACKUP_DIR = pathlib.Path(d) / "backups"
+            try:
+                archive = pathlib.Path(d) / "old.tar.gz"
+                data = json.dumps({"time": "2026-10-01 10:00:00", "present": ["/x"], "absent": []}).encode()
+                with tarfile.open(str(archive), "w:gz") as tar:
+                    info = tarfile.TarInfo(q.remote_setup.BACKUP_MANIFEST)
+                    info.size = len(data)
+                    tar.addfile(info, io.BytesIO(data))
+                q.import_backup("h", archive)
+                listed = q.list_backups("h")
+                self.assertEqual(listed[0]["time"], "2026-10-01 10:00:00")
+                self.assertTrue(listed[0]["id"].endswith("_imported"))
+                junk = pathlib.Path(d) / "junk.tar.gz"
+                junk.write_bytes(b"not an archive")
+                with self.assertRaises(q.Failed):
+                    q.import_backup("h", junk)
+            finally:
+                q.BACKUP_DIR = saved
+
+
 class BlockedTests(unittest.TestCase):
     def test_no_route_means_the_permission_is_off(self):
         import errno

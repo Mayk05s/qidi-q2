@@ -213,6 +213,17 @@ final class Model: ObservableObject {
         startAction(["backup"])
     }
 
+    /// A backup archive from anywhere, chosen in the Open panel, goes into the list.
+    func importBackup() {
+        let panel = NSOpenPanel()
+        panel.title = "Выбери файл резервной копии"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.init(filenameExtension: "gz") ?? .data]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        startAction(["import-backup", "--file", url.path])
+    }
+
     func restore(_ backup: Backup) {
         startAction(["restore", "--backup", backup.id])
     }
@@ -784,12 +795,14 @@ struct BackupsView: View {
                 Spacer()
                 Button("Готово") { dismiss() }.keyboardShortcut(.defaultAction)
             }
-            Text("Перед каждой установкой программа сама сохраняет копию всего, что патч может изменить: настройки Klipper, файлы пакетов, панель, кнопку в Fluidd и окна экрана. Копии лежат на этом компьютере. Восстановление возвращает принтер к выбранной копии и перезапускает Klipper.")
+            Text("Перед каждой установкой программа сама сохраняет копию всего, что патч может изменить: настройки Klipper, файлы пакетов, панель, кнопку в Fluidd и окна экрана. Копии лежат на этом компьютере. Копию, сделанную раньше и перенесённую в другое место, можно загрузить из файла. Восстановление возвращает принтер к выбранной копии и перезапускает Klipper.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Сделать копию сейчас") { model.makeBackup() }
                     .disabled(!model.canChange)
+                Button("Загрузить копию из файла…") { model.importBackup() }
+                    .disabled(model.busy || model.host.isEmpty)
                 Button("Показать в Finder") { NSWorkspace.shared.open(model.backupFolder) }
                     .disabled(model.backups.isEmpty)
                 Spacer()
@@ -809,7 +822,10 @@ struct BackupsView: View {
                     ForEach(model.backups) { backup in
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(backup.time).font(.headline.monospacedDigit())
+                                HStack(spacing: 6) {
+                                    Text(backup.time).font(.headline.monospacedDigit())
+                                    if backup.id.hasSuffix("_imported") { Badge(text: "из файла", color: .blue) }
+                                }
                                 Text(modules(backup)).font(.callout).foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                                 Text("Пакет " + (backup.package.map { "v" + $0 } ?? "без версии")
@@ -818,6 +834,8 @@ struct BackupsView: View {
                             }
                             Spacer()
                             Button("Восстановить") { restoring = backup }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.orange)
                                 .disabled(!model.canChange)
                         }
                         .padding(10)
@@ -951,9 +969,13 @@ struct ContentView: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Модули").font(.title2.bold())
                     Spacer()
-                    Button { showBackups = true } label: { Image(systemName: "clock.arrow.circlepath") }
-                        .buttonStyle(.borderless)
-                        .help("Резервные копии")
+                    Button { showBackups = true } label: {
+                        Label("Восстановить", systemImage: "clock.arrow.circlepath")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.orange)
+                    .foregroundStyle(.orange)
+                    .help("Резервные копии и восстановление")
                     Button { filesFor = FilesTopic(id: nil) } label: { Image(systemName: "questionmark.circle") }
                         .buttonStyle(.borderless)
                         .help("Справка по пакетам")
