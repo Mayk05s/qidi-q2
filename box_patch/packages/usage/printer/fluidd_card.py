@@ -78,17 +78,23 @@ function boxCard(){
 function spoolColumns(card){
   // A spool's block is the largest one around its label that holds no other spool label:
   // Fluidd's grid columns differ with the window width, so its classes are not relied on.
-  var spans=[];
-  card.querySelectorAll("button span").forEach(function(span){
-    if(/^[1-4][A-D]$/.test(span.textContent.trim()))spans.push(span);
+  var LABEL=/^[1-4][A-D]$/,spans=[];
+  // Fluidd draws the label in a button or in the slot icon, depending on its version and the
+  // slot state: any element whose own text is the label counts.
+  card.querySelectorAll("*").forEach(function(node){
+    if(LABEL.test(node.textContent.trim())&&!Array.prototype.some.call(node.children,function(c){return LABEL.test(c.textContent.trim())}))spans.push(node);
   });
-  // The label text sits in two nested spans of the button, so labels are counted, not spans.
   function labelsIn(node){var seen={};spans.forEach(function(s){if(node.contains(s))seen[s.textContent.trim()]=1});return Object.keys(seen).length}
+  // Buttons such as Загрузить and Выгрузить belong to the whole Box, never to one spool.
+  function actionsIn(node){return Array.prototype.some.call(node.querySelectorAll("button"),function(btn){var text=btn.textContent.trim();return text&&!LABEL.test(text)})}
+  // With a single label every block around it holds no other label, and the line would go to the
+  // bottom of the whole card.
+  if(labelsIn(card)<2)return {};
   var found={};
   spans.forEach(function(span){
-    var button=span.closest("button")||span,block=button;
-    while(block.parentElement&&block.parentElement!==card&&labelsIn(block.parentElement)===1)block=block.parentElement;
-    if(block!==button)found[span.textContent.trim()]=block;
+    var start=span.closest("button")||span,block=start;
+    while(block.parentElement&&block.parentElement!==card&&labelsIn(block.parentElement)===1&&!actionsIn(block.parentElement))block=block.parentElement;
+    if(block!==start)found[span.textContent.trim()]=block;
   });
   return found;
 }
