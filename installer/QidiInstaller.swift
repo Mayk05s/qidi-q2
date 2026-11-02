@@ -554,10 +554,6 @@ struct VersionsView: View {
                 row(module.title, "v" + module.version
                     + (model.installed.contains(module.id) ? " · на принтере " + (model.installedVersions[module.id] ?? "?") : ""))
             }
-            Divider()
-            Text("При любой установке").font(.caption.bold())
-            FileList(title: "Добавляет", icon: "plus.square", items: model.commonAdds)
-            FileList(title: "Меняет", icon: "pencil.line", items: model.commonChanges)
         }
         .font(.callout)
         .padding(16)
@@ -588,6 +584,52 @@ struct FileList: View {
     }
 }
 
+/// Which module the file help is about; nil shows all of them.
+struct FilesTopic: Identifiable {
+    let id: String?
+}
+
+/// The detailed level: which files on the printer each module adds and which stock files it changes.
+struct FilesHelp: View {
+    @ObservedObject var model: Model
+    let only: String?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Что меняется на принтере").font(.title3.bold())
+                Spacer()
+                Button("Готово") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(model.modules.filter { only == nil || $0.id == only }) { module in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label(module.title, systemImage: module.icon).font(.headline)
+                            FileList(title: "Добавляет", icon: "plus.square", items: module.adds)
+                            FileList(title: "Меняет", icon: "pencil.line", items: module.changes)
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("При любой установке", systemImage: "square.stack").font(.headline)
+                        FileList(title: "Добавляет", icon: "plus.square", items: model.commonAdds)
+                        FileList(title: "Меняет", icon: "pencil.line", items: model.commonChanges)
+                    }
+                    Text("Проверено на прошивке " + model.testedFirmware.joined(separator: ", ")
+                         + ". Файлы box_*.so и прошивка контроллера Box не меняются.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollIndicators(.never)
+        }
+        .padding(20)
+        .frame(width: 520, height: only == nil ? 560 : 360)
+    }
+}
+
 struct Badge: View {
     let text: String
     let color: Color
@@ -606,6 +648,7 @@ struct ModuleRow: View {
     let feature: Feature
     let installed: Bool
     let installedVersion: String?
+    let showFiles: (String) -> Void
     @Binding var isOn: Bool
     @State private var expanded = false
 
@@ -659,8 +702,9 @@ struct ModuleRow: View {
                     if !feature.note.isEmpty {
                         Label(feature.note, systemImage: "checklist").foregroundStyle(.secondary)
                     }
-                    FileList(title: "Добавляет на принтер", icon: "plus.square", items: feature.adds)
-                    FileList(title: "Меняет", icon: "pencil.line", items: feature.changes)
+                    Button("Что меняется на принтере") { showFiles(feature.id) }
+                        .buttonStyle(.link)
+                        .font(.caption)
                 }
                 .font(.callout)
                 .padding(.leading, 38)
@@ -680,6 +724,7 @@ struct ContentView: View {
     @State private var confirmApply = false
     @State private var confirmRemove = false
     @State private var showVersions = false
+    @State private var filesFor: FilesTopic?
 
     private func binding(_ id: String) -> Binding<Bool> {
         Binding(get: { model.chosen.contains(id) },
@@ -696,6 +741,9 @@ struct ContentView: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Модули").font(.title2.bold())
                     Spacer()
+                    Button { filesFor = FilesTopic(id: nil) } label: { Image(systemName: "questionmark.circle") }
+                        .buttonStyle(.borderless)
+                        .help("Что меняется на принтере")
                     Button("v" + model.packageVersion) { showVersions = true }
                         .buttonStyle(.borderless)
                         .font(.callout.monospacedDigit())
@@ -722,6 +770,7 @@ struct ContentView: View {
                         ForEach(model.modules) { feature in
                             ModuleRow(feature: feature, installed: model.installed.contains(feature.id),
                                       installedVersion: model.installedVersions[feature.id],
+                                      showFiles: { filesFor = FilesTopic(id: $0) },
                                       isOn: binding(feature.id))
                                 .disabled(!model.canChange)
                         }
@@ -767,6 +816,7 @@ struct ContentView: View {
         }
         .frame(height: 760)
         .onAppear { model.refresh() }
+        .sheet(item: $filesFor) { topic in FilesHelp(model: model, only: topic.id) }
         .alert(model.actionTitle + "?", isPresented: $confirmApply) {
             Button(model.actionTitle) { model.apply() }
             Button("Отмена", role: .cancel) {}
