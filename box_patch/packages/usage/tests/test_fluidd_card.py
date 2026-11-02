@@ -38,6 +38,16 @@ class CardData(unittest.TestCase):
         # An older usage module counts no rack: no tile.
         self.assertEqual(len(f.card_data(dict(SLOTS, rack=dict(rack, spool=None)), {})["spools"]), 2)
 
+    def test_maker_and_plastic_are_shown(self):
+        slots = {"slots": [
+            {"index": 0, "label": "1A", "color": "000000", "filament": "QFA01",
+             "tag": {"brand": "Bambu Lab", "detail": "PLA Matte"}, "spool": {}},
+            {"index": 1, "label": "1B", "color": "1353AB", "filament": "QFB54", "tag": {"stock": True}, "spool": {}},
+            {"index": 2, "label": "1C", "color": "FAFAFA", "filament": "QFA01",
+             "tag": {"unread": "key", "detail": "Метка не прочитана"}, "spool": {}}]}
+        names = [s["material"] for s in f.card_data(slots, {}, {"QFB54": "QIDI ABS Rapido"})["spools"]]
+        self.assertEqual(names, ["Bambu Lab PLA Matte", "QIDI ABS Rapido", "Метка не прочитана"])
+
     def test_during_print_need_is_what_is_left_to_print(self):
         check = {"file": "a.gcode", "printing": True, "rows": [
             {"label": "1D", "need": 300, "left_to_print": 120, "remaining": 100, "verdict": "short"}]}

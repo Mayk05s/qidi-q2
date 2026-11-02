@@ -736,6 +736,25 @@ class MyPlasticsTests(unittest.TestCase):
         self.assertTrue(q.json.loads(self.files["spool_pick_16.json"])["keep"])
         self.assertNotIn("spool_pick_0.json", self.files)
 
+    def test_spool_list_has_tagged_and_tagless_spools(self):
+        usage = {"slots": [{"key": "tray:T1", "remaining": 200.}, {"key": "slot:1", "remaining": 640., "full": 750.,
+                                                                     "name": "eSun PLA+"}, None, None],
+                 "rack": {"key": "slot:16", "remaining": None}}
+        status = {"save_variables": {"variables": {"filament_slot1": "QFA01", "color_slot1": ["A878FF"]}},
+                  "print_stats": {"state": "standby"}, "bambu_spool_usage": usage}
+        ledger = {"tray:T1": {"set_g": 250., "used_g": 50., "name": "Bambu Lab PLA Matte", "color": "000000",
+                              "filament": "QFA01"},
+                  "uid:AB12CD34": {"set_g": 1000., "used_g": 0.}, "slot:1": {"set_g": 750., "used_g": 110.},
+                  "tray:OLD": {"set_g": 250., "used_g": 249., "name": "FDplast PETG"}}
+        def fetch(path, post=False):
+            return ledger if path.endswith("spool_usage.json") else {"result": {"status": status}}
+        self.app.printer.fetch = fetch
+        spools = self.app.spool_list()["spools"]
+        self.assertEqual([(s["name"], s["where"], s["tag"]) for s in spools],
+                         [("Bambu Lab PLA Matte", "1A", True), ("eSun PLA+", "1B", False),
+                          ("Метка AB12CD34", None, True), ("FDplast PETG", None, True)])
+        self.assertEqual(spools[0]["remaining"], 200.)
+
     def test_pick_hands_the_plastic_to_the_usage_module(self):
         self.app.change_plastics({"add": self.PLASTIC})
         self.app.pick_plastic({"index": 1, "id": "a1", "grams": 640})

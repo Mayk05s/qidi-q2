@@ -235,6 +235,43 @@ class Printer:
         # A file rather than G-code: G-code waits behind a running print.
         self.upload("spool_set_%d.txt" % (index,), "%d\n" % (grams,))
 
+    USAGE_FILE = "spool_usage.json"
+
+    def spool_list(self):
+        """Every spool the usage module counts, the ones in the Box and on the rack first: tagged
+        spools by their tag, spools without one by their slot while they are in it."""
+        data = self.slots()
+        try:
+            ledger = self.fetch("/server/files/config/" + self.USAGE_FILE)
+        except PrinterError:
+            ledger = {}
+        ledger = ledger if isinstance(ledger, dict) else {}
+        names = {m["id"]: m["name"] for m in load_materials()}
+        where = {}
+        result = []
+        for slot in data["slots"] + [data["rack"]]:
+            spool = slot.get("spool") or {}
+            if spool.get("key"):
+                where[spool["key"]] = slot["label"]
+            if spool.get("key", "").startswith("slot:") and spool.get("remaining") is not None:
+                result.append({"key": spool["key"], "tag": False, "where": slot["label"],
+                               "name": spool.get("name") or names.get(slot["filament"], slot["filament"]),
+                               "color": slot["color"], "material": names.get(slot["filament"], slot["filament"]),
+                               "remaining": spool["remaining"], "full": spool.get("full")})
+        for key, entry in ledger.items():
+            if key.startswith("slot:") or not isinstance(entry, dict) or entry.get("set_g") is None:
+                continue
+            uid = key.split(":", 1)[1]
+            result.append({"key": key, "tag": True, "where": where.get(key),
+                           "name": entry.get("name") or names.get(entry.get("filament"))
+                           or "Метка " + (entry.get("uids") or [uid])[0][-8:],
+                           "color": entry.get("color"), "material": names.get(entry.get("filament"), entry.get("filament")),
+                           "remaining": max(0., entry["set_g"] - entry.get("used_g", 0.)), "full": entry["set_g"]})
+        order = [label for _, label in [(self.RACK, "Rack")] + self.SLOTS]
+        result.sort(key=lambda s: (s["where"] is None, order.index(s["where"]) if s["where"] in order else 0,
+                                   -s["remaining"]))
+        return {"spools": result, "state": data["state"]}
+
     def pick_plastic(self, index, plastic, grams, keep=False):
         """The usage module (bambu_spool_usage) takes the file: the count starts at grams and the
         slot gets the plastic's material and color, after the print if one is running. keep: the
@@ -1154,6 +1191,9 @@ class App:
                 labels.append(slot["label"])
         return labels
 
+    def spool_list(self):
+        return self._require_printer().spool_list()
+
     def pick_plastic(self, body):
         """Puts a plastic of the list in a slot without a tag, with the grams on the spool."""
         plastic = self.my_plastics.find(body.get("id"))
@@ -1225,7 +1265,7 @@ class App:
             check = self.print_check(None)
         except CHECK_ERRORS as e:
             check = {"rows": [], "message": str(e)}
-        return fluidd_card.card_data(self.slots(), check)
+        return fluidd_card.card_data(self.slots(), check, {m["id"]: m["name"] for m in load_materials()})
 
     def print_check(self, name):
         if getattr(self, "plastic_check", None) is None:
@@ -1430,6 +1470,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.app.slots())
             except PrinterError as e:
                 return self._send(502, {"error": str(e)})
+        if self.path == "/api/spools":
+            try:
+                return self._send(200, self.app.spool_list())
+            except PrinterError as e:
+                return self._send(502, {"error": str(e)})
         if self.path == "/api/feed_mode" and "spools" in features:
             try:
                 return self._send(200, self.app.feed_mode())
@@ -1613,6 +1658,14 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .pick-tool:hover{background:var(--bg)}.pick-tool.sure{color:var(--err);font-size:13px}
 .pick-form{margin-top:12px}.pick-weight{margin-top:12px}
 .pick-text small.pick-here{color:var(--ok);font-weight:600}
+.spool-list{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.spool-line{display:flex;align-items:center;gap:12px;padding:6px 10px;background:var(--card);border:1px solid var(--line);border-radius:10px}
+.spool-line .pick-text{flex:1}
+.spool-left{flex:none;width:110px;text-align:right}.spool-left b{font-size:16px;font-variant-numeric:tabular-nums}
+.spool-bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:4px}.spool-bar i{display:block;height:100%;background:var(--ok)}
+.spool-bar i.low{background:var(--err)}
+.spool-where{display:inline-block;margin-right:6px;padding:0 6px;border-radius:6px;background:var(--bg);font-weight:600;color:var(--ink)}
+.pick-sub{font-size:15px;margin:18px 0 0}
 .pick-put{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
 .find-slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:12px}
 .find-slots[hidden]{display:none}
@@ -2040,7 +2093,8 @@ dialog .actions{justify-content:flex-end;margin:0}
 </main>
 <div id="panel-pick" hidden>
 <h2 class="pick-head" id="pick-title">Пластик</h2>
-<p class="hint">Катушка без метки: выбери пластик из своего списка, подтянутся материал, цвет и вес.</p>
+<p class="hint" id="pick-hint">Катушка без метки: выбери пластик из своего списка, подтянутся материал, цвет и вес.</p>
+<div id="spools-view" hidden><div class="spool-list" id="spool-list"></div><h3 class="pick-sub">Свои пластики для катушек без метки</h3></div>
 <input type="text" id="pick-find" placeholder="Поиск: производитель, название, материал" autocomplete="off">
 <div class="pick-list" id="pick-list"></div>
 <div class="actions"><button class="action alt" id="pick-new" type="button">+ Новый пластик</button></div>
@@ -3444,6 +3498,8 @@ async function loadSlots(){
 /* A plastic for a spool without a tag: the Fluidd card opens this page as ?pick=<slot> in a frame.
    The form is the NFC tab's: maker and name with the lists, material by type, the palette. */
 const PICK=new URLSearchParams(location.search).get("pick");
+// ?spools: every spool with its remainder, and the user's plastics, opened from the Fluidd card.
+const SPOOLS=new URLSearchParams(location.search).has("spools");
 let pickSlot=null,pickInSlot=null,pickChosen=null,pickEditing=null,pickRemoving=null,pickMaterial=null,pickPicker=null;
 const plasticTitle=p=>[p.maker,p.name].filter(Boolean).join(" ")||materialName(p.filament);
 function pickSay(text,cls){const m=$("pick-msg");m.textContent=text||"";m.className="note"+(cls?" "+cls:"")}
@@ -3458,9 +3514,9 @@ function renderPickList(){
     const b=el("button","pick-item");b.type="button";
     const pic=el("span","pick-spool");pic.innerHTML=spool(p.color);
     const text=el("span","pick-text");text.append(el("b","",plasticTitle(p)),el("small","",`${materialName(p.filament)} · #${p.color} · ${p.grams} г`));
-    if(pickInSlot===p.id)text.append(el("small","pick-here",`Стоит в ${pickSlot.label}`));
+    if(pickSlot&&pickInSlot===p.id)text.append(el("small","pick-here",`Стоит в ${pickSlot.label}`));
     b.append(pic,text);
-    b.onclick=()=>{pickChosen=p;pickRemoving=null;$("pick-grams").value=p.grams;renderPickList();$("pick-put").hidden=false;pickSay("")};
+    b.onclick=()=>{if(!pickSlot)return;pickChosen=p;pickRemoving=null;$("pick-grams").value=p.grams;renderPickList();$("pick-put").hidden=false;pickSay("")};
     const edit=el("button","pick-tool","✎");edit.type="button";edit.title="Изменить";edit.onclick=()=>openPickForm(p);
     const x=el("button","pick-tool"+(pickRemoving===p.id?" sure":""),pickRemoving===p.id?"Удалить?":"×");x.type="button";x.title="Убрать из списка";
     x.onclick=async()=>{
@@ -3515,8 +3571,8 @@ $("pick-save").onclick=async()=>{
     if(r.updated&&r.updated.length){
       $("pick-put").hidden=true;
       pickSay(`Материал, цвет и название обновлены: ${r.updated.join(", ")}. Остаток тот же`,"ok");
-      if(r.updated.includes(pickSlot.label))setTimeout(()=>parent.postMessage({qidiPick:"done"},"*"),1800);
-    }else{$("pick-grams").value=grams;$("pick-put").hidden=false;if(r.update_error)pickSay(`Сохранено в списке, но катушки не обновились: ${r.update_error}`,"err")}
+      if(pickSlot&&r.updated.includes(pickSlot.label))setTimeout(()=>parent.postMessage({qidiPick:"done"},"*"),1800);
+    }else{$("pick-grams").value=grams;$("pick-put").hidden=!pickSlot;if(r.update_error)pickSay(`Сохранено в списке, но катушки не обновились: ${r.update_error}`,"err")}
   }catch(e){pickSay(e.message,"err")}
   finally{$("pick-save").disabled=false}
 };
@@ -3547,8 +3603,34 @@ async function startPick(){
   renderPickList();
   if(!(state.codes.my_plastics||[]).length)openPickForm(null);
 }
+async function startSpools(){
+  document.body.classList.add("pick-mode");
+  $("panel-slots").hidden=true;$("panel-pick").hidden=false;$("spools-view").hidden=false;
+  $("pick-title").textContent="Остатки пластика";
+  $("pick-hint").textContent="Все катушки, которые считает принтер: с меткой и без. Сначала те, что стоят сейчас.";
+  pickPicker=makePicker($("pick-picker"),"FAFAFA",()=>{});
+  renderPickList();
+  try{
+    const data=await api("/api/spools"),box=$("spool-list");
+    box.replaceChildren();
+    if(!data.spools.length)box.append(el("p","hint","Принтер пока не считает ни одной катушки."));
+    data.spools.forEach(s=>{
+      const row=el("div","spool-line");
+      const pic=el("span","pick-spool");pic.innerHTML=spool(isHex(s.color)?s.color:null);
+      const text=el("span","pick-text");const small=el("small","");
+      if(s.where)small.append(el("span","spool-where",s.where));
+      small.append(`${s.material||""}${s.material?" · ":""}${s.tag?"с меткой":"без метки"}`);
+      text.append(el("b","",s.name),small);
+      const left=el("span","spool-left");left.append(el("b","",Math.round(s.remaining)+" г"));
+      const bar=el("div","spool-bar"),fill=el("i",s.remaining<50?"low":"");
+      fill.style.width=Math.max(0,Math.min(1,s.remaining/(s.full||1000)))*100+"%";bar.append(fill);left.append(bar);
+      row.append(pic,text,left);box.append(row);
+    });
+  }catch(e){pickSay(e.message,"err")}
+}
 (async()=>{
   state.codes=await api("/api/codes");
+  if(SPOOLS){startSpools();return}
   if(PICK!==null){startPick();return}
   const has=name=>state.codes.features.includes(name);
   $("tab-tags").hidden=!has("nfc");

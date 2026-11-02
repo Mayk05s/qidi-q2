@@ -71,6 +71,25 @@ def tag_record(variables, slot):
     return record
 
 
+GENERIC_DETAILS = ("QIDI", "Своя метка")
+
+
+def tag_about(record):
+    """Maker and plastic, color and material of a tagged spool, as far as its tag tells."""
+    about = {}
+    detail, brand = record.get("detail"), record.get("brand")
+    name = ""
+    # A factory QIDI tag or our tag without a name holds only codes: the panel names it by profile.
+    if isinstance(detail, str) and detail.strip() and detail not in GENERIC_DETAILS and not record.get("unread"):
+        name = detail if not isinstance(brand, str) or not brand or detail.startswith(brand) else brand + " " + detail
+    if name:
+        about["name"] = name[:60]
+    for field in ("color", "filament"):
+        if isinstance(record.get(field), str) and record[field]:
+            about[field] = record[field]
+    return about
+
+
 def spool_key(variables, slot):
     """What the count belongs to: the spool when its tag is known, otherwise the slot."""
     record = tag_record(variables, slot)
@@ -217,6 +236,13 @@ class SpoolLedger:
                 if entry and "uids" in entry:
                     fresh["uids"] = entry["uids"]
                 self._fresh(key, fresh, identity)
+            # What the spool is, for the list of all spools: kept while the spool is out of the Box.
+            entry = self.spools.get(key)
+            if entry is not None and not key.startswith("slot:"):
+                about = tag_about(record)
+                if any(entry.get(field) != value for field, value in about.items()):
+                    entry.update(about)
+                    self.dirty = True
 
     def view(self, key, identity=None):
         key = self._resolve(key)

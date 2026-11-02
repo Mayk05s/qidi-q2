@@ -319,6 +319,16 @@ class TaglessSpoolTests(unittest.TestCase):
         self.ledger.add("slot:16", 25, ["QFA00", "A878FF"])
         self.assertEqual(self.ledger.view("slot:16", ["QFA00", "A878FF"])["remaining"], 975)
 
+    def test_tagged_spool_keeps_what_it_is(self):
+        self.ledger.adopt(slot("QFA01", "000000", dict(BLACK_TAG, brand="Bambu Lab", detail="PLA Matte")))
+        entry = self.ledger.spools["tray:T"]
+        self.assertEqual((entry["name"], entry["color"], entry["filament"]), ("Bambu Lab PLA Matte", "000000", "QFA01"))
+        # The second sighting links the tag number once; after that nothing changes.
+        self.ledger.adopt(slot("QFA01", "000000", dict(BLACK_TAG, brand="Bambu Lab", detail="PLA Matte")))
+        self.ledger.dirty = False
+        self.ledger.adopt(slot("QFA01", "000000", dict(BLACK_TAG, brand="Bambu Lab", detail="PLA Matte")))
+        self.assertFalse(self.ledger.dirty)
+
     def test_pick_request(self):
         path = os.path.join(self.folder, b.PICK_REQUEST_FILE % 1)
         with open(path, "w") as f:
