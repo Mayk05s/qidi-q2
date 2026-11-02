@@ -26,6 +26,7 @@
 import configparser
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -96,8 +97,18 @@ ANSWER_HOLD = 1.0
 EXACT_COLOR_DELAY = 2.5
 # A tag written by our panel marks block 5 with this, then RGB and a profile id.
 CUSTOM_COLOR_MAGIC = b"QXCL"
+# Block 6 of such a tag: this, then 8 bytes of the spool number shared by both tags of a spool.
+SPOOL_MAGIC = b"QXSP"
+# Our own tags may carry the maker and the name of the plastic in sector 2, blocks 8-10:
+# NAME_MAGIC, then UTF-8 "maker<US>name" padded with zeros. Byte 12 of block 6 says it is there,
+# so tags without it cost no second sector to read.
+NAME_MAGIC = b"QXNM"
+NAME_BLOCKS = (8, 9, 10)
+NAME_FLAG = 1
+NAME_BYTES = 16 * len(NAME_BLOCKS) - len(NAME_MAGIC)
 DEFAULT_KEY = bytes.fromhex("FFFFFFFFFFFF")
-# Tried in this order: QIDI factory tags use the first, blank tags the second.
+# Keys of sector 1 on QIDI-format tags. The factory QIDI tags seen so far open with the
+# default key; the QIDI one is kept for tags locked with it.
 TAG_KEYS = (("qidi", bytes.fromhex("D3F7D3F7D3F7")), ("default", DEFAULT_KEY))
 CLASSIC_1K_SAK = 0x08
 TAG_BLOCKS = (4, 5, 6)
@@ -111,9 +122,15 @@ SLOT_READ_STEP = 10.
 SLOT_READ_TIME = 0.5
 SLOT_READ_VELOCITY = 20.
 SLOT_READ_ACCEL = 100.
+# Two slots share a reader. When the neighbour's tag sits at the antenna and drowns this one,
+# the neighbouring spool is turned this far back first and returned after the read.
+NEIGHBOUR_ASIDE = 60.
 # Both tags of a Bambu spool hold the same tray number here, in sector 2.
 TRAY_SECTOR_BLOCK = 8
 TRAY_BLOCK = 9
+TAG_RULES_FILE = "bambu_tag_rules.json"
+# Fresh tries for the tray number after the quick nested one failed.
+TRAY_FRESH_ATTEMPTS = 2
 BOX_SLOTS = 4
 # A QIDI Studio profile id such as QFL30, usable as a material in bambu_map.cfg.
 PROFILE_ID = re.compile(r"QF[A-Z0-9]{2,4}")
@@ -142,7 +159,9 @@ QIDI_MATERIALS = (
 
 
 class RfidError(Exception):
-    pass
+    # Set when the tag was selected before the error: a tag is there, only its data is not read.
+    uid = None
+    sak = None
 
 
 class TagAbsent(RfidError):
@@ -218,6 +237,29 @@ def qidi_material(detail, materials=QIDI_MATERIALS):
 
 def _text(data):
     return data.split(b"\0")[0].decode("ascii", "replace")
+
+
+def name_blocks(maker, name):
+    """The three blocks holding the maker and the name; ValueError if they do not fit."""
+    text = ("%s\x1f%s" % ((maker or "").strip(), (name or "").strip())).encode("utf-8")
+    if len(text) > NAME_BYTES:
+        raise ValueError("maker and name take %d bytes, %d fit" % (len(text), NAME_BYTES))
+    data = NAME_MAGIC + text + bytes(NAME_BYTES - len(text))
+    return [data[i:i + 16] for i in range(0, len(data), 16)]
+
+
+def parse_name(blocks):
+    """(maker, name) from the three name blocks, or None."""
+    data = b"".join(blocks)
+    if data[:4] != NAME_MAGIC:
+        return None
+    text = data[4:].split(b"\0")[0].decode("utf-8", "replace")
+    maker, _, name = text.partition("\x1f")
+    return maker.strip(), name.strip()
+
+
+def has_name(block6):
+    return block6[:4] == SPOOL_MAGIC and block6[12] == NAME_FLAG
 
 
 def load_map(path):
@@ -394,6 +436,11 @@ class Fm17550:
             if self.read_reg(REG_STATUS2) & CRYPTO1_ON:
                 self.write_reg(REG_BIT_FRAMING, 0)
                 return
+            # The chip has finished without crypto: the key is wrong, no need to wait longer.
+            # Each poll is an SPI exchange through the MCU, so waiting out all of them took
+            # a good part of a second per rejected key.
+            if self.read_reg(REG_COM_IRQ) & (IRQ_IDLE | IRQ_TIMER) and not self.read_reg(REG_STATUS2) & CRYPTO1_ON:
+                break
             self.pause(POLL_DELAY)
         self.write_reg(REG_BIT_FRAMING, 0)
         raise NotBambuTag("key rejected: this is not a Bambu tag")
@@ -430,25 +477,63 @@ class Fm17550:
     def read_tag(self, timeout, monotonic, check_abort=None, exclude=()):
         def action():
             uid, key = self._open_tag(exclude)
-            blocks = {b: self.read_block(b).hex().upper() for b in TAG_BLOCKS}
-            return {"uid": uid.hex().upper(), "key": key, "blocks": blocks}
+            blocks = {b: self.read_block(b) for b in TAG_BLOCKS}
+            if key == "default" and has_name(blocks[6]) and self.nested_auth(NAME_BLOCKS[0], DEFAULT_KEY, uid):
+                blocks.update((b, self.read_block(b)) for b in NAME_BLOCKS)
+            return {"uid": uid.hex().upper(), "key": key,
+                    "blocks": {b: data.hex().upper() for b, data in blocks.items()}}
         return self._retrying(action, timeout, monotonic, check_abort)
 
     def _read_tray(self, uid):
         """Hex tray number, or None. The tag is already read, so a failure here costs nothing.
-        Crypto stays on: moving to another sector of a selected tag is an encrypted exchange."""
+        First the quick way, staying encrypted from sector 1; if the turning spool broke that
+        exchange, the tag is selected anew and sector 2 opened on its own."""
+        tray = self._read_tray_nested(uid)
+        for _ in range(TRAY_FRESH_ATTEMPTS):
+            if tray is not None:
+                break
+            tray = self._read_tray_fresh(uid)
+        return tray
+
+    def nested_auth(self, block, key, uid):
+        """Open another sector of the selected, authenticated tag. Crypto stays on: moving to
+        another sector is an encrypted exchange. False if the key or the exchange failed."""
+        self._reset_comm()
+        self._write_fifo([0x60, block] + list(key) + list(uid))
+        self.write_reg(REG_COMMAND, CMD_AUTHENT)
+        self.write_reg(REG_BIT_FRAMING, 0x80)
+        for _ in range(POLL_ATTEMPTS):
+            if self.read_reg(REG_COM_IRQ) & (IRQ_IDLE | IRQ_TIMER):
+                break
+            self.pause(POLL_DELAY)
+        self.write_reg(REG_BIT_FRAMING, 0)
+        return bool(self.read_reg(REG_STATUS2) & CRYPTO1_ON) and not self.read_reg(REG_ERROR) & ERR_FATAL
+
+    def read_name(self, uid):
+        """(maker, name) from sector 2 of our own tag, or None; the tag is already open."""
         try:
-            self._reset_comm()
-            self._write_fifo([0x60, TRAY_SECTOR_BLOCK] + list(derive_sector_keys(uid)[2]) + list(uid))
-            self.write_reg(REG_COMMAND, CMD_AUTHENT)
-            self.write_reg(REG_BIT_FRAMING, 0x80)
-            for _ in range(POLL_ATTEMPTS):
-                if self.read_reg(REG_COM_IRQ) & (IRQ_IDLE | IRQ_TIMER):
-                    break
-                self.pause(POLL_DELAY)
-            self.write_reg(REG_BIT_FRAMING, 0)
-            if not self.read_reg(REG_STATUS2) & CRYPTO1_ON or self.read_reg(REG_ERROR) & ERR_FATAL:
+            if not self.nested_auth(NAME_BLOCKS[0], DEFAULT_KEY, uid):
                 return None
+            return parse_name([self.read_block(b) for b in NAME_BLOCKS])
+        except RfidError:
+            return None
+
+    def _read_tray_nested(self, uid):
+        try:
+            if not self.nested_auth(TRAY_SECTOR_BLOCK, derive_sector_keys(uid)[2], uid):
+                return None
+            data = self.read_block(TRAY_BLOCK)
+        except RfidError:
+            return None
+        return data.hex().upper() if any(data) else None
+
+    def _read_tray_fresh(self, uid):
+        """Select the same tag again and open sector 2 directly; None if another tag answers."""
+        try:
+            self.write_reg(REG_STATUS2, 0)
+            if self.select_tag() != uid:
+                return None
+            self.authenticate(TRAY_SECTOR_BLOCK, derive_sector_keys(uid)[2], uid)
             data = self.read_block(TRAY_BLOCK)
         except RfidError:
             return None
@@ -456,14 +541,47 @@ class Fm17550:
 
     def _read_once(self):
         uid = self.select_tag()
-        self.authenticate(4, derive_sector_keys(uid)[1], uid)
-        blocks = [self.read_block(b) for b in (4, 5, 6)]
+        try:
+            self.authenticate(4, derive_sector_keys(uid)[1], uid)
+            blocks = [self.read_block(b) for b in (4, 5, 6)]
+        except RfidError as e:
+            e.uid, e.sak = e.uid or uid, self.sak
+            raise
         if self.get_mapping is None:
             tag = parse_bambu(*blocks)
         else:
             tag = parse_bambu(*blocks, mapping=self.get_mapping())
         tag["tray_uid"] = self._read_tray(uid)
         return uid, tag
+
+    @staticmethod
+    def _custom_tag(uid, block4, block5, block6, name=None):
+        """Our own tag with an exact color, or None. `name` is (maker, name) from sector 2."""
+        if block5[:4] != CUSTOM_COLOR_MAGIC or block4[1] not in QIDI_COLORS:
+            return None
+        profile = block5[7:13].split(b"\0")[0].decode("ascii", "replace")
+        # The spool number takes the place of a Bambu tray number, so both tags count as one spool.
+        tray = block6[4:12].hex().upper() if block6[:4] == SPOOL_MAGIC and any(block6[4:12]) else None
+        tag = {"color": block5[4:7].hex().upper(), "qidi_color": block4[1],
+               "uid": uid.hex().upper(), "detail": "Своя метка",
+               "profile": profile if PROFILE_ID.fullmatch(profile) else None, "tray_uid": tray}
+        if name:
+            maker, title = name
+            if title:
+                tag["detail"] = title
+            if maker:
+                tag["brand"] = maker
+        return bytes(block4), tag
+
+    @staticmethod
+    def _factory_tag(uid, block4):
+        """A factory QIDI tag: the material code, then the code of one of the 24 colors; or None."""
+        if block4[1] not in QIDI_COLORS:
+            return None
+        color = QIDI_COLORS[block4[1]]
+        return bytes(block4), {"color": color, "tag_color": color, "qidi_color": block4[1],
+                               "uid": uid.hex().upper(), "detail": "QIDI", "brand": "QIDI", "profile": None,
+                               "raw": block4[:3].hex().upper()}
 
     def read_custom(self):
         """Return (block 4, tag) for a tag written with an exact color, else None."""
@@ -472,16 +590,44 @@ class Fm17550:
             self.setup_type_a()
             uid = self.select_tag()
             self.authenticate(4, DEFAULT_KEY, uid)
-            block4 = self.read_block(4)
-            block5 = self.read_block(5)
+            blocks = [self.read_block(b) for b in (4, 5, 6)]
+            name = self.read_name(uid) if has_name(blocks[2]) else None
+        except NotBambuTag:
+            return None
         finally:
             self.restore(saved)
-        if block5[:4] != CUSTOM_COLOR_MAGIC or block4[1] not in QIDI_COLORS:
-            return None
-        profile = block5[7:13].split(b"\0")[0].decode("ascii", "replace")
-        return bytes(block4), {"color": block5[4:7].hex().upper(), "qidi_color": block4[1],
-                               "uid": uid.hex().upper(), "detail": "Своя метка",
-                               "profile": profile if PROFILE_ID.fullmatch(profile) else None}
+        return self._custom_tag(uid, *blocks, name=name)
+
+    def read_qidi_format(self, custom=True):
+        """Return (block 4, tag) for our own tag or a factory QIDI tag, else None, opening the tag
+        once: the default key first, which both our tags and the factory tags seen so far use,
+        then the QIDI key. What was tried goes to the log, to tell a locked tag from other data."""
+        saved = self.snapshot()
+        try:
+            self.setup_type_a()
+            for name, key in sorted(TAG_KEYS, key=lambda item: item[0] != "default"):
+                self.write_reg(REG_STATUS2, 0)
+                uid = self.select_tag()
+                try:
+                    self.authenticate(4, key, uid)
+                except NotBambuTag:
+                    logging.info("bambu_rfid: tag %s: %s key rejected for sector 1", uid.hex().upper(), name)
+                    continue
+                blocks = [self.read_block(b) for b in (4, 5, 6)]
+                logging.info("bambu_rfid: tag %s opened with the %s key, blocks 4-6: %s", uid.hex().upper(),
+                             name, " ".join(block.hex().upper() for block in blocks))
+                title = self.read_name(uid) if custom and name == "default" and has_name(blocks[2]) else None
+                break
+            else:
+                return None
+        finally:
+            self.restore(saved)
+        found = self._custom_tag(uid, *blocks, name=title) if custom else None
+        return found or self._factory_tag(uid, blocks[0])
+
+    def read_qidi(self):
+        """Return (block 4, tag) for a factory QIDI tag, else None."""
+        return self.read_qidi_format(custom=False)
 
     def read_bambu(self, timeout=0., monotonic=None, check_abort=None):
         """Return (uid, parsed tag), retrying until timeout as the tag may be
@@ -542,6 +688,23 @@ def swing_read(read, move, release, back, forward, spool_gone):
         try:
             if position:
                 move(-position)
+        finally:
+            release()
+
+
+def with_neighbour_aside(read, move, release, distance):
+    """Turn the neighbouring spool `distance` mm back, do `read`, then always turn it back
+    and release its motor."""
+    moved = 0.
+    try:
+        for _ in range(int(distance // SLOT_READ_STEP)):
+            move(-SLOT_READ_STEP)
+            moved -= SLOT_READ_STEP
+        return read()
+    finally:
+        try:
+            if moved:
+                move(-moved)
         finally:
             release()
 
@@ -716,6 +879,8 @@ class BambuRfid:
         self.tag_result = None
         config_file = self.printer.get_start_args().get("config_file", "")
         self.map_path = os.path.join(os.path.dirname(config_file), "bambu_map.cfg")
+        # Rules for single tags, by UID: the panel writes them for tags whose data is not read.
+        self.rules_path = os.path.join(os.path.dirname(config_file), TAG_RULES_FILE)
         gcode = self.printer.lookup_object("gcode")
         self.gcode = gcode
         # box_feed.py comes with the spools package; without it the stock feed stays.
@@ -899,11 +1064,15 @@ class BambuRfid:
             result = {"ok": False, "error": "absent"}
         except SeveralTags:
             result = {"ok": False, "error": "several"}
-        except NotBambuTag:
+        except NotBambuTag as e:
             result = {"ok": False, "error": "unknown_tag"}
+            if e.uid is not None:
+                result["uid"] = e.uid.hex().upper()
         except RfidError as e:
             logging.info("bambu_rfid %s: tag operation failed: %s", self.name, e)
             result = {"ok": False, "error": "failed"}
+            if e.uid is not None:
+                result["uid"] = e.uid.hex().upper()
         finally:
             if self.proxy is not None:
                 self.proxy.busy = False
@@ -954,14 +1123,30 @@ class BambuRfid:
         except ValueError:
             raise gcmd.error("bambu_rfid: EXCLUDE must be hex UIDs")
         trays = [tray for tray in gcmd.get("TRAYS", "").split(",") if tray]
+        aside = gcmd.get_int("NEIGHBOUR", 0, minval=0, maxval=1)
 
-        def action():
-            self._check_slot_free(slot)
+        def own():
             return swing_read(lambda: self._read_slot_tag(SLOT_READ_TIME, uids, trays),
                               lambda distance: self._move_slot(slot, distance),
                               lambda: self._release_slot(slot), back, forward,
                               lambda: self._spool_gone(slot))
+
+        def action():
+            self._check_slot_free(slot)
+            neighbour = slot ^ 1
+            if not aside or not self._neighbour_movable(neighbour):
+                return own()
+            return with_neighbour_aside(own, lambda distance: self._move_slot(neighbour, distance),
+                                        lambda: self._release_slot(neighbour), NEIGHBOUR_ASIDE)
         self._tag_command(gcmd, action)
+
+    def _neighbour_movable(self, slot):
+        """A neighbouring spool may be turned aside unless it is fed into the toolhead or missing."""
+        try:
+            self._check_slot_free(slot)
+        except TagProblem:
+            return False
+        return True
 
     def _check_slot_free(self, slot):
         now = self.reactor.monotonic()
@@ -987,6 +1172,10 @@ class BambuRfid:
         self.printer.lookup_object("toolhead").wait_moves()
         self.gcode.run_script_from_command("SET_STEPPER_ENABLE STEPPER=slot%d ENABLE=0" % (slot,))
 
+    def mapping_for_uid(self, uid_hex):
+        """The panel's rule for this tag, {"filament", "color"}, or None."""
+        return load_tag_rules(self.rules_path).get(str(uid_hex).upper())
+
     def _read_slot_tag(self, timeout, uids, trays):
         try:
             if not self.bambu_tags:
@@ -995,22 +1184,49 @@ class BambuRfid:
                                                self._check_stock_idle, uids, trays)
             material = tag["qidi_material"]
         except NotBambuTag:
-            custom = self.chip.read_custom() if self.custom_tags else None
+            # Our own tag or a factory QIDI tag, read with one opening of the tag: the motors wait
+            # for every read during a feed.
+            custom = self.chip.read_qidi_format(self.custom_tags)
             if custom is None:
                 raise
             data, tag = custom
             uid, material = bytes.fromhex(tag["uid"]), data[0]
-            if uid in uids:
+            # Like Bambu spools, a spool of ours may carry two tags with one spool number.
+            if uid in uids or tag.get("tray_uid") and tag["tray_uid"] in trays:
                 raise TagAbsent("only the neighbouring spool is in the field")
         result = {"uid": uid.hex().upper(), "material": material, "color": tag["color"],
                   "detail": _clean_text(tag["detail"]), "profile": tag.get("profile"),
                   "tag_color": tag.get("tag_color", tag["color"]), "tray": tag.get("tray_uid")}
+        if tag.get("raw"):
+            result["raw"] = tag["raw"]
+        # A rule set in the panel for this very tag wins over what the tag says.
+        rule = self.mapping_for_uid(result["uid"])
+        if rule:
+            result.update(profile=rule["filament"], color=rule["color"])
         for key in ("weight", "diameter", "min_temp", "max_temp", "dry_temp", "dry_hours"):
             if tag.get(key) is not None:
                 result[key] = tag[key]
         if tag.get("brand"):
             result["brand"] = _clean_text(tag["brand"])
         return result
+
+
+def load_tag_rules(path):
+    """{UID hex: {"filament", "color"}} from bambu_tag_rules.json; bad entries are left out."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            rules = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(rules, dict):
+        return {}
+    good = {}
+    for uid, rule in rules.items():
+        if (isinstance(uid, str) and re.fullmatch("[0-9A-F]{8}", uid) and isinstance(rule, dict)
+                and isinstance(rule.get("filament"), str) and PROFILE_ID.fullmatch(rule["filament"])
+                and isinstance(rule.get("color"), str) and re.fullmatch("[0-9A-F]{6}", rule["color"])):
+            good[uid] = {"filament": rule["filament"], "color": rule["color"]}
+    return good
 
 
 def load_config_prefix(config):

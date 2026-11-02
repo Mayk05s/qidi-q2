@@ -54,6 +54,9 @@ FEED_LENGTH = 1000.
 FEED_RETRY = 0.5
 FEED_START_DELAY = 2.
 FEED_CATCH_LENGTH = 30.
+# Back by less than forward: on 2 Nov a spool pushed in only just past the sensor came out of it
+# on a full 30 mm back move and was lost.
+FEED_CATCH_BACK = 10.
 FEED_CATCH_VELOCITY = 15.
 INSERT_POLL = 0.1
 
@@ -673,7 +676,7 @@ class BoxMover:
                 accel = self.mode()[1]["accel"]
                 caught = self.start_sequence(started, [
                     (FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, accel),
-                    (-FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, accel)], finish=False)
+                    (-FEED_CATCH_BACK, FEED_CATCH_VELOCITY, accel)], finish=False)
                 for slot in started:
                     self._pair_of(slot).insert(slot, eventtime, caught)
             # A slot just ejected keeps its old plan until that ends, and one held back by the

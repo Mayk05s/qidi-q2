@@ -3,6 +3,7 @@ spool turns and which tag is whose, this module turns the motors through box_fee
 reader of bambu_rfid."""
 import logging
 import math
+import re
 
 try:
     from . import bambu_rfid, pair_logic
@@ -17,6 +18,8 @@ except ImportError:
 # The pair logic is asked every PAIR_POLL seconds; a motor is given PAIR_PIECE seconds of travel
 # whenever less than PAIR_LEAD is left, so a stop takes effect within about half a second.
 PAIR_POLL = 0.2
+# A read slower than this is logged: pieces join only if a tick comes within PAIR_LEAD.
+PAIR_SLOW_READ = 0.3
 PAIR_PIECE = 0.4
 PAIR_LEAD = 0.6
 # A piece is joined to the one before only if that one ends at least this far ahead, else the
@@ -37,11 +40,48 @@ def read_pair(reader):
         return pair_logic.READ_TAG, reader._read_slot_tag(0., [], [])
     except bambu_rfid.SeveralTags:
         return pair_logic.READ_COLLISION, None
-    except bambu_rfid.RfidError:
+    except bambu_rfid.TagAbsent:
         return pair_logic.READ_NONE, None
+    except bambu_rfid.RfidError as e:
+        # The reason goes into a SAVE_VARIABLE value: no quotes or brackets in it.
+        reason = re.sub(r"[\"'\[\]{}()]", "", "%s: %s" % (type(e).__name__, e))
+        uid = getattr(e, "uid", None)
+        if not uid:
+            # Nothing answered clearly enough to have a number: the same as no tag.
+            logging.info("bambu_rfid: %s no tag number: %s", getattr(reader, "name", "?"), reason)
+            return pair_logic.READ_NONE, None
+        # A tag is there, only its contents could not be read: it is still this spool's tag.
+        uid = uid.hex().upper() if isinstance(uid, (bytes, bytearray)) else str(uid).upper()
+        logging.info("bambu_rfid: %s tag %s found, not read: %s", getattr(reader, "name", "?"), uid, reason)
+        tag = {"uid": uid, "unread": reason, "detail": UNREAD_DETAIL}
+        for key in ("sak", "atqa"):
+            value = getattr(e, key, None)
+            if value is not None:
+                tag[key] = value.hex().upper() if isinstance(value, (bytes, bytearray)) else value
+        return pair_logic.READ_TAG, tag
     finally:
         if proxy is not None:
             proxy.busy = False
+
+
+UNREAD_DETAIL = "Метка не прочитана"
+
+
+def unread_save_scripts(slot, tag, replacement):
+    """G-code that records a tag found but not read; a replacement set for its number gives the
+    slot its material and color, otherwise those stay as they are."""
+    scripts = []
+    record = {key: tag[key] for key in ("uid", "unread", "detail", "sak", "atqa") if tag.get(key) is not None}
+    if replacement:
+        if replacement.get("filament"):
+            scripts.append("SAVE_VARIABLE VARIABLE=filament_slot%d VALUE=\"'%s'\"" % (slot, replacement["filament"]))
+            record["filament"] = replacement["filament"]
+        if replacement.get("color"):
+            scripts.append("SAVE_VARIABLE VARIABLE=color_slot%d VALUE=\"['%s']\"" % (slot, replacement["color"]))
+            record["color"] = replacement["color"]
+        record["replacement"] = True
+    scripts.append("SAVE_VARIABLE VARIABLE=bambu_tag_slot%d VALUE=\"%r\"" % (slot, record))
+    return scripts
 
 
 def piece(distance, start_v, speed, end_v, accel):
@@ -150,12 +190,22 @@ class PairDriver:
             for slot in self.slots:
                 self._follow(slot, estimated, eventtime)
             reader = self.mover.readers.get(self.reader)
+            started = reactor.monotonic()
             kind, tag = read_pair(reader) if reader is not None else ("none", None)
-            uid = tag["uid"] if tag else None
-            if tag:
+            took = reactor.monotonic() - started
+            if took > PAIR_SLOW_READ:
+                logging.info("bambu_rfid: pair %s read took %.2f s", self.reader, took)
+            # A spool is known by its tray number when the tag has one: Bambu spools and spools
+            # tagged in our panel carry two tags with the same tray, and they are one spool.
+            uid = (tag.get("tray") or tag["uid"]) if tag else None
+            # A full reading of a tag replaces one where only its number was known.
+            if tag and (not tag.get("unread") or uid not in self.tags_seen):
                 self.tags_seen[uid] = tag
             pair_logic.note_reading(self.logic, kind, uid)
+            said = len(self.logic.log)
             self.logic.tick(eventtime, kind, uid)
+            for line in self.logic.log[said:]:
+                logging.info("bambu_rfid: pair %s: %s", self.reader, line)
             self._save_tags()
             for slot in self.slots:
                 self._plan(slot, estimated)
@@ -188,6 +238,12 @@ class PairDriver:
             print_time = estimated + SLOT_ENABLE_DELAY
             self.mover.printer.lookup_object("stepper_enable").lookup_enable(
                 "slot%d" % (slot,)).motor_disable(print_time)
+            # Let the slot go now, not when the pair is done: put in again, it starts afresh.
+            self.active.discard(slot)
+            self.mover.feeding.discard(slot)
+            self.mover._finish_after([slot], track.end)
+            self.mover.printer.lookup_object("gcode").respond_raw(
+                "!! Filament of slot %d left the sensor, insert it again" % (slot,))
 
     def _plan(self, slot, estimated):
         """Give the motor its next piece when what is planned runs out soon."""
@@ -238,14 +294,24 @@ class PairDriver:
         for slot in self.slots:
             spool = self._spool(slot)
             details = self.tags_seen.get(spool.tag)
-            if not spool.tag or spool.tag == self.saved[slot] or details is None:
+            if not spool.tag or details is None:
                 continue
-            filament = details.get("profile") or legacy_filament_id(details.get("material"))
-            for script in tag_save_scripts(slot, details, filament):
+            # Saved again only when it is new or now read in full.
+            state = (spool.tag, bool(details.get("unread")))
+            if state == self.saved[slot]:
+                continue
+            if details.get("unread"):
+                lookup = getattr(self.mover.readers.get(self.reader), "mapping_for_uid", None)
+                replacement = lookup(spool.tag) if lookup is not None else None
+                scripts = unread_save_scripts(slot, details, replacement)
+            else:
+                filament = details.get("profile") or legacy_filament_id(details.get("material"))
+                scripts = tag_save_scripts(slot, details, filament)
+            for script in scripts:
                 gcode.run_script(script)
-            self.saved[slot] = spool.tag
-            logging.info("bambu_rfid: slot%d has tag %s (%s)", slot, spool.tag,
-                         pair_logic.SURE_NAMES.get(spool.sure, ""))
+            self.saved[slot] = state
+            logging.info("bambu_rfid: slot%d has tag %s (%s)%s", slot, spool.tag,
+                         pair_logic.SURE_NAMES.get(spool.sure, ""), ", not read" if details.get("unread") else "")
 
     def _finish(self):
         active, self.active = sorted(self.active), set()
@@ -255,10 +321,6 @@ class PairDriver:
             self.mover.lengths[slot] = self.track[slot].planned
         if ready:
             self.mover._mark_ready(ready)
-        gcode = self.mover.printer.lookup_object("gcode")
-        for slot in active:
-            if self._spool(slot).out:
-                gcode.respond_raw("!! Filament of slot %d left the sensor, insert it again" % (slot,))
         if active:
             self.mover._finish_after(active, max(self.track[slot].end for slot in active))
 

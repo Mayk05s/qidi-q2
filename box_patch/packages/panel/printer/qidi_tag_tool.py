@@ -31,7 +31,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 PACKAGES = pathlib.Path(__file__).resolve().parent.parent.parent
 for package in ("rfid_core", "usage"):
     sys.path.insert(0, str(PACKAGES / package / "printer"))
-from bambu_rfid import CUSTOM_COLOR_MAGIC, QIDI_COLORS, nearest_qidi_color  # noqa: E402
+from bambu_rfid import (CUSTOM_COLOR_MAGIC, NAME_BLOCKS, NAME_FLAG, QIDI_COLORS, SPOOL_MAGIC,  # noqa: E402
+                        name_blocks, nearest_qidi_color, parse_name)
 # Files of the plastic usage package: without it the panel runs without them.
 try:
     import fluidd_card  # noqa: E402
@@ -57,6 +58,15 @@ features = set(ALL_FEATURES)
 DATA_BLOCK = 4
 # Optional block holding the exact color; block 4 keeps the nearest palette code.
 COLOR_BLOCK = 5
+# The spool number: both tags of one spool hold the same, so the usage count sees one spool.
+SPOOL_BLOCK = 6
+# Never the sector trailer, block 7: a bad write there locks the sector for good.
+WRITABLE_BLOCKS = (DATA_BLOCK, COLOR_BLOCK, SPOOL_BLOCK) + NAME_BLOCKS
+PAIR_ERRORS = {
+    "same": "Это та же метка, что уже записана. Переверни катушку другой стороной к антенне или поднеси вторую метку",
+    "qidi": "У этой метки заводской ключ QIDI: Box не прочитает с неё номер катушки. Для второй метки нужна чистая метка",
+    "foreign": "Блоки 5 и 6 этой метки заняты чужими данными: номер катушки туда не записать",
+}
 # Tried in this order: QIDI factory tags use the first, blank tags the second.
 KEYS = [("qidi", "D3F7D3F7D3F7"), ("default", "FFFFFFFFFFFF")]
 
@@ -196,6 +206,8 @@ class Printer:
             # {"empty": True} means the last read started and found nothing yet.
             if not isinstance(tag, dict):
                 tag = None
+            elif tag.get("unread"):
+                pass  # a tag was there but its data could not be read: shown as such
             elif not tag.get("empty") and (tag.get("color") != color or tag.get("filament") != filament):
                 tag = None
             result.append({"index": index, "label": label, "filament": filament,
@@ -317,7 +329,8 @@ class Printer:
             # The stock read refuses while any slot is loaded, so the tag is read by our module.
             self.reading[index] = True
             self.read_errors.pop(index, None)
-            self.read_thread = threading.Thread(target=self._read_with_motor, args=(index,), daemon=True)
+            self.read_thread = threading.Thread(target=self._read_with_motor, args=(index, skip_neighbour),
+                                                daemon=True)
             self.read_thread.start()
             return
         # What was known about the tag is forgotten first, so the result is only this read.
@@ -342,7 +355,8 @@ class Printer:
         finally:
             self.reading[index] = False
 
-    def _read_with_motor(self, index):
+    def _read_with_motor(self, index, aside=False):
+        """aside: the user said the tag read was the neighbour's, so that spool is turned away first."""
         try:
             neighbour = self._status()["save_variables"]["variables"].get("bambu_tag_slot%d" % (index ^ 1))
             neighbour = neighbour if isinstance(neighbour, dict) else {}
@@ -351,18 +365,62 @@ class Printer:
                 args += " EXCLUDE=" + neighbour["uid"]
             if neighbour.get("tray"):
                 args += " TRAYS=" + neighbour["tray"]
+            if aside:
+                args += " NEIGHBOUR=1"
             reader = "card_reader_%d" % (index // 2 + 1,)
             try:
                 result = self.tag_command(reader, ("BAMBU_RFID_SLOT_READ", args))
             except BoxTagProblem as e:
                 if e.code == "absent":
                     raise PrinterError("Метка не найдена: мотор покачал катушку, метка не дошла до антенны")
+                if e.uid and e.code in UNREAD_REASONS:
+                    self._save_unread_tag(index, e.uid, UNREAD_REASONS[e.code])
+                    return
                 raise
             self._save_read_tag(index, result)
         except (PrinterError, TagError) as e:
             self.read_errors[index] = str(e)
         finally:
             self.reading[index] = False
+
+    def _save_unread_tag(self, index, uid, reason):
+        """A tag answered but its data is not read: keep its number, and its rule if there is one."""
+        record = {"uid": uid, "unread": _clean_reason(reason), "detail": "Метка не прочитана"}
+        rule = self.tag_rules().get(uid)
+        if rule:
+            self.save_slot(index, rule["filament"], rule["color"])
+            record.update(filament=rule["filament"], color=rule["color"])
+        query = urllib.parse.urlencode(
+            {"script": "SAVE_VARIABLE VARIABLE=bambu_tag_slot%d VALUE=\"%r\"" % (index, record)})
+        self.fetch("/printer/gcode/script?" + query, post=True)
+
+    def tag_rules(self):
+        """Rules for single tags by UID, from bambu_tag_rules.json next to printer.cfg."""
+        try:
+            with urllib.request.urlopen("http://%s:7125/server/files/config/%s" % (self.host, TAG_RULES_FILE),
+                                        timeout=8) as res:
+                rules = json.loads(res.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError):
+            return {}
+        return rules if isinstance(rules, dict) else {}
+
+    def save_tag_rule(self, index, uid, filament, color):
+        """What a tag with this number is: saved by UID, so the module and the feed find it."""
+        if not isinstance(uid, str) or not re.fullmatch(r"[0-9A-F]{8}", uid):
+            raise PrinterError("Неверный номер метки")
+        self.save_slot(index, filament, color)
+        rules = self.tag_rules()
+        rules[uid] = {"filament": filament, "color": color}
+        self.upload(TAG_RULES_FILE, json.dumps(rules, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        record = self._status()["save_variables"]["variables"].get("bambu_tag_slot%d" % index)
+        if isinstance(record, dict):
+            kept = {k: v for k, v in record.items()
+                    if isinstance(k, str) and isinstance(v, (int, float))
+                    or (isinstance(v, str) and re.fullmatch(r"[\w +.:,\-]*", v))}
+            kept.update(filament=filament, color=color)
+            query = urllib.parse.urlencode(
+                {"script": "SAVE_VARIABLE VARIABLE=bambu_tag_slot%d VALUE=\"%r\"" % (index, kept)})
+            self.fetch("/printer/gcode/script?" + query, post=True)
 
     def _save_read_tag(self, index, result):
         filament = result.get("profile") or legacy_filament(result.get("material"))
@@ -455,9 +513,30 @@ class Printer:
 
 
 MAP_FILE = "bambu_map.cfg"
+TAG_RULES_FILE = "bambu_tag_rules.json"
+# Short reasons kept with a tag that answered but whose data was not read.
+UNREAD_REASONS = {"unknown_tag": "ключ метки не подошёл", "locked": "метка закрыта неизвестным ключом",
+                  "not_classic": "метка не MIFARE Classic", "failed": "ошибка при чтении данных"}
+
+
+def _clean_reason(text):
+    """A reason fit for a saved variable: no quotes or brackets."""
+    return re.sub(r"[^\w +.:,\-]", " ", str(text))[:80].strip()
 MY_COLORS_FILE = pathlib.Path(__file__).resolve().parent / "my_colors.json"
 MY_COLORS_LIMIT = 60
 MY_MATERIALS_FILE = pathlib.Path(__file__).resolve().parent / "my_materials.json"
+MY_NAMES_FILE = pathlib.Path(__file__).resolve().parent / "my_names.json"
+MY_NAMES_LIMIT = 100
+# Print order of sample groups, coolest plastic first, by the start of the plastic type:
+# the first prefix that matches wins, so PETG comes before PET and PCTG before PC.
+HEAT_ORDER = (("PLA", 0), ("TPU", 0), ("PEBA", 0), ("PVA", 0), ("PETG", 1), ("PCTG", 1), ("ABS", 2), ("ASA", 2),
+              ("HIPS", 2), ("PET", 3), ("PC", 3), ("PA", 3), ("ULTRAPA", 3), ("PPS", 4))
+
+
+def heat_rank(plastic_type):
+    """Place of a plastic type in the print order; None for a type not in HEAT_ORDER."""
+    plastic_type = str(plastic_type or "").upper()
+    return next((rank for prefix, rank in HEAT_ORDER if plastic_type.startswith(prefix)), None)
 
 
 class MyMaterials:
@@ -494,6 +573,44 @@ class MyMaterials:
                 if on is not None and on not in data[key]:
                     data[key].append(on)
             self.path.write_text(json.dumps(data))
+            return data
+
+
+class MyNames:
+    """Makers and plastic names once written on a tag, offered again in the form. Newest first;
+    a name keeps its maker so the list can show that maker's names first."""
+
+    def __init__(self, path=MY_NAMES_FILE):
+        self.path = path
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def _text(value):
+        return value.strip()[:40] if isinstance(value, str) else ""
+
+    def load(self):
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        makers = [m for m in data.get("makers") or [] if isinstance(m, str) and self._text(m)]
+        names = [n for n in data.get("names") or [] if isinstance(n, list) and len(n) == 2
+                 and all(isinstance(x, str) for x in n) and self._text(n[1])]
+        return {"makers": makers[:MY_NAMES_LIMIT], "names": names[:MY_NAMES_LIMIT]}
+
+    def remember(self, maker, name):
+        maker, name = self._text(maker), self._text(name)
+        if not maker and not name:
+            return self.load()
+        with self.lock:
+            data = self.load()
+            if maker:
+                data["makers"] = ([maker] + [m for m in data["makers"] if m != maker])[:MY_NAMES_LIMIT]
+            if name:
+                data["names"] = ([[maker, name]] + [n for n in data["names"] if n != [maker, name]])[:MY_NAMES_LIMIT]
+            self.path.write_text(json.dumps(data, ensure_ascii=False))
             return data
 
 
@@ -714,45 +831,69 @@ class Tag:
                 raise TagError("Это не MIFARE Classic 1K: QIDI Box такую метку не прочитает")
             key = self._authenticate(DATA_BLOCK)
             color_block = self._read_block(COLOR_BLOCK)
+            spool = self._read_block(SPOOL_BLOCK)
+            data = self._read_block(DATA_BLOCK)
+            names = None
+            if spool[:4] == SPOOL_MAGIC and spool[12] == NAME_FLAG:
+                self._authenticate(NAME_BLOCKS[0])
+                names = parse_name([self._read_block(b) for b in NAME_BLOCKS])
             return {
                 "uid": uid,
                 "key": key,
-                "block": self._read_block(DATA_BLOCK).hex().upper(),
-                "extra": [color_block.hex().upper(), self._read_block(6).hex().upper()],
+                "block": data.hex().upper(),
+                "extra": [color_block.hex().upper(), spool.hex().upper()],
                 "color": custom_color(color_block),
                 "profile": custom_profile(color_block),
+                "spool": spool_of(spool),
+                "maker": names[0] if names else None,
+                "name": names[1] if names else None,
             }
         finally:
             self.t.disconnect(reset=True)
 
     def _write_checked(self, block, data):
+        if block not in WRITABLE_BLOCKS:
+            raise TagError(f"Запись в блок {block} запрещена")
         if self._apdu(bytes.fromhex(f"FFD600{block:02X}10") + data) is None:
             raise TagError("Метка отказала в записи: блок защищён")
         if self._read_block(block) != data:
             raise TagError("Проверка не прошла: прочитаны другие данные")
 
-    def write_tag(self, data, color=None, profile=None):
-        """Write block 4 and the color block. A color block with foreign data is left
-        alone; color=None clears only a block this tool wrote earlier."""
+    def write_tag(self, data, color=None, profile=None, spool=None, pair_of=None, names=None):
+        """Write block 4, the color block, the spool number and the maker and name. A color block with foreign
+        data is left alone; color=None clears only a block this tool wrote earlier.
+        pair_of is the UID of the spool's first tag: this tag must be another one."""
         if len(data) != 16:
             raise TagError("Блок должен быть 16 байт")
         try:
             uid, classic = self.probe()
             if not classic:
                 raise TagError("Это не MIFARE Classic 1K: QIDI Box такую метку не прочитает")
+            if pair_of and uid == pair_of:
+                raise TagError(PAIR_ERRORS["same"])
             key = self._authenticate(DATA_BLOCK)
             previous = self._read_block(DATA_BLOCK)
             previous_color = self._read_block(COLOR_BLOCK)
-            self._write_checked(DATA_BLOCK, data)
+            previous_spool = self._read_block(SPOOL_BLOCK)
             ours = color_block_is_ours(previous_color)
+            with_spool = spool_plan(key, ours and bool(color), previous_spool, spool, pair_of)
+            self._write_checked(DATA_BLOCK, data)
             if ours:
                 wanted = color_block(color, profile) if color else bytes(16)
                 if wanted != previous_color:
                     self._write_checked(COLOR_BLOCK, wanted)
+            named = bool(names) and with_spool
+            if with_spool and spool_block(spool, named) != previous_spool:
+                self._write_checked(SPOOL_BLOCK, spool_block(spool, named))
+            if named:
+                self._authenticate(NAME_BLOCKS[0])
+                for block, value in zip(NAME_BLOCKS, names):
+                    self._write_checked(block, value)
             return {"uid": uid, "key": key, "previous": previous.hex().upper(),
                     "block": data.hex().upper(),
                     "exact_saved": bool(color) and ours,
-                    "exact_skipped": bool(color) and not ours}
+                    "exact_skipped": bool(color) and not ours,
+                    "spool": spool if with_spool else None, "named": named}
         finally:
             self.t.disconnect(reset=True)
 
@@ -774,28 +915,89 @@ class BoxTag:
         result = self.printer.tag_command(self.reader, ("BAMBU_RFID_TAG_READ", args))
         blocks = result["blocks"]
         color_data = bytes.fromhex(blocks[str(COLOR_BLOCK)])
+        names = None
+        if all(str(b) in blocks for b in NAME_BLOCKS):
+            names = parse_name([bytes.fromhex(blocks[str(b)]) for b in NAME_BLOCKS])
         return {"uid": result["uid"], "key": result["key"], "block": blocks[str(DATA_BLOCK)],
-                "extra": [blocks[str(COLOR_BLOCK)], blocks["6"]],
-                "color": custom_color(color_data), "profile": custom_profile(color_data)}
+                "extra": [blocks[str(COLOR_BLOCK)], blocks[str(SPOOL_BLOCK)]],
+                "color": custom_color(color_data), "profile": custom_profile(color_data),
+                "spool": spool_of(bytes.fromhex(blocks[str(SPOOL_BLOCK)])),
+                "maker": names[0] if names else None, "name": names[1] if names else None}
 
-    def write_tag(self, data, color=None, profile=None, uid=None):
-        """Only the tag the user read may be written: a spool in the slot is at the same antenna."""
+    def write_tag(self, data, color=None, profile=None, uid=None, spool=None, pair_of=None, names=None):
+        """Only the tag the user read may be written: a spool in the slot is at the same antenna.
+        For the second tag of a spool the first one counts as no tag, so it is never rewritten."""
         if uid is None:
             raise TagError("Сначала прочитай метку")
-        current = self.read(WRITE_FIND_TIMEOUT)
+        if pair_of and uid == pair_of:
+            raise TagError(PAIR_ERRORS["same"])
+        current = self.read(WRITE_FIND_TIMEOUT, [pair_of] if pair_of else ())
         if current["uid"] != uid:
             raise TagError(BOX_ERRORS["other_tag"])
-        previous = bytes.fromhex(current["block"])
         previous_color = bytes.fromhex(current["extra"][0])
+        previous_spool = bytes.fromhex(current["extra"][1])
         ours = color_block_is_ours(previous_color)
+        with_spool = spool_plan(current["key"], ours and bool(color), previous_spool, spool, pair_of)
         args = "UID=%s BLOCK4=%s" % (uid, data.hex().upper())
         wanted = color_block(color, profile) if color else bytes(16)
         if ours and wanted != previous_color:
             args += " BLOCK5=" + wanted.hex().upper()
+        named = bool(names) and with_spool
+        if with_spool and spool_block(spool, named) != previous_spool:
+            args += " BLOCK6=" + spool_block(spool, named).hex().upper()
+        if named:
+            args += "".join(" BLOCK%d=%s" % (b, v.hex().upper()) for b, v in zip(NAME_BLOCKS, names))
+        if pair_of:
+            args += " EXCLUDE=" + pair_of
         result = self.printer.tag_command(self.reader, ("BAMBU_RFID_TAG_WRITE", args))
         return {"uid": result["uid"], "key": result["key"], "previous": current["block"],
                 "block": data.hex().upper(), "exact_saved": bool(color) and ours,
-                "exact_skipped": bool(color) and not ours}
+                "exact_skipped": bool(color) and not ours,
+                "spool": spool if with_spool else None, "named": named}
+
+
+def spool_block(spool, named=False):
+    """Block 6: QXSP, the 8-byte spool number, a flag for the maker and name in sector 2, zeros."""
+    return SPOOL_MAGIC + bytes.fromhex(spool) + bytes([NAME_FLAG if named else 0]) + bytes(3)
+
+
+# Tags that name no plastic of their own: the slot's profile says what it is.
+GENERIC_DETAILS = ("QIDI", "Своя метка", "Метка не прочитана")
+
+
+def generic_tag(tag):
+    return bool(tag.get("unread")) or tag.get("detail") in GENERIC_DETAILS
+
+
+def tag_names(maker, name):
+    """The name blocks for what the user typed, or None when both are empty."""
+    maker, name = (maker or "").strip(), (name or "").strip()
+    if not maker and not name:
+        return None
+    if "\x1f" in maker + name:
+        raise TagError("Недопустимый символ в названии")
+    try:
+        return name_blocks(maker, name)
+    except ValueError:
+        raise TagError("Производитель и название вместе слишком длинные: на метке 44 байта, кириллица занимает по 2")
+
+
+def spool_of(block):
+    """The spool number in block 6 as 16 hex digits, or None."""
+    if block[:4] == SPOOL_MAGIC and any(block[4:12]):
+        return block[4:12].hex().upper()
+    return None
+
+
+def spool_plan(key, color_ours, previous_spool, spool, pair_of=None):
+    """Whether the spool number goes to block 6. The module reads it only from a tag with the
+    standard key and our color block; block 6 with foreign data is left alone. The second tag
+    of a spool is pointless without it, so then nothing is written."""
+    free = previous_spool == bytes(16) or previous_spool[:4] == SPOOL_MAGIC
+    writable = bool(spool) and key == "default" and color_ours and free
+    if pair_of and not writable:
+        raise TagError(PAIR_ERRORS["qidi" if key != "default" else "foreign"])
+    return writable
 
 
 def color_block_is_ours(block):
@@ -832,7 +1034,7 @@ def build_block(material, color, vendor, tail_hex):
 
 
 class App:
-    def __init__(self, transport=None, printer=None, my_colors=None, my_materials=None):
+    def __init__(self, transport=None, printer=None, my_colors=None, my_materials=None, my_names=None):
         self.lock = threading.Lock()
         # Separate from the USB lock: a Box read waits for a tag and must not hold up the status.
         self.box_lock = threading.Lock()
@@ -840,6 +1042,7 @@ class App:
         self.printer = printer
         self.my_colors = my_colors or MyColors()
         self.my_materials = my_materials or MyMaterials()
+        self.my_names = my_names or MyNames()
 
     def _tag(self):
         if printer_mode:
@@ -976,18 +1179,33 @@ class App:
             tag = slot.get("tag") or {}
             if item.get("filament") is not None and item["filament"] not in profiles:
                 raise PrinterError("Неверный код материала")
-            if tag.get("detail") and not item.get("filament"):
+            profile = profiles.get(item.get("filament") or slot["filament"]) or {}
+            if tag.get("detail") and not item.get("filament") and not generic_tag(tag):
                 source, material = tag, "%s %s" % (tag.get("brand", ""), tag["detail"])
             else:
-                # Text comes from the profile; the plastic is whatever this slot holds.
-                source = profiles.get(item.get("filament") or slot["filament"]) or {}
-                material = source.get("name", "")
+                # Text comes from the profile in use: a factory QIDI tag or our tag without a name
+                # carries only codes, and the plastic is whatever this slot holds.
+                source, material = profile, profile.get("name", "")
             sample = {"slot": slot["index"], "material": material.strip()}
+            heat = heat_rank(profile.get("type"))
             for key in ("min_temp", "max_temp", "dry_temp", "dry_hours"):
-                if isinstance(source.get(key), int):
-                    sample[key] = source[key]
-            samples.extend([sample] * count)
-        return samples
+                # What the tag lacks, such as temperatures on a tag of ours, comes from the profile.
+                value = source.get(key) if isinstance(source.get(key), int) else profile.get(key)
+                if isinstance(value, int):
+                    sample[key] = value
+            samples.extend([(heat, sample)] * count)
+        # Coolest plastic first: a hot one printed before it leaves the bed and chamber too hot.
+        # The nozzle ranges of PETG and ABS are the same, so the plastic type decides; an unknown
+        # type goes last. Equal ones keep the order of the slots.
+        samples.sort(key=lambda item: (max(rank for _, rank in HEAT_ORDER) + 1 if item[0] is None else item[0],
+                                       item[1].get("max_temp") or 0))
+        return [sample for _, sample in samples]
+
+    def save_tag_rule(self, body):
+        """Save what a tag that could not be read is, by its number, and apply it to the slot."""
+        self._require_printer().save_tag_rule(body.get("index"), body.get("uid"), body.get("filament"),
+                                              body.get("color"))
+        return {"ok": True}
 
     def save_mapping(self, body):
         """Save the rule for this tag and apply it to the slot right away."""
@@ -1004,29 +1222,42 @@ class App:
         profile = body.get("profile")
         if profile is not None and not (isinstance(profile, str) and re.fullmatch(r"QF[A-Z0-9]{2,4}", profile)):
             raise TagError("Неверный код материала")
-        # A palette color without a profile needs no extra block: the codes describe it.
-        exact = color if profile or QIDI_COLORS[code] != color else None
+        # Each first write starts a new spool; the second tag of a spool gets the number of the first.
+        spool, pair_of = body.get("spool"), body.get("pair_of")
+        if pair_of is not None and not (isinstance(pair_of, str) and re.fullmatch(r"[0-9A-F]{8}", pair_of)
+                                        and isinstance(spool, str)):
+            raise TagError("Сначала запиши первую метку катушки")
+        if spool is None:
+            spool = secrets.token_hex(8).upper()
+        elif not (isinstance(spool, str) and re.fullmatch(r"[0-9A-F]{16}", spool)):
+            raise TagError("Неверный номер катушки")
+        # The module reads the spool number only from a tag with our color block, so it is always written.
+        exact = color
+        names = tag_names(body.get("maker"), body.get("name"))
         source = body.get("source")
         if source in BOX_READERS:
             uid = body.get("uid")
             if not isinstance(uid, str) or not re.fullmatch(r"[0-9A-F]{8}", uid):
                 raise TagError("Сначала прочитай метку")
             with self.box_lock:
-                result = self._box_tag(source).write_tag(block, exact, profile, uid)
+                result = self._box_tag(source).write_tag(block, exact, profile, uid, spool, pair_of, names)
         else:
             with self.lock:
-                result = self._tag().write_tag(block, exact, profile)
+                result = self._tag().write_tag(block, exact, profile, spool, pair_of, names)
         result["palette_code"] = code
         # What the page shows after a write comes from the tag, not from the form.
         try:
             if source in BOX_READERS:
                 with self.box_lock:
-                    result["readback"] = self._box_tag(source).read(WRITE_FIND_TIMEOUT)
+                    result["readback"] = self._box_tag(source).read(WRITE_FIND_TIMEOUT, [pair_of] if pair_of else ())
             else:
                 with self.lock:
                     result["readback"] = self._tag().read()
             if result["readback"]["uid"] != result["uid"]:
                 raise TagError(BOX_ERRORS["other_tag"])
+            if result["spool"] and result["readback"]["spool"] != result["spool"]:
+                raise TagError("Номер катушки не подтвердился чтением. Прочитай метку ещё раз" + (
+                    "; если номера нет, обнови пакет «NFC-метки» на принтере" if source in BOX_READERS else ""))
         except (TagError, PrinterError) as e:
             result.pop("readback", None)
             result["readback_error"] = str(e)
@@ -1070,6 +1301,7 @@ class Handler(BaseHTTPRequestHandler):
                 "slot_materials": load_materials(),
                 "my_colors": self.app.my_colors.load(),
                 "my_materials": self.app.my_materials.load(),
+                "my_names": self.app.my_names.load(),
                 "on_printer": printer_mode,
                 "features": sorted(features),
                 "box_readers": [{"id": key, "name": value[1]} for key, value in BOX_READERS.items()]
@@ -1116,7 +1348,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/find":
                 return self._send(200, self.app.find(body))
             if self.path == "/api/write":
-                return self._send(200, self.app.write(body))
+                result = self.app.write(body)
+                self.app.my_names.remember(body.get("maker"), body.get("name"))
+                return self._send(200, result)
             if self.path == "/api/my_materials":
                 return self._send(200, {"my_materials": self.app.my_materials.change(
                     body.get("add"), body.get("remove"), body.get("type_on"), body.get("type_off"))})
@@ -1133,6 +1367,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, data, "application/vnd.ms-package.3dmanufacturing-3dmodel+xml")
             if self.path == "/api/mapping":
                 return self._send(200, self.app.save_mapping(body))
+            if self.path == "/api/tag_rule":
+                return self._send(200, self.app.save_tag_rule(body))
             if self.path == "/api/spool":
                 return self._send(200, self.app.set_spool(body))
             if self.path == "/api/slot_read":
@@ -1162,7 +1398,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 -apple-system
 main{max-width:1040px;margin:0 auto;padding:24px 16px 48px}
 header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
 h1{font-size:22px;margin:0}
-.tabs{display:flex;gap:6px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
 .tab{font:inherit;font-weight:600;padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--muted);cursor:pointer}
 .tab[aria-selected=true]{background:var(--card);color:var(--ink);border-color:var(--accent)}
 .hint{font-size:14px;color:var(--muted);margin:0 0 14px}
@@ -1191,6 +1427,19 @@ h1{font-size:22px;margin:0}
 .spool-row .spool{width:64px;margin:0;flex:none}
 .hex{font:13px ui-monospace,Menlo,monospace;color:var(--muted)}
 label.field{display:block;font-size:13px;font-weight:600;margin:10px 0 5px}
+.names{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.combo{position:relative}
+.combo input{padding-right:36px}
+.combo-open{position:absolute;top:1px;right:1px;bottom:1px;width:34px;border:0;border-radius:0 8px 8px 0;background:transparent;color:var(--muted);cursor:pointer}
+.combo-open::before{content:"";position:absolute;left:50%;top:50%;width:7px;height:7px;border:solid currentColor;border-width:0 2px 2px 0;transform:translate(-50%,-70%) rotate(45deg);transition:transform .12s}
+.combo.open .combo-open::before{transform:translate(-50%,-25%) rotate(-135deg)}
+.combo-menu{position:absolute;z-index:5;left:0;right:0;top:calc(100% + 4px);max-height:260px;overflow:auto;padding:4px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.28)}
+.combo-group{padding:8px 10px 4px;font-size:12px;color:var(--muted)}
+.combo-item{display:block;width:100%;padding:8px 10px;border:0;border-radius:7px;background:transparent;color:var(--ink);font:inherit;text-align:left;cursor:pointer}
+.combo-item[aria-selected=true]{background:color-mix(in srgb,var(--accent) 18%,transparent)}
+.combo-item mark{background:none;color:var(--accent);font-weight:600}
+.combo-new{color:var(--muted);font-size:13px;padding:8px 10px}
+@media (max-width:560px){.names{grid-template-columns:1fr}}
 select,input[type=text]{width:100%;padding:9px;font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px}
 details{margin-top:10px}
 summary{cursor:pointer;font-size:14px;font-weight:600;padding:3px 0}
@@ -1201,6 +1450,18 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .note{font-size:13px;color:var(--muted);margin-top:9px}
 .note:empty{display:none}
 .note.err{color:var(--err)}.note.ok{color:var(--ok)}
+.pair{margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:10px;display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.pair[hidden]{display:none}
+#pair{width:min(500px,calc(100vw - 32px))}
+.pair-flip{display:flex;gap:16px;align-items:center;margin:4px 0 10px}
+.pair-flip svg{width:120px;flex:none}
+.pair-flip ol{margin:0;padding-left:20px;display:grid;gap:8px}
+.pair-spool{margin:0 0 10px;color:var(--muted);font-size:13px}
+@media (max-width:480px){.pair-flip{flex-direction:column}}
+.pair[hidden]{display:none}
+.pair b{display:block;font-size:14px}
+.pair p{margin:4px 0 0;font-size:13px;color:var(--muted)}
+.pair .actions{margin-top:10px}
 .reader{display:flex;align-items:center;gap:10px;padding:11px 14px;margin-bottom:12px;font-weight:600}
 .dot{flex:none;width:11px;height:11px;border-radius:50%;background:var(--err)}
 .reader.ready .dot{background:var(--accent)}
@@ -1544,8 +1805,12 @@ dialog .actions{justify-content:flex-end;margin:0}
 <label class="field">Материал</label><div id="material"></div>
 <label class="field">Цвет</label>
 <div id="tag-picker"></div>
+<div class="names"><div><label class="field" for="tag-maker">Производитель</label><div class="combo"><input type="text" id="tag-maker" maxlength="40" placeholder="Выбери или впиши" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="maker-menu"><button type="button" class="combo-open" tabindex="-1" aria-label="Показать список"></button><div class="combo-menu" id="maker-menu" role="listbox" hidden></div></div></div>
+<div><label class="field" for="tag-name">Название пластика</label><div class="combo"><input type="text" id="tag-name" maxlength="40" placeholder="Выбери или впиши" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="name-menu"><button type="button" class="combo-open" tabindex="-1" aria-label="Показать список"></button><div class="combo-menu" id="name-menu" role="listbox" hidden></div></div></div></div>
+<p class="hint">Для себя: видно при чтении метки, в слоте и на образцах. Необязательно.</p>
 <div class="actions"><button class="action" id="write">Записать на метку</button></div>
 <div class="note" id="msg" role="status"></div>
+<div class="pair" id="pair-hint" hidden><span>На метке есть номер катушки: к ней можно записать вторую метку.</span><button class="action alt" id="pair-open" type="button">Записать вторую метку</button></div>
 </div>
 </div>
 </div>
@@ -1656,6 +1921,14 @@ dialog .actions{justify-content:flex-end;margin:0}
 <label class="spool-amount">Остаток<input id="spool-grams" type="number" min="0" max="5000" step="10"> г</label>
 <div class="note" id="spool-note"></div>
 <div class="actions" style="justify-content:flex-end"><button class="action alt" id="spool-cancel" type="button">Отмена</button><button class="action" id="spool-save" type="button">Сохранить</button></div></dialog>
+<dialog id="pair" aria-labelledby="pair-title"><h2 id="pair-title">Вторая метка этой катушки</h2>
+<div class="pair-flip"><svg viewBox="0 0 120 80" aria-hidden="true"><ellipse cx="38" cy="40" rx="15" ry="32" fill="var(--flange)" stroke="var(--flange-edge)"/><ellipse cx="38" cy="40" rx="5" ry="11" fill="var(--hub)"/><rect x="31" y="33" width="10" height="5" rx="1.5" fill="var(--ok)"/>
+<path d="M58 22 C74 6 92 10 98 28" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"/><path d="M92 26 L98 30 L101 22" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<ellipse cx="88" cy="50" rx="13" ry="27" fill="var(--flange)" stroke="var(--flange-edge)" opacity=".7"/><rect x="83" y="56" width="9" height="4" rx="1.5" fill="var(--accent)"/></svg>
+<ol id="pair-steps"><li id="pair-step1"></li><li id="pair-step2"></li></ol></div>
+<p class="pair-spool" id="pair-text"></p>
+<div class="note" id="pair-msg" role="status"></div>
+<div class="actions"><button class="action alt" id="pair-skip" type="button">Пропустить</button><button class="action" id="pair-write" type="button">Искать вторую метку</button></div></dialog>
 <dialog id="find-dialog"><h2 id="find-title"></h2>
 <div class="find-status" id="find-status" role="status"><span class="dot"></span><span id="find-text"></span></div>
 <div class="find-hint" id="find-hint"></div>
@@ -1962,11 +2235,77 @@ function renderMaterials(){
 let tagPicker,tagMaterial;
 // The left card shows only what was read from the tag; the form is what would be written.
 let onTag=null;
+// Step 2: the other tag of the same spool gets the same blocks and spool number. {uid, spool, body}
+let pair=null;
 function formTag(){return {id:tagMaterial?tagMaterial.get():null,hex:tagPicker.get()}}
+function formNames(){return {maker:$("tag-maker").value.trim(),name:$("tag-name").value.trim()}}
 function formDiffersFromTag(){
-  const form=formTag();
-  return !onTag||!!onTag.blank||form.id!==onTag.id||form.hex!==onTag.hex;
+  const form=formTag(),names=formNames();
+  return !onTag||!!onTag.blank||form.id!==onTag.id||form.hex!==onTag.hex||
+    names.maker!==(onTag.maker||"")||names.name!==(onTag.name||"");
 }
+// Pick-or-type field: a list under the input, filtered by what is typed, groups with titles.
+function makeCombo(input,groups,onpick){
+  const box=input.parentElement,menu=box.querySelector(".combo-menu");
+  let items=[],active=-1;
+  const close=()=>{menu.hidden=true;box.classList.remove("open");input.setAttribute("aria-expanded","false");active=-1};
+  const mark=(text,q)=>{
+    const i=q?text.toLowerCase().indexOf(q.toLowerCase()):-1,span=document.createElement("span");
+    if(i<0){span.textContent=text;return span}
+    const m=document.createElement("mark");m.textContent=text.slice(i,i+q.length);
+    span.append(text.slice(0,i),m,text.slice(i+q.length));return span;
+  };
+  function render(all){
+    const q=all?"":input.value.trim();
+    menu.replaceChildren();items=[];
+    for(const g of groups()){
+      const hits=[...new Set(g.items)].filter(x=>!q||x.toLowerCase().includes(q.toLowerCase()));
+      if(!hits.length)continue;
+      if(g.title){const h=document.createElement("div");h.className="combo-group";h.textContent=g.title;menu.append(h)}
+      for(const text of hits){
+        const b=document.createElement("button");b.type="button";b.className="combo-item";b.setAttribute("role","option");
+        b.append(mark(text,q));b.onmousedown=e=>{e.preventDefault();pick(text)};
+        menu.append(b);items.push({b,text});
+      }
+    }
+    if(!items.length){
+      if(!q){close();return}
+      const n=document.createElement("div");n.className="combo-new";n.textContent=`Новое: «${q}», запомнится после записи`;menu.append(n);
+    }
+    active=-1;menu.hidden=false;box.classList.add("open");input.setAttribute("aria-expanded","true");
+  }
+  function pick(text){input.value=text;close();onpick&&onpick()}
+  function move(step){
+    if(!items.length)return;
+    if(active>=0)items[active].b.removeAttribute("aria-selected");
+    active=(active+step+items.length)%items.length;
+    items[active].b.setAttribute("aria-selected","true");items[active].b.scrollIntoView({block:"nearest"});
+  }
+  input.addEventListener("focus",()=>render(true));
+  input.addEventListener("input",()=>{render(false);onpick&&onpick()});
+  input.addEventListener("blur",close);
+  input.addEventListener("keydown",e=>{
+    if(e.key==="ArrowDown"){e.preventDefault();menu.hidden?render(true):move(1)}
+    else if(e.key==="ArrowUp"){e.preventDefault();move(-1)}
+    else if(e.key==="Enter"&&!menu.hidden&&active>=0){e.preventDefault();pick(items[active].text)}
+    else if(e.key==="Escape")close();
+  });
+  box.querySelector(".combo-open").onmousedown=e=>{e.preventDefault();if(menu.hidden){input.focus();render(true)}else close()};
+  return {close};
+}
+// Makers and names written before, newest first; the chosen maker's names come first.
+const KNOWN_MAKERS=["Bambu Lab","QIDI","eSun","Polymaker","Sunlu","Elegoo","FDplast","Creality"];
+const myNames=()=>state.codes.my_names||{makers:[],names:[]};
+makeCombo($("tag-maker"),()=>{
+  const mine=myNames().makers;
+  return [{title:mine.length?"Ты уже записывал":"",items:mine},{title:"Известные",items:KNOWN_MAKERS.filter(m=>!mine.includes(m))}];
+},renderTag);
+makeCombo($("tag-name"),()=>{
+  const maker=$("tag-maker").value.trim(),names=myNames().names;
+  const own=names.filter(n=>maker&&n[0]===maker).map(n=>n[1]);
+  const rest=names.filter(n=>!maker||n[0]!==maker).map(n=>n[1]).filter(n=>!own.includes(n));
+  return [{title:own.length?`У ${maker}`:"",items:own},{title:own.length?"Другие":"Ты уже записывал",items:rest}];
+},renderTag);
 function renderTag(){
   $("tag-spool").innerHTML=spool(onTag&&!onTag.blank?onTag.hex:null);
   const box=$("tag-sync");
@@ -1992,7 +2331,7 @@ function writeChangeView(){
   arrow.innerHTML='<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16"/><path d="m14 6 6 6-6 6"/></svg>';
   const old=onTag&&!onTag.blank;
   view.append(old?spoolColumn(onTag.hex,$("tag-title").textContent,"#"+onTag.hex):spoolColumn(null,onTag?"Чистая метка":"Не прочитана",""),
-    arrow,spoolColumn(tagPicker.get(),tagMaterial.name(),"#"+tagPicker.get()));
+    arrow,spoolColumn(tagPicker.get(),[formNames().maker,formNames().name].filter(Boolean).join(" ")||tagMaterial.name(),"#"+tagPicker.get()));
   return view;
 }
 const ICON_CHECK='<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 13 4 4L19 7"/></svg>';
@@ -2031,7 +2370,7 @@ const usesBox=()=>!!state.source&&state.source!=="usb";
 const onPrinter=()=>!!state.codes&&state.codes.on_printer;
 function clearChosenTag(){
   state.source=onPrinter()?null:"usb";state.chosenSlot=null;state.uid=null;state.classic=false;state.sourceUid=null;
-  clearOnTag();renderFindSlots();poll();
+  closePair();clearOnTag();renderFindSlots();poll();
 }
 $("reader-reset").onclick=clearChosenTag;
 function syncButtons(){
@@ -2042,6 +2381,7 @@ function syncButtons(){
   $("write").disabled=!state.uid||!state.classic||state.writing||same;
   $("write").title=same?"На метке уже это, менять нечего":"";
   $("write").textContent=state.writing?"Идёт запись…":"Записать на метку";
+  syncPair();
 }
 async function poll(){
   if(state.writing)return;
@@ -2071,7 +2411,7 @@ async function poll(){
   syncButtons();
 }
 $("read").onclick=async()=>{
-  try{applyTag(await api("/api/read",{source:state.source}))}catch(e){say(e.message,"err")}
+  try{const r=await api("/api/read",{source:state.source});applyTag(r);offerPairOf(r)}catch(e){say(e.message,"err")}
 };
 function applyTag(r,confirmed){
   const b=r.block;
@@ -2089,12 +2429,14 @@ function applyTag(r,confirmed){
   else buildTagMaterial(legacyId(code),legacyName(code));
   const hex=tagHex(r);
   if(hex)tagPicker.set(hex);
-  onTag={uid:r.uid,id:r.profile||legacyId(code),hex,confirmed:!!confirmed,
+  onTag={uid:r.uid,id:r.profile||legacyId(code),hex,confirmed:!!confirmed,maker:r.maker||"",name:r.name||"",
          details:`Ключ ${r.key==="qidi"?"заводской QIDI":"стандартный"}${r.color?", точный цвет записан":""}`};
   renderTag();
   state.vendor=parseInt(b.slice(4,6),16);state.tail=b.slice(6);state.sourceUid=r.uid;
-  $("tag-title").textContent=tagMaterial.name();
-  $("tag-facts").textContent=`UID ${r.uid}`;
+  $("tag-title").textContent=r.name?[r.maker,r.name].filter(Boolean).join(" "):tagMaterial.name();
+  $("tag-facts").textContent=`UID ${r.uid}`+(r.spool?`, катушка ${r.spool.slice(0,8)}`:"")+(r.name?` · в Box: ${tagMaterial.name()}`:"");
+  $("tag-maker").value=r.maker||"";$("tag-name").value=r.name||"";
+  renderTag();
   say("");
 }
 function tagHex(r){
@@ -2118,10 +2460,10 @@ function renderFindSlots(){
     pair.forEach(s=>{
       const tag=s.tag&&s.tag.detail?s.tag:null;
       const mini=el("div","find-mini");
-      const pic=el("div","spool");pic.innerHTML=spool(tag?tag.tag_color:s.color);
+      const pic=el("div","spool");pic.innerHTML=spool(tag&&tag.tag_color?tag.tag_color:s.color);
       const text=el("div");
-      text.append(el("b","",s.label),el("span","",tag?`${tag.brand||""} ${tag.detail}`.trim():materialName(s.filament)),
-        el("small","",s.tag&&s.tag.stock?"Метка QIDI":tag?"#"+tag.tag_color:s.color?"#"+s.color:"Цвет не задан"));
+      text.append(el("b","",s.label),el("span","",slotName(s)),
+        el("small","",s.tag&&s.tag.stock?"Метка QIDI":tag&&tag.unread?"Метка не прочитана":tag&&tag.tag_color?"#"+tag.tag_color:s.color?"#"+s.color:"Цвет не задан"));
       mini.append(pic,text);row.append(mini);
     });
     const button=el("button","action alt","Найти метку");
@@ -2136,7 +2478,7 @@ async function loadFindSlots(){
 function findItemFromTag(r){
   const blank=/^0+$/.test(r.block);
   const name=blank?"Чистая метка":r.profile?materialName(r.profile):legacyName(parseInt(r.block.slice(0,2),16));
-  return {uid:r.uid,name,hex:blank?null:tagHex(r),tag:r,facts:blank?`UID ${r.uid}, можно записывать`:`UID ${r.uid}, ключ ${r.key==="qidi"?"заводской QIDI":"стандартный"}`};
+  return {uid:r.uid,name,hex:blank?null:tagHex(r),tag:r,facts:blank?`UID ${r.uid}, можно записывать`:`UID ${r.uid}, ключ ${r.key==="qidi"?"заводской QIDI":"стандартный"}`+(r.spool?`, катушка ${r.spool.slice(0,8)}`:"")};
 }
 function renderFindList(){
   $("find-list").replaceChildren(...find.items.map(item=>{
@@ -2175,7 +2517,9 @@ async function searchTag(){
   find.picked=null;
   const started=Date.now();
   renderFindList();setFindButtons(true);
-  setFindState("","Ищу метку…",find.items.length?"Покрути катушку или поднеси другую метку. Уже найденные пропускаю.":"Поднеси метку к антенне слота или покрути катушку.");
+  setFindState("","Ищу метку…",find.items.length?"Покрути катушку или поднеси другую метку. Уже найденные пропускаю."
+    :find.pair?"Переверни катушку другой стороной к антенне или поднеси вторую метку. Первую метку катушки пропускаю."
+    :"Поднеси метку к антенне слота или покрути катушку.");
   const tick=setInterval(()=>{
     const left=Math.max(0,SEARCH_SECONDS-(Date.now()-started)/1000);
     $("find-progress").style.width=(left/SEARCH_SECONDS*100)+"%";
@@ -2184,7 +2528,7 @@ async function searchTag(){
   $("find-progress").style.width="100%";
   try{
     while(Date.now()-started<SEARCH_SECONDS*1000){
-      const r=await api("/api/find",{source:find.source,exclude:find.items.map(i=>i.uid)});
+      const r=await api("/api/find",{source:find.source,exclude:find.items.map(i=>i.uid).concat(find.pair?[find.pair.uid]:[])});
       if(run!==find.run)return;
       if(r.status==="found"){
         const item=findItemFromTag(r.tag);
@@ -2207,9 +2551,9 @@ async function searchTag(){
     renderFindList();setFindButtons(false);
   }finally{clearInterval(tick)}
 }
-function startFind(title,source){
-  find.slot=title;find.source=source;find.items=[];
-  $("find-title").textContent=`Поиск метки, слоты ${title}`;
+function startFind(title,source,forPair){
+  find.slot=title;find.source=source;find.items=[];find.pair=forPair||null;
+  $("find-title").textContent=forPair?`Поиск второй метки, слоты ${title}`:`Поиск метки, слоты ${title}`;
   $("find-dialog").showModal();
   searchTag();
 }
@@ -2217,28 +2561,36 @@ function closeFind(){find.run++;if($("find-dialog").open)$("find-dialog").close(
 $("find-close").onclick=closeFind;
 $("find-dialog").addEventListener("cancel",()=>{find.run++});
 $("find-again").onclick=searchTag;
-$("find-take").onclick=()=>{
-  const item=find.picked;
+$("find-take").onclick=async()=>{
+  const item=find.picked,forPair=find.pair;
   closeFind();
   state.source=find.source;state.chosenSlot=find.slot;state.uid=item.uid;state.classic=true;
-  applyTag(item.tag);
+  if(forPair){
+    renderFindSlots();poll();
+    const r=item.tag,blank=/^0+$/.test(r.block);
+    if(!blank&&r.spool!==forPair.spool&&!await confirmDialog("Перезаписать метку?",`Метка ${item.uid}: ${item.name}. На неё запишется то же, что на первой метке катушки`,"Перезаписать"))return;
+    writePair(item.uid);
+    return;
+  }
+  applyTag(item.tag);offerPairOf(item.tag);
   renderFindSlots();poll();
 };
 function tagWriteBody(){
   const id=tagMaterial.get();
   const legacy=id.startsWith("L");
   return {material:legacy?+id.slice(1):LEGACY_BY_GROUP[groupOf(tagMaterial.name())]||7,profile:legacy?undefined:id,
-          color:tagPicker.get(),vendor:state.vendor,tail:state.tail,source:state.source,uid:state.uid};
+          color:tagPicker.get(),vendor:state.vendor,tail:state.tail,source:state.source,uid:state.uid,
+          maker:$("tag-maker").value.trim(),name:$("tag-name").value.trim()};
 }
 $("write").onclick=async()=>{
   const overwrite=!!onTag&&!onTag.blank;
   const yes=await confirmDialog(overwrite?"Перезаписать метку?":"Записать на метку?",state.uid?`Метка ${state.uid}`:"",overwrite?"Перезаписать":"Записать",writeChangeView());
   if(!yes)return;
-  const wanted=formTag();
-  say("");
+  const wanted=formTag(),wantedNames=formNames(),body=tagWriteBody();
+  say("");closePair();
   setWriting(true);
   try{
-    const r=await api("/api/write",tagWriteBody());
+    const r=await api("/api/write",body);
     state.sourceUid=r.uid;
     if(!r.readback){
       renderTag();
@@ -2247,17 +2599,97 @@ $("write").onclick=async()=>{
     }
     applyTag(r.readback,true);
     const read=formTag();
+    state.codes.my_names=(await api("/api/codes")).my_names;
     if(read.id!==wanted.id||read.hex!==wanted.hex){
       onTag.confirmed=false;renderTag();
       say(`На метке оказалось другое: ${tagMaterial.name()}, #${read.hex}.${r.exact_skipped?" Блок 5 этой метки занят, точный цвет туда не записать.":""}`,"err");
       return;
     }
+    if(onTag.maker!==wantedNames.maker||onTag.name!==wantedNames.name){
+      onTag.confirmed=false;renderTag();
+      say("Материал и цвет записаны, а производитель и название нет: на этой метке для них нет места.","err");
+      return;
+    }
     const code=state.codes.colors.find(c=>c.code===r.palette_code);
-    say(r.exact_saved?`Без модуля Box покажет: ${code.name}.`:"");
+    const shown=r.exact_saved&&code.hex.slice(1)!==read.hex?`Без модуля Box покажет: ${code.name}.`:"";
+    say(r.spool?shown:`${shown} Номер катушки не записан: ${r.key==="default"?"блоки 5 и 6 метки заняты чужими данными":"у метки заводской ключ QIDI"}, вторую метку к ней не записать.`.trim());
     showSavedToast();
+    if(r.spool)offerPair({uid:r.uid,spool:r.spool,body},"Первая метка записана. ");
   }catch(e){say(e.message,"err")}
   finally{setWriting(false)}
 };
+// The second tag of a spool: a dialog that holds the page until the tag is written or the user
+// keeps one tag, so nothing in the form changes between the two tags.
+function offerPair(p,lead){
+  pair=p;
+  const where=state.chosenSlot?`слотов ${state.chosenSlot}`:"слота";
+  $("pair-step1").textContent=usesBox()
+    ?`Переверни катушку другой стороной к антенне ${where} или поднеси к ней вторую метку.`
+    :"Убери первую метку с ридера и поднеси вторую.";
+  $("pair-step2").textContent=usesBox()
+    ?"Нажми «Искать вторую метку»: поиск идёт у той же антенны, первая метка пропускается."
+    :"Когда ридер увидит вторую метку, нажми «Записать вторую метку».";
+  $("pair-text").textContent=`${lead}Обе метки получат те же данные и номер катушки ${p.spool.slice(0,8)}, учёт остатка посчитает их одной катушкой.`;
+  $("pair-msg").textContent="";$("pair-msg").className="note";
+  $("pair-skip").textContent="Пропустить";$("pair-skip").hidden=false;
+  $("pair-write").textContent=usesBox()?"Искать вторую метку":"Записать вторую метку";$("pair-write").dataset.done="";
+  $("pair-hint").hidden=true;
+  if(!$("pair").open)$("pair").showModal();
+  syncPair();
+}
+// A tag read with a spool number may get its pair: offered, not forced, with the form as on the tag.
+function offerPairOf(r){
+  if(r.spool&&r.key==="default"&&!/^0+$/.test(r.block)){
+    pairOf={uid:r.uid,spool:r.spool};$("pair-hint").hidden=false;
+  }else{pairOf=null;$("pair-hint").hidden=true}
+}
+let pairOf=null;
+$("pair-open").onclick=()=>{
+  if(pairOf)offerPair({...pairOf,body:tagWriteBody()},"У этой катушки уже есть метка. ");
+};
+function closePair(){pair=null;if($("pair").open)$("pair").close()}
+function pairSay(text,kind){$("pair-msg").textContent=text;$("pair-msg").className="note"+(kind?" "+kind:"")}
+function syncPair(){
+  if(!pair||$("pair-write").dataset.done)return;
+  // On the USB reader the second tag is the one on the reader now; on the Box it is searched for.
+  const same=!usesBox()&&state.uid===pair.uid;
+  $("pair-write").disabled=!!state.writing||(!usesBox()&&(!state.uid||!state.classic||same));
+  if(!usesBox()&&!state.writing)pairSay(same?"На ридере первая метка катушки: убери её и поднеси вторую.":!state.uid?"Поднеси вторую метку к ридеру.":"Вторая метка на ридере, можно записывать.");
+}
+$("pair").addEventListener("cancel",e=>e.preventDefault());
+$("pair-skip").onclick=()=>{closePair();say("Записана одна метка катушки","ok")};
+$("pair-write").onclick=()=>{
+  if($("pair-write").dataset.done){closePair();return}
+  if(!pair)return;
+  if(usesBox())startFind(state.chosenSlot,state.source,pair);
+  else writePair(state.uid);
+};
+async function writePair(uid){
+  const p=pair;
+  if(!p)return;
+  pairSay("Записываю вторую метку… Держи её у антенны.");
+  setWriting(true);$("pair-write").disabled=true;$("pair-skip").disabled=true;
+  try{
+    const r=await api("/api/write",{...p.body,source:state.source,uid,spool:p.spool,pair_of:p.uid});
+    state.sourceUid=r.uid;
+    if(!r.readback){
+      renderTag();
+      pairSay(`Вторая метка записана, но прочитать её обратно не удалось: ${r.readback_error} Попробуй ещё раз.`,"err");
+      return;
+    }
+    applyTag(r.readback,true);
+    if(r.readback.spool!==p.spool){
+      onTag.confirmed=false;renderTag();
+      pairSay("На второй метке оказался другой номер катушки. Попробуй записать ещё раз.","err");
+      return;
+    }
+    pairSay(`Обе метки этой катушки записаны: ${p.uid} и ${r.uid}.`,"ok");
+    $("pair-write").textContent="Готово";$("pair-write").dataset.done="1";$("pair-skip").hidden=true;
+    say("Обе метки этой катушки записаны","ok");
+    showSavedToast();
+  }catch(e){pairSay(e.message,"err")}
+  finally{setWriting(false);$("pair-skip").disabled=false;if(!$("pair-write").dataset.done)syncPair();else $("pair-write").disabled=false}
+}
 
 
 /* Slots tab */
@@ -2462,7 +2894,7 @@ function renderSlot(s){
   r.card.classList.toggle("editable",!!tag&&!s.reading);
   r.editSlot.innerHTML="";r.mapped.innerHTML="";
   if(r.read)r.read.disabled=s.reading;
-  r.spool.innerHTML=spool(blank?null:tag?tag.tag_color:s.color);
+  r.spool.innerHTML=spool(blank?null:tag&&tag.tag_color?tag.tag_color:s.color);
   if(s.reading){
     r.name.textContent="Читаю метку…";r.hex.textContent="";
     r.mapped.append(el("div","map-empty","Катушка крутится, до минуты"));
@@ -2470,8 +2902,8 @@ function renderSlot(s){
     r.name.textContent="Метка не найдена";r.hex.textContent="";
     r.mapped.append(el("div","map-empty","Пусто"));
   }else{
-    r.name.textContent=tag?`${tag.brand||""} ${tag.detail}`.trim():materialName(s.filament);
-    r.hex.textContent=tag?"#"+tag.tag_color:s.color?"#"+s.color:"цвет не задан";
+    r.name.textContent=tag&&tag.unread?"Метка найдена, не прочитана":slotName(s);
+    r.hex.textContent=tag&&tag.unread?"UID "+tag.uid:tag?"#"+tag.tag_color:s.color?"#"+s.color:"цвет не задан";
     if(tag){
       const text=el("div","swap-text");
       const dot=el("span","chip");dot.style.background=s.color?"#"+s.color:"transparent";
@@ -2622,8 +3054,24 @@ function closeEditor(){
   editing=null;$("editor").hidden=true;$("editor").innerHTML="";
   Object.values(rows).forEach(r=>r.card.removeAttribute("aria-current"));
 }
+// Tags that carry only codes take their name from the slot's profile, as the samples do.
+const GENERIC_DETAILS=["QIDI","Своя метка","Метка не прочитана"];
+function isGeneric(tag){return !!tag&&(!!tag.unread||GENERIC_DETAILS.includes(tag.detail))}
+function slotName(s){
+  const tag=s.tag&&s.tag.detail?s.tag:null;
+  if(!tag)return materialName(s.filament);
+  if(isGeneric(tag))return (tag.detail==="Своя метка"?"Своя метка: ":"")+materialName(s.filament);
+  return `${tag.brand||""} ${tag.detail}`.trim();
+}
 function tagFacts(tag){
+  if(tag.unread){
+    const facts=[["UID",tag.uid],["Причина",tag.unread]];
+    if(tag.sak!=null)facts.push(["Тип","SAK "+tag.sak]);
+    return facts;
+  }
   const facts=[["Материал",tag.detail],["Цвет","#"+tag.tag_color]];
+  // What the tag itself holds, for factory QIDI tags: the codes of the firmware table.
+  if(tag.raw&&tag.raw.length>=4)facts.push(["Коды на метке",`материал ${parseInt(tag.raw.slice(0,2),16)}, цвет ${parseInt(tag.raw.slice(2,4),16)}`]);
   if(tag.weight)facts.push(["Вес",`${tag.weight} г`]);
   if(tag.diameter)facts.push(["Диаметр",`${tag.diameter} мм`]);
   if(tag.min_temp&&tag.max_temp)facts.push(["Сопло",`${tag.min_temp}–${tag.max_temp} °C`]);
@@ -2645,7 +3093,8 @@ function openEditor(index){
   const close=el("button","action alt","Закрыть");close.type="button";close.onclick=closeEditor;head.append(close);
   const compare=el("div","compare");
   const real=el("div","side real");real.append(el("h3","","На метке"));
-  const realSpool=el("div","spool");realSpool.innerHTML=spool(tag.tag_color);real.append(realSpool);
+  const realSpool=el("div","spool");realSpool.innerHTML=spool(tag.tag_color||null);real.append(realSpool);
+  if(tag.unread)real.append(el("div","brand","Метка найдена, данные не прочитаны"));
   if(tag.brand)real.append(el("div","brand",tag.brand));
   const dl=el("dl");tagFacts(tag).forEach(([k,v])=>dl.append(el("dt","",k),el("dd","",v)));real.append(dl);
   const shown=el("div","side");shown.append(el("h3","","Использовать в Box"));
@@ -2660,12 +3109,16 @@ function openEditor(index){
   const save=el("button","action","Сохранить");save.type="button";
   const reset=el("button","action alt","Цвет как на метке");reset.type="button";
   reset.onclick=()=>{picker.set(tag.tag_color);shownSpool.innerHTML=spool(tag.tag_color);shownHex.textContent="#"+tag.tag_color};
-  actions.append(save,reset);
-  const note=el("div","note",`Будет работать для всех катушек ${tag.brand||""} ${tag.detail} этого цвета, этот слот обновится сразу.`);
+  actions.append(save);
+  if(tag.tag_color)actions.append(reset);
+  const note=el("div","note",tag.unread
+    ?`Правило сохранится для этой метки по её номеру ${tag.uid}: при следующих чтениях она будет распознаваться. Этот слот обновится сразу.`
+    :`Будет работать для всех катушек ${tag.brand||""} ${tag.detail} этого цвета, этот слот обновится сразу.`);
   save.onclick=async()=>{
     save.disabled=true;note.className="note";note.textContent="Сохраняю…";
     try{
-      await api("/api/mapping",{index:s.index,detail:tag.detail,tag_color:tag.tag_color,filament:material.get(),color:picker.get()});
+      if(tag.unread)await api("/api/tag_rule",{index:s.index,uid:tag.uid,filament:material.get(),color:picker.get()});
+      else await api("/api/mapping",{index:s.index,detail:tag.detail,tag_color:tag.tag_color,filament:material.get(),color:picker.get()});
       note.className="note ok";note.textContent="Сохранено.";
       await loadSlots();
     }catch(e){note.className="note err";note.textContent=e.message}
@@ -2753,7 +3206,8 @@ async function openSamples(){
     const title=el("div","sample-title"),info=el("small");
     const paintText=()=>{
       const chosen=sampleMaterials[s.index];
-      const source=chosen?profile(chosen):tag||profile(s.filament);
+      // A tag naming its plastic gives the text, the profile in use gives what the tag lacks.
+      const source=chosen?profile(chosen):tag&&!isGeneric(tag)?{...(profile(s.filament)||{}),...tag}:profile(s.filament);
       title.textContent=`${s.label}  ${source?(source.detail?`${source.brand||""} ${source.detail}`.trim():source.name):"Материал не задан"}`;
       info.textContent=source?sampleInfo(source):"";
     };
@@ -2921,6 +3375,8 @@ def pull_state(host):
         MY_MATERIALS_FILE.write_text(json.dumps(codes["my_materials"]))
     if isinstance(codes.get("my_colors"), list):
         MY_COLORS_FILE.write_text(json.dumps(codes["my_colors"]))
+    if isinstance(codes.get("my_names"), dict):
+        MY_NAMES_FILE.write_text(json.dumps(codes["my_names"], ensure_ascii=False))
 
 
 def main():

@@ -1,6 +1,7 @@
 """Tests for bambu_nfc: writing our own tags, against the simulated chip of the core tests."""
 import pathlib
 import sys
+import types
 
 PACKAGES = pathlib.Path(__file__).resolve().parent.parent.parent
 for folder in ("nfc/printer", "rfid_core/printer", "rfid_core/tests"):
@@ -79,6 +80,73 @@ class TagWriteTests(unittest.TestCase):
     def test_sector_trailer_cannot_be_written(self):
         with self.assertRaises(ValueError):
             n.write_block(self.edit(self.chip()), 7, bytes(16))
+        self.assertNotIn(7, n.WRITABLE_BLOCKS)
+
+    def test_spool_number_goes_to_block_6_and_reads_as_tray(self):
+        chip = self.chip()
+        block6 = b.SPOOL_MAGIC + bytes.fromhex("0123456789ABCDEF") + bytes(4)
+        n.write_tag(self.edit(chip), UID, {4: bytes([2, 22, 1]) + bytes(13), 5: self.NEW5, 6: block6},
+                    1., self.clock.monotonic)
+        self.assertEqual(chip.blocks[6], block6)
+        self.assertEqual(self.edit(chip).read_custom()[1]["tray_uid"], "0123456789ABCDEF")
+
+    def test_writes_maker_and_name_to_sector_2(self):
+        chip = self.chip()
+        chip.sector2_key = b.DEFAULT_KEY
+        names = b.name_blocks("eSun", "PETG+")
+        blocks = {4: self.NEW4, 5: self.NEW5}
+        blocks.update(zip(b.NAME_BLOCKS, names))
+        n.write_tag(self.edit(chip), UID, blocks, 1., self.clock.monotonic)
+        self.assertEqual(b.parse_name([chip.blocks[x] for x in b.NAME_BLOCKS]), ("eSun", "PETG+"))
+
+    def test_locked_sector_2_stops_the_name(self):
+        chip = self.chip()
+        blocks = {4: self.NEW4}
+        blocks.update(zip(b.NAME_BLOCKS, b.name_blocks("eSun", "PETG+")))
+        self.assert_problem("denied", lambda: n.write_tag(self.edit(chip), UID, blocks, 1., self.clock.monotonic))
+
+
+class FakeGcmd:
+    def __init__(self, **params):
+        self.params = params
+
+    def get(self, name, default=KeyError):
+        if name in self.params:
+            return self.params[name]
+        if default is KeyError:
+            raise KeyError(name)
+        return default
+
+    def get_float(self, name, default, **kwargs):
+        return float(self.params.get(name, default))
+
+    def error(self, message):
+        return ValueError(message)
+
+
+class WriteCommandTests(unittest.TestCase):
+    def run_command(self, **params):
+        clock = FakeClock()
+        chip = FakeChip(key=b.DEFAULT_KEY)
+        reader = types.SimpleNamespace(chip=b.Fm17550(chip, clock.pause), reactor=types.SimpleNamespace(
+            monotonic=clock.monotonic), _check_stock_idle=None)
+        reader._tag_command = lambda gcmd, action: action()
+        n.cmd_TAG_WRITE(reader, FakeGcmd(UID=UID.hex(), **params))
+        return chip
+
+    def test_block_6_is_passed_on(self):
+        block6 = (b.SPOOL_MAGIC + bytes(range(1, 9)) + bytes(4)).hex()
+        chip = self.run_command(BLOCK4=bytes(range(16)).hex(), BLOCK6=block6)
+        self.assertEqual(chip.blocks[6].hex(), block6)
+        self.assertEqual(chip.blocks[5], BLOCKS[5])
+
+    def test_excluded_tag_is_not_written(self):
+        with self.assertRaises(b.RfidError):
+            self.run_command(BLOCK4=bytes(range(16)).hex(), EXCLUDE=UID.hex())
+
+    def test_short_block_6_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.run_command(BLOCK4=bytes(range(16)).hex(), BLOCK6="00")
 
 
 if __name__ == "__main__":

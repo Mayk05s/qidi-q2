@@ -1,6 +1,6 @@
 {
   "id": "panel",
-  "version": "1.3.0",
+  "version": "1.7.5",
   "hidden": true,
   "title": "Панель на принтере",
   "summary": "Страница слотов, меток и материалов на порту 18770",
@@ -38,6 +38,12 @@
     {
       "from": "box_patch/packages/panel/printer/my_colors.json",
       "to": "qidi_panel/my_colors.json",
+      "keep": true,
+      "optional": true
+    },
+    {
+      "from": "box_patch/packages/panel/printer/my_names.json",
+      "to": "qidi_panel/my_names.json",
       "keep": true,
       "optional": true
     }

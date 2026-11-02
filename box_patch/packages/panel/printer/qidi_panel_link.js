@@ -14,8 +14,13 @@
     var main = document.querySelector(".v-main");
     var area = main ? main.getBoundingClientRect() : { left: 56, top: 56 };
     var style = getComputedStyle(main || document.body);
-    var left = area.left + (parseFloat(style.paddingLeft) || 0);
-    var top = area.top + (parseFloat(style.paddingTop) || 0);
+    var left = Math.max(0, area.left + (parseFloat(style.paddingLeft) || 0));
+    // The content area moves up when Fluidd's own page was scrolled, as in the QIDI Studio
+    // printer page: the frame then went above the window and its top could not be reached.
+    // It starts below Fluidd's top bar instead, or at the top of the window.
+    var bar = document.querySelector("header.v-app-bar, .v-app-bar");
+    var top = bar ? Math.max(0, bar.getBoundingClientRect().bottom)
+      : Math.max(0, area.top + (parseFloat(style.paddingTop) || 0));
     frame.style.cssText = "position:fixed;border:0;z-index:6;background:#161615;left:" + left + "px;top:" + top +
       "px;width:calc(100vw - " + left + "px);height:calc(100vh - " + top + "px)";
   }
@@ -48,8 +53,10 @@
       frame.title = link.title;
       frame.src = url;
       document.body.appendChild(frame);
-      window.addEventListener("resize", function () {
-        if (frame.style.display !== "none") placeFrame(frame);
+      ["resize", "scroll"].forEach(function (name) {
+        window.addEventListener(name, function () {
+          if (frame.style.display !== "none") placeFrame(frame);
+        }, true);
       });
     }
     placeFrame(frame);

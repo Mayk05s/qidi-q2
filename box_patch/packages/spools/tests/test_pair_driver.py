@@ -60,6 +60,7 @@ class Mover:
         self.readers = {"rfid": bench}
         self.ready, self.finished = [], []
         self.lengths = {}
+        self.feeding = set()
 
     def mode(self):
         return "normal", box_feed.MODES["normal"]
@@ -199,6 +200,61 @@ class PieceTests(unittest.TestCase):
         self.assertAlmostEqual(track.position(10.), 63.75, places=6)
 
 
+class UnreadTagTests(unittest.TestCase):
+    class Reader:
+        proxy = None
+        name = "card_reader_2"
+
+        def __init__(self, error):
+            self.error = error
+
+        def _read_slot_tag(self, timeout, uids, trays):
+            raise self.error
+
+    def test_tag_with_a_number_is_a_tag_even_unread(self):
+        error = bambu_rfid.NotBambuTag("key rejected ('qidi')")
+        error.uid, error.sak = bytes.fromhex("1a2b3c4d"), 8
+        kind, tag = b.read_pair(self.Reader(error))
+        self.assertEqual(kind, p.READ_TAG)
+        self.assertEqual(tag, {"uid": "1A2B3C4D", "unread": "NotBambuTag: key rejected qidi",
+                               "detail": b.UNREAD_DETAIL, "sak": 8})
+
+    def test_two_tags_of_one_spool_count_as_one(self):
+        bench = Bench(350., 90.)
+        bench.insert(0)
+        bench.next = bench.t + b.PAIR_POLL
+        read = bench._read_slot_tag
+        # Each spool here carries two tags with one tray number, as Bambu spools do.
+        flip = {"A": 0, "B": 0}
+
+        def two_tags(timeout, uids, trays):
+            tag = read(timeout, uids, trays)
+            flip[tag["uid"]] += 1
+            return dict(tag, uid=tag["uid"] + ("1" if flip[tag["uid"]] % 2 else "2"), tray="T" + tag["uid"])
+        bench._read_slot_tag = two_tags
+        while bench.t < 200. and bench.next is not None:
+            bench.t += STEP
+            bench._move_world()
+            if bench.t >= bench.next:
+                when = bench.driver._tick(bench.t)
+                bench.next = None if when == bench.NEVER else when
+        self.assertEqual(bench.driver._spool(0).tag, "TA")
+        self.assertTrue(any("bambu_tag_slot0" in s and "'tray': 'TA'" in s for s in bench.scripts))
+
+    def test_error_without_a_number_is_no_tag(self):
+        self.assertEqual(b.read_pair(self.Reader(bambu_rfid.RfidError("bad UID checksum"))), (p.READ_NONE, None))
+
+    def test_unread_tag_keeps_the_slot_unless_replaced(self):
+        tag = {"uid": "1A2B3C4D", "unread": "NotBambuTag: key rejected", "detail": b.UNREAD_DETAIL}
+        self.assertEqual(b.unread_save_scripts(3, tag, None), [
+            "SAVE_VARIABLE VARIABLE=bambu_tag_slot3 VALUE=\"{'uid': '1A2B3C4D', 'unread': 'NotBambuTag: key rejected', "
+            "'detail': 'Метка не прочитана'}\""])
+        scripts = b.unread_save_scripts(3, tag, {"filament": "QFA01", "color": "FAFAFA"})
+        self.assertEqual(scripts[:2], ["SAVE_VARIABLE VARIABLE=filament_slot3 VALUE=\"'QFA01'\"",
+                                       "SAVE_VARIABLE VARIABLE=color_slot3 VALUE=\"['FAFAFA']\""])
+        self.assertIn("'replacement': True", scripts[2])
+
+
 class PairDriverTests(unittest.TestCase):
     def sweep(self, step=45, **kwargs):
         has = kwargs.get("has", (True, True))
@@ -290,10 +346,46 @@ class PairDriverTests(unittest.TestCase):
                 when = bench.driver._tick(bench.t)
                 bench.next = None if when == bench.NEVER else when
         bench.inserted[0] = False
+        bench.mover.feeding.add(0)
         bench.t += STEP
         bench.driver._tick(bench.t)
         self.assertTrue(bench.driver._spool(0).out)
         self.assertIn(("slot0", "off"), bench.log)
+        # The slot is let go at once, so putting the spool back in is noticed.
+        self.assertNotIn(0, bench.driver.active)
+        self.assertNotIn(0, bench.mover.feeding)
+        self.assertEqual([slots for slots, end in bench.mover.finished], [[0]])
+        self.assertIn("!! Filament of slot 0 left the sensor, insert it again", bench.scripts)
+
+    def test_spool_put_back_while_its_neighbour_feeds_starts_again(self):
+        bench = Bench(350., 90.)
+        bench.insert(0)
+        bench.insert(1)
+        for _ in range(300):
+            bench.t += STEP
+            bench._move_world()
+            if bench.next is not None and bench.t >= bench.next:
+                when = bench.driver._tick(bench.t)
+                bench.next = None if when == bench.NEVER else when
+        bench.inserted[0] = False
+        bench.t += STEP
+        bench.driver._tick(bench.t)
+        self.assertTrue(bench.driver._spool(0).out)
+        # Put back: the spool starts from scratch with the filament just past the sensor.
+        bench.world.state["A"].update(real=40., angle=350.)
+        bench.last[0] = 0.
+        bench.inserted[0] = True
+        bench.driver.insert(0, bench.t, bench.t + .5)
+        bench.next = bench.t + b.PAIR_POLL
+        while bench.t < 400. and bench.next is not None:
+            bench.t += STEP
+            bench._move_world()
+            if bench.t >= bench.next:
+                when = bench.driver._tick(bench.t)
+                bench.next = None if when == bench.NEVER else when
+        self.assertIsNone(bench.next)
+        self.assertEqual(tags(bench), ("A", "B"))
+        self.assertFalse(bench.driver._spool(0).out)
 
 
 if __name__ == "__main__":

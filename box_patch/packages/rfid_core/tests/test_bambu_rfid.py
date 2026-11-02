@@ -7,6 +7,7 @@ for folder in ("rfid_core/printer",):
     sys.path.insert(0, str(PACKAGES / folder))
 import os
 import tempfile
+import types
 import unittest
 
 import bambu_rfid as b
@@ -38,6 +39,8 @@ class FakeChip:
         self.writes = 0
         self.sak = 0x08
         self.tray_ok = False
+        self.tray_fresh_ok = False
+        self.sector2_key = None  # our own tags: the key of sector 2 for the name blocks
         self.write_target = None
         self.deny_write = False
         self.corrupt_write = False
@@ -86,10 +89,13 @@ class FakeChip:
         frame = self.fifo
         ok = (self.selected and frame[0] == 0x60 and frame[1] == 4
               and bytes(frame[2:8]) == self.key and bytes(frame[8:12]) == self.uid)
-        tray = (self.tray_ok and frame[1] == b.TRAY_SECTOR_BLOCK and bytes(frame[8:12]) == self.uid
-                and bytes(frame[2:8]) == b.derive_sector_keys(self.uid)[2]
-                and self.regs[b.REG_STATUS2] & b.CRYPTO1_ON)
-        if ok or tray:
+        tray_key = (frame[1] == b.TRAY_SECTOR_BLOCK and bytes(frame[8:12]) == self.uid
+                    and bytes(frame[2:8]) == b.derive_sector_keys(self.uid)[2])
+        nested = self.regs[b.REG_STATUS2] & b.CRYPTO1_ON
+        tray = tray_key and (self.tray_ok and nested or self.tray_fresh_ok and self.selected and not nested)
+        name = (nested and frame[1] == b.NAME_BLOCKS[0] and self.sector2_key is not None
+                and bytes(frame[2:8]) == self.sector2_key and bytes(frame[8:12]) == self.uid)
+        if ok or tray or name:
             self.regs[b.REG_STATUS2] |= b.CRYPTO1_ON
         else:
             self.regs[b.REG_STATUS2] &= ~b.CRYPTO1_ON
@@ -306,6 +312,28 @@ class TrayTests(unittest.TestCase):
         _, tag = driver(chip).read_bambu()
         self.assertEqual(tag["tray_uid"], bytes(range(1, 17)).hex().upper())
 
+    def test_tray_number_is_read_again_when_the_quick_way_fails(self):
+        chip = FakeChip()
+        chip.tray_fresh_ok = True
+        chip.blocks[b.TRAY_BLOCK] = bytes(range(1, 17))
+        uid, tag = driver(chip).read_bambu()
+        self.assertEqual(tag["tray_uid"], bytes(range(1, 17)).hex().upper())
+        self.assertEqual(uid, UID)
+
+    def test_tray_of_another_tag_is_not_taken(self):
+        chip = FakeChip()
+        chip.tray_fresh_ok = True
+        chip.blocks[b.TRAY_BLOCK] = bytes(range(1, 17))
+        reader = driver(chip)
+        original = reader.select_tag
+        calls = []
+
+        def select():
+            calls.append(1)
+            return original() if len(calls) == 1 else bytes(4)
+        reader.select_tag = select
+        self.assertIsNone(reader.read_bambu()[1]["tray_uid"])
+
     def test_failed_tray_read_keeps_the_tag(self):
         _, tag = driver(FakeChip()).read_bambu()
         self.assertIsNone(tag["tray_uid"])
@@ -334,6 +362,68 @@ class SlotReadTests(unittest.TestCase):
         chip.blocks[b.TRAY_BLOCK] = bytes(range(1, 17))
         with self.assertRaises(b.TagAbsent):
             self.read(chip, trays=[bytes(range(1, 17)).hex().upper()])
+
+
+class UnreadTagTests(unittest.TestCase):
+    def test_rejected_key_names_the_tag(self):
+        with self.assertRaises(b.NotBambuTag) as caught:
+            driver(FakeChip(key=bytes(6))).read_bambu()
+        self.assertEqual(caught.exception.uid, UID)
+        self.assertEqual(caught.exception.sak, 0x08)
+
+    def test_no_tag_has_no_number(self):
+        with self.assertRaises(b.TagAbsent) as caught:
+            driver(FakeChip(tag=False)).read_bambu()
+        self.assertIsNone(caught.exception.uid)
+
+
+class TagRulesTests(unittest.TestCase):
+    def write(self, data):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            f.write(data)
+        self.addCleanup(os.remove, f.name)
+        return f.name
+
+    def test_good_rules_are_read_bad_ones_left_out(self):
+        path = self.write('{"5B692AF4": {"filament": "QFA01", "color": "FAFAFA"},'
+                          ' "bad": {"filament": "QFA01", "color": "FAFAFA"},'
+                          ' "7081205A": {"filament": "PLA", "color": "FAFAFA"}}')
+        self.assertEqual(b.load_tag_rules(path), {"5B692AF4": {"filament": "QFA01", "color": "FAFAFA"}})
+
+    def test_missing_or_broken_file_means_no_rules(self):
+        self.assertEqual(b.load_tag_rules("/no/such/file.json"), {})
+        self.assertEqual(b.load_tag_rules(self.write("[1, 2")), {})
+
+
+class QidiTagTests(unittest.TestCase):
+    def factory_chip(self, color=6):
+        chip = FakeChip(key=dict(b.TAG_KEYS)["qidi"])
+        chip.blocks[4] = bytes([1, color, 1]) + bytes(13)
+        return chip
+
+    def test_factory_tag_gives_material_and_color(self):
+        block4, tag = driver(self.factory_chip()).read_qidi()
+        self.assertEqual(block4[0], 1)
+        self.assertEqual((tag["color"], tag["uid"], tag["detail"]), (b.QIDI_COLORS[6], UID.hex().upper(), "QIDI"))
+        self.assertEqual(tag["tag_color"], tag["color"])
+
+    def test_factory_tag_with_the_default_key(self):
+        chip = self.factory_chip()
+        chip.key = b.DEFAULT_KEY
+        self.assertEqual(driver(chip).read_qidi()[1]["color"], b.QIDI_COLORS[6])
+
+    def test_other_key_or_bad_color_is_not_a_factory_tag(self):
+        self.assertIsNone(driver(FakeChip(key=bytes(6))).read_qidi())
+        self.assertIsNone(driver(self.factory_chip(color=99)).read_qidi())
+
+    def test_rejected_key_does_not_wait_out_every_poll(self):
+        pauses = []
+        reader = b.Fm17550(FakeChip(key=bytes(6)), pauses.append)
+        reader.read_qidi()
+        self.assertLess(len(pauses), 10)
+
+    def test_custom_read_of_a_locked_tag_is_none(self):
+        self.assertIsNone(driver(self.factory_chip()).read_custom())
 
 
 class StockSettingsTests(unittest.TestCase):
@@ -434,6 +524,38 @@ class SwingReadTests(unittest.TestCase):
         self.assertEqual(log, [-10., 10., 10., "release"])
 
 
+class NeighbourAsideTests(unittest.TestCase):
+    def test_neighbour_goes_back_before_the_read_and_returns(self):
+        log = []
+        result = b.with_neighbour_aside(lambda: log.append("read") or "tag", log.append,
+                                        lambda: log.append("release"), 30.)
+        self.assertEqual(result, "tag")
+        self.assertEqual(log, [-10., -10., -10., "read", 30., "release"])
+
+    def test_neighbour_returns_when_the_read_fails(self):
+        log = []
+
+        def read():
+            raise b.TagAbsent("x")
+        with self.assertRaises(b.TagAbsent):
+            b.with_neighbour_aside(read, log.append, lambda: log.append("release"), 20.)
+        self.assertEqual(log, [-10., -10., 20., "release"])
+
+    def test_only_the_part_moved_is_returned(self):
+        log = []
+
+        failed = []
+
+        def move(distance):
+            if len(log) == 1 and not failed:
+                failed.append(distance)
+                raise ValueError("bus")
+            log.append(distance)
+        with self.assertRaises(ValueError):
+            b.with_neighbour_aside(lambda: "tag", move, lambda: log.append("release"), 30.)
+        self.assertEqual(log, [-10., 10., "release"])
+
+
 class MapFileTests(unittest.TestCase):
     def write(self, text):
         f = tempfile.NamedTemporaryFile("w", suffix=".cfg", delete=False, encoding="utf-8")
@@ -524,6 +646,85 @@ class MapProfileTests(unittest.TestCase):
         self.assertEqual(tag["profile"], "QFL30")
         self.assertEqual(tag["qidi_material"], 7)
         self.assertEqual((tag["tag_color"], tag["color"]), ("EFE255", "112233"))
+
+
+class SpoolNumberTests(unittest.TestCase):
+    """Our tag carries a spool number in block 6; both tags of a spool share it, like a Bambu tray."""
+    SPOOL = bytes.fromhex("0123456789ABCDEF")
+
+    def chip(self, block6):
+        chip = FakeChip(key=b.DEFAULT_KEY)
+        chip.blocks[4] = bytes([2, 22, 1]) + bytes(13)
+        chip.blocks[5] = b.CUSTOM_COLOR_MAGIC + bytes.fromhex("D3B7A7") + bytes(9)
+        chip.blocks[6] = block6
+        return chip
+
+    def named_chip(self, maker="eSun", name="PETG+ синий"):
+        chip = self.chip(b.SPOOL_MAGIC + self.SPOOL + bytes([b.NAME_FLAG]) + bytes(3))
+        chip.sector2_key = b.DEFAULT_KEY
+        for block, data in zip(b.NAME_BLOCKS, b.name_blocks(maker, name)):
+            chip.blocks[block] = data
+        return chip
+
+    def test_maker_and_name_come_from_sector_2(self):
+        _, tag = driver(self.named_chip()).read_custom()
+        self.assertEqual((tag["brand"], tag["detail"]), ("eSun", "PETG+ синий"))
+        _, tag = driver(self.named_chip()).read_qidi_format()
+        self.assertEqual((tag["brand"], tag["detail"]), ("eSun", "PETG+ синий"))
+
+    def test_without_the_flag_sector_2_is_not_read(self):
+        chip = self.named_chip()
+        chip.blocks[6] = b.SPOOL_MAGIC + self.SPOOL + bytes(4)
+        _, tag = driver(chip).read_custom()
+        self.assertEqual(tag["detail"], "Своя метка")
+        self.assertFalse([f for f in chip.sent if f[:2] == [0x30, 8]])
+
+    def test_name_blocks_round_trip_and_limit(self):
+        self.assertEqual(b.parse_name(b.name_blocks("eSun", "PETG+")), ("eSun", "PETG+"))
+        self.assertIsNone(b.parse_name([bytes(16)] * 3))
+        with self.assertRaises(ValueError):
+            b.name_blocks("x" * 30, "y" * 20)
+
+    def test_tag_read_gives_the_name_blocks(self):
+        result = driver(self.named_chip()).read_tag(1., lambda: 0.)
+        self.assertEqual(b.parse_name([bytes.fromhex(result["blocks"][n]) for n in b.NAME_BLOCKS]), ("eSun", "PETG+ синий"))
+
+    def test_spool_number_is_read_as_tray(self):
+        _, tag = driver(self.chip(b.SPOOL_MAGIC + self.SPOOL + bytes(4))).read_custom()
+        self.assertEqual(tag["tray_uid"], "0123456789ABCDEF")
+
+    def test_no_spool_number_without_magic(self):
+        for block6 in (bytes(16), b"QXSX" + self.SPOOL + bytes(4), b.SPOOL_MAGIC + bytes(12)):
+            self.assertIsNone(driver(self.chip(block6)).read_custom()[1]["tray_uid"])
+
+    def test_insertion_read_saves_the_tray_in_the_slot_record(self):
+        seen = []
+        chip = self.chip(b.SPOOL_MAGIC + self.SPOOL + bytes(4))
+        proxy = b.StockReadProxy(FakeRealRead(), driver(chip), lambda m: None,
+                                 FakeClock().monotonic, seen.append)
+        proxy.send([1])
+        scripts = b.slot_update_scripts({"color_slot1": ["CAC59F"]}, "slot1", seen[0])
+        self.assertIn("'tray': '0123456789ABCDEF'", scripts[-1])
+
+    def test_slot_read_carries_the_tray(self):
+        chip = self.chip(b.SPOOL_MAGIC + self.SPOOL + bytes(4))
+        reader = types.SimpleNamespace(bambu_tags=False, custom_tags=True, chip=driver(chip),
+                                       mapping_for_uid=lambda uid: None)
+        result = b.BambuRfid._read_slot_tag(reader, 1., [], [])
+        self.assertEqual(result["tray"], "0123456789ABCDEF")
+
+    def test_custom_tag_is_read_with_one_opening(self):
+        chip = self.chip(b.SPOOL_MAGIC + self.SPOOL + bytes(4))
+        found = driver(chip).read_qidi_format()
+        self.assertEqual(found[1]["detail"], "Своя метка")
+        self.assertEqual(len([f for f in chip.sent if f[:2] == [0x93, 0x70]]), 1)
+
+    def test_neighbours_second_tag_counts_as_no_tag(self):
+        chip = self.chip(b.SPOOL_MAGIC + self.SPOOL + bytes(4))
+        reader = types.SimpleNamespace(bambu_tags=False, custom_tags=True, chip=driver(chip),
+                                       mapping_for_uid=lambda uid: None)
+        with self.assertRaises(b.TagAbsent):
+            b.BambuRfid._read_slot_tag(reader, 1., [], ["0123456789ABCDEF"])
 
 
 class FakeRealRead:

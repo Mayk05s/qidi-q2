@@ -19,8 +19,10 @@ FAIL = b"\x63\x00"
 
 
 class FakeTransport:
-    def __init__(self, key, block, atr=CLASSIC_ATR, write_ok=True):
+    def __init__(self, key, block, atr=CLASSIC_ATR, write_ok=True, uid="AABBCCDD"):
         self.tag_key, self.block, self.atr_value = key, bytes(block), atr
+        self.uid = uid
+        self.spool_block = bytes(16)
         self.write_ok = write_ok
         self.loaded = None
         self.authed = False
@@ -44,7 +46,7 @@ class FakeTransport:
     def transmit(self, apdu):
         h = apdu.hex().upper()
         if h.startswith("FFCA"):
-            return bytes.fromhex("AABBCCDD") + OK
+            return bytes.fromhex(self.uid) + OK
         if self.halted:
             return FAIL
         if h.startswith("FF82"):
@@ -63,7 +65,7 @@ class FakeTransport:
         if h.startswith("FFB0"):
             if not self.authed:
                 return FAIL
-            data = {4: self.block, 5: self.color_block}.get(apdu[3], bytes(16))
+            data = {4: self.block, 5: self.color_block, 6: self.spool_block}.get(apdu[3], bytes(16))
             return data + OK
         if h.startswith("FFD6"):
             self.writes.append(apdu[3])
@@ -71,8 +73,12 @@ class FakeTransport:
                 return FAIL
             if apdu[3] == 4:
                 self.block = apdu[5:]
-            else:
+            elif apdu[3] == 5:
                 self.color_block = apdu[5:]
+            elif apdu[3] == 6:
+                self.spool_block = apdu[5:]
+            else:
+                return FAIL
             return OK
         return FAIL
 
@@ -93,7 +99,7 @@ class ExactColorTests(unittest.TestCase):
         target = FakeTransport(BLANK, bytes(16))
         result = self.write(target, "D3B7A7")
         self.assertEqual(target.block[:3], bytes([2, result["palette_code"], 1]))
-        self.assertEqual(target.writes, [4, 5])
+        self.assertEqual(target.writes, [4, 5, 6])
         self.assertEqual(q.Tag(target).read()["color"], "D3B7A7")
         self.assertTrue(result["exact_saved"])
 
@@ -110,19 +116,25 @@ class ExactColorTests(unittest.TestCase):
             self.app(FakeTransport(BLANK, bytes(16))).write(
                 {"material": 7, "color": "FF362D", "vendor": 1, "tail": "00" * 13, "profile": "x"})
 
-    def test_palette_color_writes_only_block_4(self):
+    def test_palette_color_also_fills_the_color_block(self):
+        # The module reads the spool number only from a tag with our color block.
         target = FakeTransport(BLANK, bytes(16))
         result = self.write(target, "FF362D")
-        self.assertEqual(target.writes, [4])
+        self.assertEqual(target.writes, [4, 5, 6])
         self.assertEqual(result["palette_code"], 18)
-        self.assertFalse(result["exact_saved"])
+        self.assertEqual(q.Tag(target).read()["color"], "FF362D")
 
-    def test_palette_color_clears_our_old_exact_color(self):
+    def test_palette_color_replaces_our_old_exact_color(self):
         target = FakeTransport(BLANK, bytes(16))
         self.write(target, "D3B7A7")
         self.write(target, "FF362D")
+        self.assertEqual(q.Tag(target).read()["color"], "FF362D")
+
+    def test_without_color_our_old_color_block_is_cleared(self):
+        target = FakeTransport(BLANK, bytes(16))
+        target.color_block = q.color_block("D3B7A7")
+        q.Tag(target).write_tag(SOURCE)
         self.assertEqual(target.color_block, bytes(16))
-        self.assertIsNone(q.Tag(target).read()["color"])
 
     def test_foreign_data_in_color_block_is_kept(self):
         target = FakeTransport(BLANK, bytes(16))
@@ -131,6 +143,7 @@ class ExactColorTests(unittest.TestCase):
         self.assertEqual(target.color_block, b"\x01" * 16)
         self.assertEqual(target.writes, [4])
         self.assertTrue(result["exact_skipped"])
+        self.assertIsNone(result["spool"])
 
     def test_invalid_color_rejected(self):
         with self.assertRaises(q.TagError):
@@ -175,6 +188,26 @@ class MyColorsTests(unittest.TestCase):
         colors.path.write_text(q.json.dumps(["%06X" % i for i in range(q.MY_COLORS_LIMIT)]))
         with self.assertRaises(q.TagError):
             colors.change(add="ABCDEF")
+
+
+class MyNamesTests(unittest.TestCase):
+    def test_newest_first_without_repeats_and_kept(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        names = q.MyNames(pathlib.Path(d.name) / "n.json")
+        names.remember("eSun", "PETG+")
+        names.remember(" FDplast ", "PETG")
+        names.remember("eSun", "PETG+")
+        names.remember("", "")
+        self.assertEqual(q.MyNames(names.path).load(),
+                         {"makers": ["eSun", "FDplast"], "names": [["eSun", "PETG+"], ["FDplast", "PETG"]]})
+
+    def test_broken_file_is_empty(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = pathlib.Path(d.name) / "n.json"
+        path.write_text("[1, 2]")
+        self.assertEqual(q.MyNames(path).load(), {"makers": [], "names": []})
 
 
 class MyMaterialsTests(unittest.TestCase):
@@ -243,9 +276,19 @@ class FakeBoxPrinter(q.Printer):
         q.Printer.__init__(self, "printer", fetch=self.answer)
         self.uid, self.state = uid, state
         self.blocks = {"4": block4.hex().upper(), "5": block5.hex().upper(), "6": "00" * 16}
+        self.key = "default"
+        # Further tags at the same antenna, such as the other side of the spool: [uid, key, blocks].
+        self.others = []
+        # A module from before spool numbers knows no BLOCK6 and skips it.
+        self.old_module = False
         self.error = None
         self.scripts = []
         self.result = None
+
+    def add_tag(self, uid, key="default"):
+        blocks = {str(block): "00" * 16 for block in (4, 5, 6)}
+        self.others.append([uid, key, blocks])
+        return blocks
 
     def answer(self, path, post=False):
         if path.startswith("/printer/objects/query?save_variables"):
@@ -260,11 +303,19 @@ class FakeBoxPrinter(q.Printer):
         if self.error:
             self.result = {"id": int(fields["ID"]), "ok": False, "error": self.error}
         else:
-            self.result = {"id": int(fields["ID"]), "ok": True, "uid": self.uid, "key": "default",
-                           "blocks": self.blocks}
-            for block in ("4", "5"):
-                if "BLOCK" + block in fields:
-                    self.blocks[block] = fields["BLOCK" + block]
+            exclude = fields.get("EXCLUDE", "").split(",")
+            tags = [tag for tag in [[self.uid, self.key, self.blocks]] + self.others if tag[0] not in exclude]
+            if not tags:
+                self.result = {"id": int(fields["ID"]), "ok": False, "error": "absent"}
+            elif "UID" in fields and fields["UID"] != tags[0][0]:
+                self.result = {"id": int(fields["ID"]), "ok": False, "error": "other_tag"}
+            else:
+                uid, key, blocks = tags[0]
+                for block in ("4", "5") if self.old_module else ("4", "5", "6"):
+                    if "BLOCK" + block in fields:
+                        blocks[block] = fields["BLOCK" + block]
+                self.result = {"id": int(fields["ID"]), "ok": True, "uid": uid, "key": key,
+                               "blocks": dict(blocks)}
         return {"result": "ok"}
 
 
@@ -370,6 +421,126 @@ class BoxTagTests(unittest.TestCase):
             "save_variables": {"variables": {}}, "print_stats": {"state": "standby"}}}}
         with self.assertRaisesRegex(q.PrinterError, "Повтори"):
             self.app(printer).read({"source": "box1"})
+
+
+class SpoolPairTests(unittest.TestCase):
+    """Two tags of one spool: same blocks 4 and 5 and the same spool number in block 6."""
+    FORM = {"material": 39, "color": "123456", "vendor": 1, "tail": "00" * 13, "profile": "QFG00"}
+
+    def box_app(self, printer):
+        my = pathlib.Path(tempfile.mkdtemp())
+        return q.App(printer=printer, my_colors=q.MyColors(my / "c.json"), my_materials=q.MyMaterials(my / "m.json"))
+
+    def test_block_6_format(self):
+        block = q.spool_block("0123456789ABCDEF")
+        self.assertEqual(block, b"QXSP" + bytes.fromhex("0123456789ABCDEF") + bytes(4))
+        self.assertEqual(q.SPOOL_MAGIC, b"QXSP")
+        self.assertEqual(q.spool_of(block), "0123456789ABCDEF")
+        for other in (bytes(16), b"QXSP" + bytes(12), b"QXCL" + bytes.fromhex("0123456789ABCDEF") + bytes(4)):
+            self.assertIsNone(q.spool_of(other))
+
+    def test_sector_trailer_is_never_written(self):
+        target = FakeTransport(BLANK, bytes(16))
+        q.Tag(target).probe()
+        with self.assertRaises(q.TagError):
+            q.Tag(target)._write_checked(7, bytes(16))
+        self.assertEqual(target.writes, [])
+        self.assertNotIn(7, q.WRITABLE_BLOCKS)
+
+    def test_first_tag_gets_a_new_spool_number(self):
+        target = FakeTransport(BLANK, bytes(16))
+        app = q.App(transport=target)
+        first = app.write(dict(self.FORM))
+        self.assertRegex(first["spool"], r"^[0-9A-F]{16}$")
+        self.assertEqual(target.spool_block, q.spool_block(first["spool"]))
+        self.assertEqual(first["readback"]["spool"], first["spool"])
+        # Writing the first tag again starts another spool.
+        self.assertNotEqual(app.write(dict(self.FORM, color="654321"))["spool"], first["spool"])
+
+    def test_second_tag_gets_the_same_blocks(self):
+        first = FakeTransport(BLANK, bytes(16), uid="AABBCCDD")
+        written = q.App(transport=first).write(dict(self.FORM))
+        second = FakeTransport(BLANK, bytes(16), uid="11223344")
+        result = q.App(transport=second).write(dict(self.FORM, spool=written["spool"], pair_of="AABBCCDD"))
+        self.assertEqual((result["uid"], result["spool"]), ("11223344", written["spool"]))
+        self.assertEqual((second.block, second.color_block, second.spool_block),
+                         (first.block, first.color_block, first.spool_block))
+        self.assertEqual(result["readback"]["spool"], written["spool"])
+
+    def test_second_tag_must_be_another_tag(self):
+        target = FakeTransport(BLANK, bytes(16), uid="AABBCCDD")
+        with self.assertRaisesRegex(q.TagError, "та же метка"):
+            q.App(transport=target).write(dict(self.FORM, spool="0123456789ABCDEF", pair_of="AABBCCDD"))
+        self.assertEqual(target.writes, [])
+
+    def test_second_tag_with_the_qidi_key_is_refused(self):
+        target = FakeTransport(QIDI, SOURCE)
+        with self.assertRaisesRegex(q.TagError, "заводской ключ"):
+            q.App(transport=target).write(dict(self.FORM, spool="0123456789ABCDEF", pair_of="11223344"))
+        self.assertEqual(target.writes, [])
+
+    def test_first_tag_with_the_qidi_key_gets_no_spool_number(self):
+        target = FakeTransport(QIDI, SOURCE)
+        self.assertIsNone(q.App(transport=target).write(dict(self.FORM))["spool"])
+        self.assertEqual(target.spool_block, bytes(16))
+
+    def test_foreign_block_6_is_left_alone(self):
+        target = FakeTransport(BLANK, bytes(16))
+        target.spool_block = b"\x05" * 16
+        self.assertIsNone(q.App(transport=target).write(dict(self.FORM))["spool"])
+        self.assertEqual(target.spool_block, b"\x05" * 16)
+        with self.assertRaisesRegex(q.TagError, "чужими данными"):
+            q.App(transport=target).write(dict(self.FORM, spool="0123456789ABCDEF", pair_of="11223344"))
+
+    def test_bad_spool_number_or_pair_is_refused(self):
+        app = q.App(transport=FakeTransport(BLANK, bytes(16)))
+        for extra in ({"spool": "XYZ"}, {"spool": "0123456789ABCDEF 1"}, {"pair_of": "11223344"},
+                      {"spool": "0123456789ABCDEF", "pair_of": "1 BLOCK4=00"}):
+            with self.assertRaises(q.TagError):
+                app.write(dict(self.FORM, **extra))
+
+    def test_read_shows_the_spool_number(self):
+        target = FakeTransport(BLANK, bytes(16))
+        target.spool_block = q.spool_block("0123456789ABCDEF")
+        self.assertEqual(q.Tag(target).read()["spool"], "0123456789ABCDEF")
+        self.assertIsNone(q.Tag(FakeTransport(BLANK, bytes(16))).read()["spool"])
+
+    def test_box_pair_skips_the_first_tag(self):
+        printer = FakeBoxPrinter(uid="7081205A")
+        app = self.box_app(printer)
+        first = app.write(dict(self.FORM, source="box1", uid="7081205A"))
+        self.assertIn("BLOCK6=" + q.spool_block(first["spool"]).hex().upper(), printer.scripts[1])
+        self.assertEqual(first["readback"]["spool"], first["spool"])
+        first_blocks = dict(printer.blocks)
+        second = printer.add_tag("11223344")
+        result = app.write(dict(self.FORM, source="box1", uid="11223344", spool=first["spool"], pair_of="7081205A"))
+        write = [s for s in printer.scripts if "WRITE" in s][-1]
+        self.assertIn("EXCLUDE=7081205A", write)
+        self.assertEqual(second, first_blocks)
+        self.assertEqual(printer.blocks, first_blocks)
+        self.assertEqual((result["readback"]["uid"], result["readback"]["spool"]), ("11223344", first["spool"]))
+
+    def test_box_pair_refuses_the_same_tag(self):
+        printer = FakeBoxPrinter(uid="7081205A")
+        with self.assertRaisesRegex(q.TagError, "та же метка"):
+            self.box_app(printer).write(dict(self.FORM, source="box1", uid="7081205A",
+                                             spool="0123456789ABCDEF", pair_of="7081205A"))
+        self.assertEqual(printer.scripts, [])
+
+    def test_box_pair_refuses_a_qidi_tag(self):
+        printer = FakeBoxPrinter(uid="7081205A")
+        printer.add_tag("11223344", key="qidi")
+        with self.assertRaisesRegex(q.TagError, "заводской ключ"):
+            self.box_app(printer).write(dict(self.FORM, source="box1", uid="11223344",
+                                             spool="0123456789ABCDEF", pair_of="7081205A"))
+        self.assertFalse([s for s in printer.scripts if "WRITE" in s])
+
+    def test_old_module_without_block_6_is_reported(self):
+        printer = FakeBoxPrinter()
+        printer.old_module = True
+        result = self.box_app(printer).write(dict(self.FORM, source="box1", uid="7081205A"))
+        self.assertNotIn("readback", result)
+        self.assertIn("обнови пакет", result["readback_error"])
 
 
 class SampleLinkTests(unittest.TestCase):
@@ -721,11 +892,12 @@ class SampleProjectTests(unittest.TestCase):
                                    {"index": 2, "count": 1}, {"index": 2, "count": 1, "filament": "QFG00"}]})
         finally:
             q.sample_model.build_project = original
-        self.assertEqual((seen[0]["slot"], seen[0]["material"]), (1, "QIDI PETG Basic"))
-        self.assertGreaterEqual(seen[0]["min_temp"], 200)
+        # PLA prints before PETG.
+        self.assertEqual((seen[1]["slot"], seen[1]["material"]), (1, "QIDI PETG Basic"))
+        self.assertGreaterEqual(seen[1]["min_temp"], 200)
         # A slot with a real tag keeps the tag's text unless it is edited.
-        self.assertEqual(seen[1]["material"], "Bambu Lab PLA Matte")
-        self.assertEqual(seen[2]["material"], "QIDI PETG Basic")
+        self.assertEqual(seen[0]["material"], "Bambu Lab PLA Matte")
+        self.assertEqual((seen[2]["slot"], seen[2]["material"]), (2, "QIDI PETG Basic"))
         with self.assertRaises(q.PrinterError):
             app.samples({"items": [{"index": 1, "count": 1, "filament": "QFBAD"}]})
         with self.assertRaises(q.PrinterError):
@@ -913,13 +1085,72 @@ class PrinterTests(unittest.TestCase):
         with self.assertRaises(q.PrinterError):
             q.Printer("192.0.2.1", lambda path, post=False: status).forget_tag(1)
 
+    def scripts(self):
+        return [q.urllib.parse.parse_qs(p.split("?", 1)[1])["script"][0] for p, post in self.calls if post]
+
+    def test_unread_tag_stays_in_the_slot(self):
+        values = {"bambu_tag_slot3": {"uid": "5B692AF4", "unread": "ключ метки не подошёл", "detail": "Метка не прочитана"},
+                  "color_slot3": ["FAFAFA"], "filament_slot3": "QFA01"}
+        tag = self.make(variables=values).slots()["slots"][3]["tag"]
+        self.assertEqual(tag["uid"], "5B692AF4")
+
+    def test_motor_read_keeps_a_tag_it_could_not_read(self):
+        printer = self.make()
+        printer.tag_rules = lambda: {}
+
+        def problem(reader, command):
+            raise q.BoxTagProblem("unknown_tag", "5B692AF4")
+        printer.tag_command = problem
+        printer._read_with_motor(3)
+        self.assertEqual(printer.read_errors, {})
+        self.assertIn("bambu_tag_slot3", self.scripts()[-1])
+        self.assertIn("'uid': '5B692AF4'", self.scripts()[-1])
+        self.assertIn("'unread': 'ключ метки не подошёл'", self.scripts()[-1])
+
+    def test_neighbour_is_turned_aside_only_when_asked(self):
+        printer = self.make()
+        sent = []
+
+        def command(reader, words):
+            sent.append(words[1])
+            raise q.BoxTagProblem("absent", None)
+        printer.tag_command = command
+        printer._read_with_motor(1)
+        printer._read_with_motor(1, True)
+        self.assertNotIn("NEIGHBOUR", sent[0])
+        self.assertIn("NEIGHBOUR=1", sent[1])
+
+    def test_unread_tag_with_a_rule_gets_its_material(self):
+        printer = self.make()
+        printer.tag_rules = lambda: {"5B692AF4": {"filament": "QFB54", "color": "1353AB"}}
+
+        def problem(reader, command):
+            raise q.BoxTagProblem("unknown_tag", "5B692AF4")
+        printer.tag_command = problem
+        printer._read_with_motor(3)
+        scripts = self.scripts()
+        self.assertIn("SAVE_VARIABLE VARIABLE=filament_slot3 VALUE=\"'QFB54'\"", scripts)
+        self.assertIn("'filament': 'QFB54'", scripts[-1])
+
+    def test_tag_rule_is_saved_by_number(self):
+        printer = self.make(variables={"bambu_tag_slot3": {"uid": "5B692AF4", "unread": "x", "detail": "Метка не прочитана"}})
+        printer.tag_rules = lambda: {"7081205A": {"filament": "QFA01", "color": "FAFAFA"}}
+        uploads = []
+        printer.upload = lambda name, text: uploads.append((name, q.json.loads(text)))
+        printer.save_tag_rule(3, "5B692AF4", "QFB54", "1353AB")
+        self.assertEqual(uploads, [("bambu_tag_rules.json", {"7081205A": {"filament": "QFA01", "color": "FAFAFA"},
+                                                             "5B692AF4": {"filament": "QFB54", "color": "1353AB"}})])
+        self.assertIn("'unread': 'x'", self.scripts()[-1])
+        with self.assertRaises(q.PrinterError):
+            printer.save_tag_rule(3, "bad", "QFB54", "1353AB")
+
     def test_skip_neighbour_uses_our_read_with_empty_head(self):
         printer = self.make()
         started = []
-        printer._read_with_motor = started.append
+        printer._read_with_motor = lambda *args: started.append(args)
         printer.read_slot(1, skip_neighbour=True)
         printer.read_thread.join(2)
-        self.assertEqual(started, [1])
+        self.assertEqual(started, [(1, True)])
         self.assertFalse(any(post and "READ_RFID" in p for p, post in self.calls))
 
     def test_read_error_reaches_the_slot(self):
@@ -1044,6 +1275,59 @@ class FeatureTests(unittest.TestCase):
             path.write_text("not json")
             q.load_features(path)
             self.assertEqual(q.features, set(q.ALL_FEATURES))
+
+
+
+class SampleTextTests(unittest.TestCase):
+    """What a sample says: a tag that names its plastic, otherwise the profile in use."""
+
+    def samples(self, tag, filament="QFB54"):
+        class Printer:
+            def slots(self):
+                return {"slots": [{"index": 2, "label": "1C", "filament": filament, "color": "1353AB", "tag": tag}]}
+        app = q.App(printer=Printer())
+        return app._sample_list({"items": [{"index": 2, "count": 1}]})[0]
+
+    def test_factory_qidi_tag_takes_the_profile(self):
+        sample = self.samples({"uid": "2B752AF4", "detail": "QIDI", "brand": "QIDI", "tag_color": "1353AB"})
+        self.assertEqual(sample["material"], "QIDI ABS Rapido")
+        self.assertEqual((sample["min_temp"], sample["max_temp"]), (240, 280))
+
+    def test_our_tag_without_a_name_takes_the_profile(self):
+        sample = self.samples({"uid": "E83E2288", "detail": "Своя метка", "tag_color": "FF362D"}, "QFG00")
+        self.assertEqual(sample["material"], "QIDI PETG Basic")
+
+    def test_our_named_tag_keeps_its_name_and_gets_temperatures(self):
+        sample = self.samples({"uid": "E83E2288", "detail": "PETG+ синий", "brand": "eSun"}, "QFG00")
+        self.assertEqual(sample["material"], "eSun PETG+ синий")
+        self.assertEqual(sample["dry_temp"], 45)
+
+
+class SampleOrderTests(unittest.TestCase):
+    def test_coolest_plastic_prints_first(self):
+        class Printer:
+            def slots(self):
+                return {"slots": [{"index": i, "label": "1" + "ABCD"[i], "filament": f, "color": "FFFFFF", "tag": {}}
+                                  for i, f in enumerate(("QFG00", "QFB54", "QFA00", "QFG00"))]}
+        app = q.App(printer=Printer())
+        samples = app._sample_list({"items": [{"index": i, "count": 1} for i in range(4)]})
+        self.assertEqual([s["slot"] for s in samples], [2, 0, 3, 1])
+
+    def test_types_rank_by_their_start(self):
+        self.assertEqual([q.heat_rank(t) for t in ("PLA-CF", "PETG-GF", "PET-CF", "ASA-AERO", "PC-ABS-FR", "PPS-GF", "X")],
+                         [0, 1, 3, 2, 3, 4, None])
+
+
+class TagNameTests(unittest.TestCase):
+    def test_names_fit_or_are_refused(self):
+        self.assertIsNone(q.tag_names("", " "))
+        self.assertEqual(q.parse_name(q.tag_names("eSun", "PETG+")), ("eSun", "PETG+"))
+        with self.assertRaises(q.TagError):
+            q.tag_names("Производитель очень длинный", "и название тоже")
+
+    def test_flag_in_block_6(self):
+        self.assertEqual(q.spool_block("0123456789ABCDEF", True)[12], q.NAME_FLAG)
+        self.assertEqual(q.spool_block("0123456789ABCDEF")[12], 0)
 
 
 if __name__ == "__main__":

@@ -6,9 +6,11 @@
 #
 # G-code, for each bambu_rfid reader:
 #   BAMBU_RFID_TAG_READ READER=card_reader_1 ID=1 [TIMEOUT=15] [EXCLUDE=7081205A,...]
-#   BAMBU_RFID_TAG_WRITE READER=card_reader_1 ID=2 UID=7081205A BLOCK4=<hex> [BLOCK5=<hex>]
+#   BAMBU_RFID_TAG_WRITE READER=card_reader_1 ID=2 UID=7081205A BLOCK4=<hex> [BLOCK5=<hex>] [BLOCK6=<hex>]
+#       [EXCLUDE=...]
 #       read or write a QIDI-format tag; the result is in the reader's status as tag_result.
-#       A write goes only to the tag named by its UID and only to blocks 4 and 5.
+#       A write goes only to the tag named by its UID and only to blocks 4, 5 and 6:
+#       block 5 holds the exact color and profile, block 6 the spool number (QXSP + 8 bytes).
 try:
     from . import bambu_rfid
 except ImportError:
@@ -17,7 +19,7 @@ except ImportError:
 MIFARE_WRITE = 0xA0
 MIFARE_ACK = 0x0A
 # Never the sector trailer, block 7: a bad write there locks the sector for good.
-WRITABLE_BLOCKS = (4, 5)
+WRITABLE_BLOCKS = (4, 5, 6) + bambu_rfid.NAME_BLOCKS
 TAG_READ_TIMEOUT = 15.
 TAG_WRITE_TIMEOUT = 5.
 
@@ -36,41 +38,51 @@ def write_block(chip, block, data):
         raise bambu_rfid.RfidError("read back differs from what was written")
 
 
-def write_tag(chip, uid, blocks, timeout, monotonic, check_abort=None):
-    """Write only to the tag `uid`: another tag may have come to the antenna since it was read."""
+def write_tag(chip, uid, blocks, timeout, monotonic, check_abort=None, exclude=()):
+    """Write only to the tag `uid`: another tag may have come to the antenna since it was read.
+    A tag in `exclude`, such as the other tag of the same spool, counts as no tag."""
     def action():
-        found, key = chip._open_tag()
+        found, key = chip._open_tag(exclude)
         if found != uid:
             raise bambu_rfid.TagProblem("other_tag")
         for block, data in sorted(blocks.items()):
+            # The maker and name are in sector 2, opened with the default key of our own tags.
+            if block == bambu_rfid.NAME_BLOCKS[0] and not chip.nested_auth(block, bambu_rfid.DEFAULT_KEY, found):
+                raise bambu_rfid.TagProblem("denied")
             write_block(chip, block, data)
         return {"uid": found.hex().upper(), "key": key}
     return chip._retrying(action, timeout, monotonic, check_abort)
 
 
-def cmd_TAG_READ(reader, gcmd):
-    timeout = gcmd.get_float("TIMEOUT", TAG_READ_TIMEOUT, minval=0., maxval=60.)
+def _exclude(gcmd):
     try:
-        exclude = [bytes.fromhex(uid) for uid in gcmd.get("EXCLUDE", "").split(",") if uid]
+        return [bytes.fromhex(uid) for uid in gcmd.get("EXCLUDE", "").split(",") if uid]
     except ValueError:
         raise gcmd.error("bambu_rfid: EXCLUDE must be hex UIDs")
+
+
+def cmd_TAG_READ(reader, gcmd):
+    timeout = gcmd.get_float("TIMEOUT", TAG_READ_TIMEOUT, minval=0., maxval=60.)
+    exclude = _exclude(gcmd)
     reader._tag_command(gcmd, lambda: reader.chip.read_tag(
         timeout, reader.reactor.monotonic, reader._check_stock_idle, exclude))
 
 
 def cmd_TAG_WRITE(reader, gcmd):
     timeout = gcmd.get_float("TIMEOUT", TAG_WRITE_TIMEOUT, minval=0., maxval=60.)
+    exclude = _exclude(gcmd)
     try:
         uid = bytes.fromhex(gcmd.get("UID"))
         blocks = {4: bytes.fromhex(gcmd.get("BLOCK4"))}
-        if gcmd.get("BLOCK5", None) is not None:
-            blocks[5] = bytes.fromhex(gcmd.get("BLOCK5"))
+        for block in (5, 6) + bambu_rfid.NAME_BLOCKS:
+            if gcmd.get("BLOCK%d" % (block,), None) is not None:
+                blocks[block] = bytes.fromhex(gcmd.get("BLOCK%d" % (block,)))
     except ValueError:
         raise gcmd.error("bambu_rfid: UID and blocks must be hex")
     if len(uid) != 4 or any(len(data) != 16 for data in blocks.values()):
         raise gcmd.error("bambu_rfid: UID must be 4 bytes and a block 16")
     reader._tag_command(gcmd, lambda: write_tag(
-        reader.chip, uid, blocks, timeout, reader.reactor.monotonic, reader._check_stock_idle))
+        reader.chip, uid, blocks, timeout, reader.reactor.monotonic, reader._check_stock_idle, exclude))
 
 
 class BambuNfc:

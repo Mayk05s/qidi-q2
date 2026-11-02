@@ -419,7 +419,7 @@ class InsertWatchTests(EjectTests):
         self.mover._run_feeds(12.)
         # Only the catch move here; the pair logic feeds on from where it ends.
         self.assertEqual(moved[0][0], [1, 3])
-        self.assertEqual([move[0] for move in moved[0][1]], [b.FEED_CATCH_LENGTH, -b.FEED_CATCH_LENGTH])
+        self.assertEqual([move[0] for move in moved[0][1]], [b.FEED_CATCH_LENGTH, -b.FEED_CATCH_BACK])
         self.assertFalse(moved[0][2])
         self.assertEqual(inserted, [(1, 12., 13.), (3, 12., 13.)])
 
