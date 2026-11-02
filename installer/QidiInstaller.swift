@@ -668,6 +668,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
                 }
+                // A scroll bar that takes room would shift the cards whenever a description opens.
                 ScrollView {
                     VStack(spacing: 8) {
                         ForEach(model.modules) { feature in
@@ -678,6 +679,7 @@ struct ContentView: View {
                         }
                     }
                 }
+                .scrollIndicators(.never)
 
                 if let outcome = model.outcome {
                     Label(outcome.text, systemImage: outcome.ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
@@ -715,7 +717,7 @@ struct ContentView: View {
             .padding(18)
             .frame(width: 600)
         }
-        .frame(height: 680)
+        .frame(height: 760)
         .onAppear { model.refresh() }
         .alert(model.actionTitle + "?", isPresented: $confirmApply) {
             Button(model.actionTitle) { model.apply() }
