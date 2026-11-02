@@ -108,7 +108,8 @@ def draw(slot, color, kind):
                 mean = [sum(c[i] for c in found) // len(found) for i in range(3)]
                 row.append((mean[0], mean[1], mean[2], 255 * len(found) // SAMPLES ** 2))
         rows.append(row)
-    SlotLabel(slot, 36, 39).paint(rows, (24, 24, 22))
+    # The rack spool's name does not fit the plate: it is shown as R.
+    SlotLabel("R" if slot == "Rack" else slot, 36, 39).paint(rows, (24, 24, 22))
     return rows
 
 

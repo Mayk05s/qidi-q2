@@ -296,6 +296,29 @@ class TaglessSpoolTests(unittest.TestCase):
         view = self.ledger.view("slot:1", ["QFA00", "A878FF"])
         self.assertEqual((view["remaining"], view["name"]), (300, "eSun PLA+"))
 
+    def test_edited_plastic_keeps_the_count(self):
+        self.ledger.pick(1, dict(PLASTIC, plastic="p1"), ["QFA01", "000000"], printing=False)
+        self.ledger.add("slot:1", 40, ["QFA00", "A878FF"])
+        # The user changes the color of p1 in the list: the spool keeps its 960 g.
+        scripts = self.ledger.pick(1, dict(PLASTIC, plastic="p1", color="CEC0FE", grams=5, keep=True),
+                                   ["QFA00", "A878FF"], printing=False)
+        self.assertIn("SAVE_VARIABLE VARIABLE=color_slot1 VALUE=\"['CEC0FE']\"", scripts)
+        view = self.ledger.view("slot:1", ["QFA00", "CEC0FE"])
+        self.assertEqual((view["remaining"], view["plastic"]), (960, "p1"))
+        # Another plastic, or a pick without keep, starts the count anew.
+        self.ledger.pick(1, dict(PLASTIC, plastic="p2", grams=500, keep=True), ["QFA00", "CEC0FE"], printing=False)
+        self.assertEqual(self.ledger.view("slot:1", ["QFA00", "A878FF"])["remaining"], 500)
+
+    def test_rack_is_counted_without_a_tag(self):
+        rack = {"filament_slot16": "QFA00", "color_slot16": ["B87F2B"]}
+        self.assertEqual(b.spool_key(rack, b.RACK_SLOT), "slot:16")
+        self.assertEqual(b.active_slot({"loaded_slot": "slot16"}), b.RACK_SLOT)
+        scripts = self.ledger.pick(b.RACK_SLOT, PLASTIC, ["QFA00", "B87F2B"], printing=False)
+        # The rack has no tag record to forget.
+        self.assertEqual(len(scripts), 2)
+        self.ledger.add("slot:16", 25, ["QFA00", "A878FF"])
+        self.assertEqual(self.ledger.view("slot:16", ["QFA00", "A878FF"])["remaining"], 975)
+
     def test_pick_request(self):
         path = os.path.join(self.folder, b.PICK_REQUEST_FILE % 1)
         with open(path, "w") as f:

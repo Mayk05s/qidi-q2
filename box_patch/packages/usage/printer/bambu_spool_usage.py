@@ -14,8 +14,10 @@
 # A spool without a tag is counted by its slot, and only while the slot keeps the material and
 # color it was counted with: a record of a tag that no longer matches the slot is an earlier spool's.
 # The Fluidd card puts a plastic from the user's list in such a slot with spool_pick_<slot>.json
-# ({name, filament, color, grams}): the count starts at those grams and the slot gets the material
-# and color; during a print those two are written when it ends.
+# ({name, filament, color, grams, plastic, keep}): the count starts at those grams and the slot gets
+# the material and color; during a print those two are written when it ends. With keep, the same
+# plastic was edited in the list: material, color and name change, the count stays.
+# The rack spool (slot16) is counted the same way, as a spool without a tag; SLOT=16 sets it.
 #   BAMBU_SCREEN_WARNING BOX=3|4
 #       raise the stock Box 3 or 4 window of the printer screen for a moment; the panel turns
 #       those windows into the low-plastic window. At a print start the panel leaves
@@ -28,6 +30,10 @@ import re
 import time
 
 BOX_SLOTS = 4
+# The spool on the rack behind the printer: the stock firmware calls it slot16. It has no tag,
+# so it is counted like a Box spool without one.
+RACK_SLOT = 16
+COUNTED_SLOTS = tuple(range(BOX_SLOTS)) + (RACK_SLOT,)
 USAGE_FILE = "spool_usage.json"
 USAGE_INTERVAL = 1.
 USAGE_SAVE_INTERVAL = 30.
@@ -80,9 +86,12 @@ def pick_scripts(slot, entry):
     """G-code that gives the slot the material and color of the plastic picked for it, and
     forgets the tag of the spool that was there before, as the panel's «forget» does."""
     filament, color = entry["slot_as"]
-    return ["SAVE_VARIABLE VARIABLE=filament_slot%d VALUE=\"'%s'\"" % (slot, filament),
-            "SAVE_VARIABLE VARIABLE=color_slot%d VALUE=\"['%s']\"" % (slot, color),
-            "SAVE_VARIABLE VARIABLE=bambu_tag_slot%d VALUE=\"{'empty': True}\"" % (slot,)]
+    scripts = ["SAVE_VARIABLE VARIABLE=filament_slot%d VALUE=\"'%s'\"" % (slot, filament),
+               "SAVE_VARIABLE VARIABLE=color_slot%d VALUE=\"['%s']\"" % (slot, color)]
+    if slot != RACK_SLOT:
+        # The rack has no reader and no tag record of its own.
+        scripts.append("SAVE_VARIABLE VARIABLE=bambu_tag_slot%d VALUE=\"{'empty': True}\"" % (slot,))
+    return scripts
 
 
 class SpoolLedger:
@@ -164,6 +173,12 @@ class SpoolLedger:
         held back until the print ends (pending), and the slot keeps its count meanwhile."""
         entry = {"set_g": float(plastic["grams"]), "used_g": 0., "manual": True, "name": plastic["name"],
                  "slot_as": [plastic["filament"], plastic["color"]]}
+        if plastic.get("plastic"):
+            entry["plastic"] = plastic["plastic"]
+        old = self._entry("slot:%d" % (slot,), now)
+        if plastic.get("keep") and old and old.get("plastic") == plastic.get("plastic"):
+            # The plastic was edited in the list: the spool stays, so does its count.
+            entry["set_g"], entry["used_g"] = old["set_g"], old["used_g"]
         if printing:
             entry["was"], scripts = list(now), []
         else:
@@ -172,10 +187,10 @@ class SpoolLedger:
         self.dirty = True
         return scripts
 
-    def pending(self, slots=BOX_SLOTS):
+    def pending(self, slots=COUNTED_SLOTS):
         """G-code of the picks made during a print, now that it is over."""
         scripts = []
-        for slot in range(slots):
+        for slot in slots:
             entry = self.spools.get("slot:%d" % (slot,))
             if entry and entry.pop("was", None) is not None:
                 scripts += pick_scripts(slot, entry)
@@ -210,7 +225,7 @@ class SpoolLedger:
         if entry["set_g"] is not None:
             remaining = max(0., entry["set_g"] - entry["used_g"])
         return {"key": key, "remaining": remaining, "used": entry["used_g"], "full": entry["set_g"],
-                "name": entry.get("name")}
+                "name": entry.get("name"), "plastic": entry.get("plastic")}
 
     def save(self):
         if not self.dirty:
@@ -259,7 +274,12 @@ def take_pick_request(folder, slot):
             or not re.fullmatch(r"[0-9A-F]{6}", color) or isinstance(grams, bool) \
             or not isinstance(grams, int) or not 0 <= grams <= MAX_SPOOL_GRAMS:
         return None
-    return {"name": name, "filament": filament, "color": color, "grams": grams}
+    result = {"name": name, "filament": filament, "color": color, "grams": grams}
+    # Which plastic of the panel's list it is; keep: the plastic was edited, the count stays.
+    if isinstance(plastic.get("plastic"), str) and re.fullmatch(r"[0-9a-z]{1,16}", plastic["plastic"]):
+        result["plastic"] = plastic["plastic"]
+        result["keep"] = plastic.get("keep") is True
+    return result
 
 
 def take_screen_request(folder, now):
@@ -303,7 +323,7 @@ class FilamentMeter:
 
 def active_slot(box_status):
     match = re.fullmatch(r"slot(\d+)", str(box_status.get("loaded_slot", "")))
-    if match and int(match.group(1)) < BOX_SLOTS:
+    if match and int(match.group(1)) in COUNTED_SLOTS:
         return int(match.group(1))
     return None
 
@@ -405,7 +425,7 @@ class SpoolUsage:
         folder = os.path.dirname(self.ledger.path)
         printing = stats["state"] in ("printing", "paused")
         scripts = [] if printing else self.ledger.pending()
-        for slot in range(BOX_SLOTS):
+        for slot in COUNTED_SLOTS:
             grams = take_spool_request(folder, slot)
             if grams is not None:
                 variables = self._variables()
@@ -432,11 +452,13 @@ class SpoolUsage:
 
     def get_status(self, eventtime):
         variables = self._variables()
-        return {"slots": [self.ledger.view(spool_key(variables, slot), slot_values(variables, slot))
-                          for slot in range(BOX_SLOTS)]}
+        views = [self.ledger.view(spool_key(variables, slot), slot_values(variables, slot)) for slot in COUNTED_SLOTS]
+        return {"slots": views[:BOX_SLOTS], "rack": views[BOX_SLOTS]}
 
     def cmd_SET(self, gcmd):
-        slot = gcmd.get_int("SLOT", minval=0, maxval=BOX_SLOTS - 1)
+        slot = gcmd.get_int("SLOT", minval=0, maxval=RACK_SLOT)
+        if slot not in COUNTED_SLOTS:
+            raise gcmd.error("SLOT is 0-%d or %d for the rack" % (BOX_SLOTS - 1, RACK_SLOT))
         grams = gcmd.get_float("GRAMS", minval=0., maxval=MAX_SPOOL_GRAMS)
         variables = self._variables()
         self.ledger.set_remaining(spool_key(variables, slot), grams, slot_values(variables, slot))

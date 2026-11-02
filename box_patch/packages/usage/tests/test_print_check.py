@@ -104,6 +104,14 @@ class Evaluating(unittest.TestCase):
     def test_no_counter_is_unknown_not_ok(self):
         self.assertEqual(self.rows(spools=[None, None, None, None])["1A"]["verdict"], "unknown")
 
+    def test_rack_spool_is_counted(self):
+        spools = dict(enumerate(self.spools))
+        spools[p.RACK_SLOT] = spool(2)
+        rows = {r["label"]: r for r in p.evaluate(self.plan, dict(MAP, value_t3="slot16"), spools,
+                                                  {**LABELS, p.RACK_SLOT: "Rack"})}
+        self.assertEqual((rows["Rack"]["remaining"], rows["Rack"]["verdict"]), (2, "short"))
+        self.assertNotIn("1D", rows)
+
     def test_unmapped_tool_is_unknown(self):
         rows = p.evaluate(self.plan, {}, self.spools, LABELS)
         self.assertEqual([(r["label"], r["verdict"]) for r in rows], [(None, "unknown")])
@@ -123,7 +131,7 @@ class FakePrinter:
         return {"result": {"status": {
             "save_variables": {"variables": MAP},
             "print_stats": {"state": self.state, "filename": self.filename, "filament_used": self.used},
-            "bambu_spool_usage": {"slots": [spool(100), spool(100), spool(100), spool(100)]}}}}
+            "bambu_spool_usage": {"slots": [spool(100), spool(100), spool(100), spool(100)], "rack": spool(1)}}}}
 
 
 class Checking(unittest.TestCase):
@@ -134,6 +142,18 @@ class Checking(unittest.TestCase):
             self.downloads.append(name)
             return GCODE.encode()
         return p.PrintCheck(printer, download)
+
+    def test_tool_on_the_rack_gets_the_rack_spool(self):
+        printer = FakePrinter()
+        fetch = printer.fetch
+        def with_rack(path, post=False):
+            data = fetch(path, post)
+            if "status" in data.get("result", {}):
+                data["result"]["status"]["save_variables"]["variables"] = dict(MAP, value_t0="slot16")
+            return data
+        printer.fetch = with_rack
+        rows = {r["label"]: r for r in self.make(printer).check()["rows"]}
+        self.assertEqual((rows["Rack"]["remaining"], rows["Rack"]["verdict"]), (1, "short"))
 
     def test_idle_takes_newest_visible_file(self):
         result = self.make(FakePrinter()).check()

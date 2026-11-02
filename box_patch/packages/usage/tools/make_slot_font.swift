@@ -3,7 +3,7 @@
 // swift tools/make_slot_font.swift > printer/slot_font.json (from the package folder)
 import AppKit
 
-let chars = "0123456789ABCDEFGH"
+let chars = "0123456789ABCDEFGHR"
 let font = NSFont(name: "HelveticaNeue-Bold", size: 23)!
 let pad = 4
 var glyphs: [String: Any] = [:]

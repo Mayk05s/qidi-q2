@@ -31,6 +31,13 @@ class CardData(unittest.TestCase):
         spool = f.card_data(slots, {})["spools"][0]
         self.assertEqual((spool["material"], spool["weight"], spool["tagless"]), ("eSun PLA+", 750, True))
 
+    def test_rack_spool_comes_last_when_counted(self):
+        rack = {"index": 16, "label": "Rack", "color": "B87F2B", "tag": None, "spool": {"remaining": 300, "full": 1000}}
+        spools = f.card_data(dict(SLOTS, rack=rack), {})["spools"]
+        self.assertEqual((spools[-1]["label"], spools[-1]["remaining"], spools[-1]["tagless"]), ("Rack", 300, True))
+        # An older usage module counts no rack: no tile.
+        self.assertEqual(len(f.card_data(dict(SLOTS, rack=dict(rack, spool=None)), {})["spools"]), 2)
+
     def test_during_print_need_is_what_is_left_to_print(self):
         check = {"file": "a.gcode", "printing": True, "rows": [
             {"label": "1D", "need": 300, "left_to_print": 120, "remaining": 100, "verdict": "short"}]}

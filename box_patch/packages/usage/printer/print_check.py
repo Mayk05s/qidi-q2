@@ -19,6 +19,8 @@ FILE_LIMIT = 20
 # Not stock codes: the screen shows any code in an error window, with our text.
 
 SLOT_NAME = re.compile(r"slot(\d+)")
+# The rack spool behind the printer, which the stock firmware calls slot16.
+RACK_SLOT = 16
 GRAMS = re.compile(r"^; *(?:total filament weight \[g\] *:|filament used \[g\] *=)(.+)$", re.M)
 MOVES = re.compile(r"^(?:T(\d+)\s*$|(M82|M83)\b|G92 E(-?[\d.]+)|G[0123] [^;\n]*E(-?[\d.]+))", re.M)
 
@@ -108,7 +110,8 @@ def evaluate(plan, variables, spools, labels, used_mm=0.0):
     result = []
     for index in sorted(rows, key=lambda key: (key is None, key)):
         row = rows[index]
-        spool = spools[index] if index is not None and index < len(spools) else None
+        spool = spools.get(index) if isinstance(spools, dict) else \
+            spools[index] if index is not None and index < len(spools) else None
         remaining = spool.get("remaining") if isinstance(spool, dict) else None
         color = variables.get("color_slot%s" % (index,))
         tag = variables.get("bambu_tag_slot%s" % (index,))
@@ -179,13 +182,19 @@ class PrintCheck:
             if not printing:
                 raise CheckError("Такого файла нет на принтере")
             item = {"path": current}
-        spools = (status.get("bambu_spool_usage") or {}).get("slots") or []
+        usage = status.get("bambu_spool_usage") or {}
+        # Box slots by number, and the rack spool (slot16) when the module counts it.
+        spools = dict(enumerate(usage.get("slots") or []))
+        if usage.get("rack"):
+            spools[RACK_SLOT] = usage["rack"]
         try:
             plan = self._plan(item)
         except CheckError as e:
             result.update({"rows": [], "message": str(e)})
             return result
-        result["rows"] = evaluate(plan, variables, spools, dict(self.printer.SLOTS),
+        labels = dict(self.printer.SLOTS)
+        labels[RACK_SLOT] = "Rack"
+        result["rows"] = evaluate(plan, variables, spools, labels,
                                   stats.get("filament_used") or 0.0 if printing else 0.0)
         return result
 

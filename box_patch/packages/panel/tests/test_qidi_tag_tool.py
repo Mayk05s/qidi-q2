@@ -720,11 +720,28 @@ class MyPlasticsTests(unittest.TestCase):
             with self.assertRaises(q.TagError):
                 self.app.change_plastics({"add": bad})
 
+    def test_edited_plastic_updates_the_spools_it_is_in(self):
+        self.app.change_plastics({"add": self.PLASTIC})
+        usage = {"slots": [{"remaining": 10.}, {"remaining": 612.4, "plastic": "a1"}, None, None],
+                 "rack": {"remaining": 300., "plastic": "a1"}}
+        status = {"save_variables": {"variables": {"filament_slot16": "QFA00", "color_slot16": ["B87F2B"]}},
+                  "print_stats": {"state": "standby"}, "bambu_spool_usage": usage}
+        self.app.printer.fetch = lambda path, post=False: {"result": {"status": status}}
+        rack = self.app.printer.slots()["rack"]
+        self.assertEqual((rack["index"], rack["label"], rack["color"]), (16, "Rack", "B87F2B"))
+        r = self.app.change_plastics({"add": dict(self.PLASTIC, color="CEC0FE")})
+        self.assertEqual(r["updated"], ["1B", "Rack"])
+        sent = q.json.loads(self.files["spool_pick_1.json"])
+        self.assertEqual((sent["color"], sent["keep"], sent["plastic"], sent["grams"]), ("CEC0FE", True, "a1", 612))
+        self.assertTrue(q.json.loads(self.files["spool_pick_16.json"])["keep"])
+        self.assertNotIn("spool_pick_0.json", self.files)
+
     def test_pick_hands_the_plastic_to_the_usage_module(self):
         self.app.change_plastics({"add": self.PLASTIC})
         self.app.pick_plastic({"index": 1, "id": "a1", "grams": 640})
         self.assertEqual(q.json.loads(self.files["spool_pick_1.json"]),
-                         {"name": "eSun PLA+ сиреневый", "filament": "QFA01", "color": "A878FF", "grams": 640})
+                         {"name": "eSun PLA+ сиреневый", "filament": "QFA01", "color": "A878FF", "grams": 640,
+                          "plastic": "a1", "keep": False})
         # Without a maker and a name the slot shows the material.
         self.app.change_plastics({"add": dict(self.PLASTIC, id="b2", maker="", name="")})
         self.app.pick_plastic({"index": 0, "id": "b2", "grams": 10})

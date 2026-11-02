@@ -13,7 +13,9 @@ hands the choice to bambu_spool_usage as spool_pick_<slot>.json next to printer.
 def card_data(slots, check):
     """What the Fluidd script needs, from Printer.slots() and PrintCheck.check()."""
     spools = []
-    for slot in slots["slots"]:
+    # The Box slots, then the rack spool when the usage module counts it.
+    rack = slots.get("rack")
+    for slot in slots["slots"] + ([rack] if rack and rack.get("spool") else []):
         spool = slot.get("spool") or {}
         tag = slot.get("tag") or {}
         # A spool without a tag gets its plastic from the user's list, see SCRIPT.
@@ -42,7 +44,7 @@ style.textContent=[
 "#qidi-plastic-card .qh svg{width:20px;height:20px;opacity:.85}",
 "#qidi-plastic-card .qf{margin-left:auto;font-size:12px;font-weight:400;padding:2px 10px;border-radius:12px;background:rgba(127,127,127,.16);max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
 "#qidi-plastic-card .qb{padding:14px 16px 16px}",
-"#qidi-plastic-card .qg{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}",
+"#qidi-plastic-card .qg{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}",
 "#qidi-plastic-card .qt{position:relative;display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px;border:1px solid rgba(127,127,127,.22);background:rgba(127,127,127,.06);min-width:0}",
 "#qidi-plastic-card .qt.short{border-color:#ff5252;background:rgba(255,82,82,.08)}#qidi-plastic-card .qt.risk{border-color:#ffb74d;background:rgba(255,183,77,.08)}",
 "#qidi-plastic-card .qt svg{flex:none;width:38px;height:38px}",
@@ -58,7 +60,6 @@ style.textContent=[
 "#qidi-plastic-card .qw.short{background:rgba(255,82,82,.12);color:#ff7b7b}",
 "#qidi-plastic-card .qw.risk,#qidi-plastic-card .qw.unknown{background:rgba(255,183,77,.12);color:#ffc370}",
 "#qidi-plastic-card .qw.ok{background:rgba(76,175,80,.12);color:#6fcf73}",
-"@media (max-width:700px){#qidi-plastic-card .qg{grid-template-columns:repeat(2,minmax(0,1fr))}}",
 "#qidi-plastic-card .qt.pick{cursor:pointer}#qidi-plastic-card .qt.pick:hover{border-color:rgba(127,127,127,.55)}",
 "#qidi-plastic-card .qpk{font-size:12px;font-weight:600;color:#7fa8f5;margin-top:3px}",
 "#qidi-pick{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55)}",
@@ -107,7 +108,7 @@ function boxCard(){
 function spoolColumns(card){
   // A spool's block is the largest one around its label that holds no other spool label:
   // Fluidd's grid columns differ with the window width, so its classes are not relied on.
-  var LABEL=/^[1-4][A-D]$/,spans=[];
+  var LABEL=/^([1-4][A-D]|Rack)$/,spans=[];
   // Fluidd draws the label in a button or in the slot icon, depending on its version and the
   // slot state: any element whose own text is the label counts.
   card.querySelectorAll("*").forEach(function(node){

@@ -164,6 +164,7 @@ class Printer:
     """Slot values on the printer, through the Moonraker API."""
 
     SLOTS = [(0, "1A"), (1, "1B"), (2, "1C"), (3, "1D")]
+    RACK = 16
 
     def __init__(self, host, fetch=None):
         self.host = host
@@ -218,7 +219,13 @@ class Printer:
             key = tag_identity(slot["tag"])
             slot["same_tag"] = [other["index"] for other in result if key and other is not slot
                                 and tag_identity(other["tag"]) == key]
-        return {"slots": result, "state": status["print_stats"]["state"]}
+        # The rack spool behind the printer: no reader, counted by the usage module like a spool
+        # without a tag. Kept apart from the Box slots, which the slot cards show.
+        color = values.get("color_slot%d" % self.RACK)
+        rack = {"index": self.RACK, "label": "Rack", "filament": values.get("filament_slot%d" % self.RACK),
+                "color": color[0] if isinstance(color, list) and color and isinstance(color[0], str) else None,
+                "tag": None, "spool": (status.get("bambu_spool_usage") or {}).get("rack")}
+        return {"slots": result, "rack": rack, "state": status["print_stats"]["state"]}
 
     def set_spool(self, index, grams):
         if index not in [i for i, _ in self.SLOTS]:
@@ -228,10 +235,11 @@ class Printer:
         # A file rather than G-code: G-code waits behind a running print.
         self.upload("spool_set_%d.txt" % (index,), "%d\n" % (grams,))
 
-    def pick_plastic(self, index, plastic, grams):
+    def pick_plastic(self, index, plastic, grams, keep=False):
         """The usage module (bambu_spool_usage) takes the file: the count starts at grams and the
-        slot gets the plastic's material and color, after the print if one is running."""
-        if index not in [i for i, _ in self.SLOTS]:
+        slot gets the plastic's material and color, after the print if one is running. keep: the
+        plastic was edited in the list, the spool's count stays."""
+        if index not in [i for i, _ in self.SLOTS] + [self.RACK]:
             raise PrinterError("Нет такого слота")
         if isinstance(grams, bool) or not isinstance(grams, int) or not 0 <= grams <= 5000:
             raise PrinterError("Остаток должен быть от 0 до 5000 г")
@@ -239,8 +247,8 @@ class Printer:
         if not name:
             name = next((m["name"] for m in load_materials() if m["id"] == plastic["filament"]), plastic["filament"])
         self.upload("spool_pick_%d.json" % (index,), json.dumps(
-            {"name": name[:40], "filament": plastic["filament"], "color": plastic["color"], "grams": grams},
-            ensure_ascii=False))
+            {"name": name[:40], "filament": plastic["filament"], "color": plastic["color"], "grams": grams,
+             "plastic": plastic["id"], "keep": keep}, ensure_ascii=False))
 
     FEED_MODES = ("quiet", "normal", "fast", "custom")
     FEED_MODE_FILE = "box_feed.json"
@@ -1114,10 +1122,37 @@ class App:
         self.my_plastics = my_plastics or MyPlastics()
 
     def change_plastics(self, body):
-        items = self.my_plastics.change(body.get("add"), body.get("remove"))
-        if isinstance(body.get("add"), dict):
-            self.my_names.remember(body["add"].get("maker"), body["add"].get("name"))
-        return {"my_plastics": items, "my_names": self.my_names.load()}
+        add = body.get("add")
+        known = isinstance(add, dict) and any(p["id"] == add.get("id") for p in self.my_plastics.load())
+        items = self.my_plastics.change(add, body.get("remove"))
+        result = {"my_plastics": items, "updated": []}
+        if isinstance(add, dict):
+            self.my_names.remember(add.get("maker"), add.get("name"))
+        if known:
+            # The list is saved either way; the spools wait for the next edit if the printer is away.
+            try:
+                result["updated"] = self._update_picked(items[0])
+            except PrinterError as e:
+                result["update_error"] = str(e)
+        result["my_names"] = self.my_names.load()
+        return result
+
+    def _update_picked(self, plastic):
+        """An edited plastic reaches the spools it is in: their material, color and name change,
+        their count stays. Labels of those slots."""
+        if self.printer is None:
+            return []
+        data = self.printer.slots()
+        labels = []
+        for slot in data["slots"] + [data["rack"]]:
+            spool = slot.get("spool") or {}
+            if spool.get("plastic") == plastic["id"]:
+                # The grams are only a fallback: with keep the module leaves its count as it is.
+                left = spool.get("remaining")
+                grams = min(5000, int(round(left))) if isinstance(left, (int, float)) else plastic["grams"]
+                self.printer.pick_plastic(slot["index"], plastic, grams, keep=True)
+                labels.append(slot["label"])
+        return labels
 
     def pick_plastic(self, body):
         """Puts a plastic of the list in a slot without a tag, with the grams on the spool."""
@@ -1577,6 +1612,7 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .pick-tool{flex:none;padding:6px 9px;border:0;border-radius:8px;background:none;color:var(--muted);font:inherit;cursor:pointer}
 .pick-tool:hover{background:var(--bg)}.pick-tool.sure{color:var(--err);font-size:13px}
 .pick-form{margin-top:12px}.pick-weight{margin-top:12px}
+.pick-text small.pick-here{color:var(--ok);font-weight:600}
 .pick-put{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
 .find-slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:12px}
 .find-slots[hidden]{display:none}
@@ -3408,7 +3444,7 @@ async function loadSlots(){
 /* A plastic for a spool without a tag: the Fluidd card opens this page as ?pick=<slot> in a frame.
    The form is the NFC tab's: maker and name with the lists, material by type, the palette. */
 const PICK=new URLSearchParams(location.search).get("pick");
-let pickSlot=null,pickChosen=null,pickEditing=null,pickRemoving=null,pickMaterial=null,pickPicker=null;
+let pickSlot=null,pickInSlot=null,pickChosen=null,pickEditing=null,pickRemoving=null,pickMaterial=null,pickPicker=null;
 const plasticTitle=p=>[p.maker,p.name].filter(Boolean).join(" ")||materialName(p.filament);
 function pickSay(text,cls){const m=$("pick-msg");m.textContent=text||"";m.className="note"+(cls?" "+cls:"")}
 function renderPickList(){
@@ -3422,6 +3458,7 @@ function renderPickList(){
     const b=el("button","pick-item");b.type="button";
     const pic=el("span","pick-spool");pic.innerHTML=spool(p.color);
     const text=el("span","pick-text");text.append(el("b","",plasticTitle(p)),el("small","",`${materialName(p.filament)} · #${p.color} · ${p.grams} г`));
+    if(pickInSlot===p.id)text.append(el("small","pick-here",`Стоит в ${pickSlot.label}`));
     b.append(pic,text);
     b.onclick=()=>{pickChosen=p;pickRemoving=null;$("pick-grams").value=p.grams;renderPickList();$("pick-put").hidden=false;pickSay("")};
     const edit=el("button","pick-tool","✎");edit.type="button";edit.title="Изменить";edit.onclick=()=>openPickForm(p);
@@ -3472,8 +3509,14 @@ $("pick-save").onclick=async()=>{
   try{
     const r=await api("/api/my_plastics",{add});
     state.codes.my_plastics=r.my_plastics;state.codes.my_names=r.my_names;
-    pickChosen=r.my_plastics.find(p=>p.id===add.id);$("pick-grams").value=grams;$("pick-put").hidden=false;
+    pickChosen=r.my_plastics.find(p=>p.id===add.id);
     closePickForm();renderPickList();
+    // An edited plastic already in this or another slot is updated there by the panel, its count kept.
+    if(r.updated&&r.updated.length){
+      $("pick-put").hidden=true;
+      pickSay(`Материал, цвет и название обновлены: ${r.updated.join(", ")}. Остаток тот же`,"ok");
+      if(r.updated.includes(pickSlot.label))setTimeout(()=>parent.postMessage({qidiPick:"done"},"*"),1800);
+    }else{$("pick-grams").value=grams;$("pick-put").hidden=false;if(r.update_error)pickSay(`Сохранено в списке, но катушки не обновились: ${r.update_error}`,"err")}
   }catch(e){pickSay(e.message,"err")}
   finally{$("pick-save").disabled=false}
 };
@@ -3494,10 +3537,12 @@ async function startPick(){
   pickPicker=makePicker($("pick-picker"),"FAFAFA",()=>{});
   try{
     const data=await api("/api/slots");
-    pickSlot=data.slots.find(s=>s.index===Number(PICK));
+    pickSlot=data.slots.concat(data.rack?[data.rack]:[]).find(s=>s.index===Number(PICK));
     if(!pickSlot)throw new Error("Нет такого слота");
     pickSlot.state=data.state;
     $("pick-title").textContent=`Пластик для ${pickSlot.label}`;$("pick-apply").textContent=`Поставить в ${pickSlot.label}`;
+    // The plastic already in the slot is marked; editing it changes the spool without a new count.
+    pickInSlot=(pickSlot.spool||{}).plastic||null;
   }catch(e){pickSay(e.message,"err");return}
   renderPickList();
   if(!(state.codes.my_plastics||[]).length)openPickForm(null);
