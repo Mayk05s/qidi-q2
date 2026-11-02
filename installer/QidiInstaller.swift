@@ -155,6 +155,16 @@ final class Model: ObservableObject {
         startAction(["save-connection"], input: try? JSONEncoder().encode(connection))
     }
 
+    /// "Q2 · прошивка 01.01.03.02" from QIDI's "QD_Q2_01.01.03.02".
+    var firmwareLine: String {
+        guard let firmware else { return "QIDI, прошивка неизвестна" }
+        let parts = firmware.split(separator: "_")
+        if parts.count >= 3, parts[0] == "QD" {
+            return "QIDI \(parts[1]) · прошивка \(parts[2...].joined(separator: "_"))"
+        }
+        return "прошивка " + firmware
+    }
+
     var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
     }
@@ -392,7 +402,7 @@ struct PrinterSidebar: View {
     private var printers: [FoundPrinter] {
         var list = model.found
         if !model.host.isEmpty && !list.contains(where: { $0.host == model.host }) {
-            list.insert(FoundPrinter(host: model.host, name: "добавлен вручную"), at: 0)
+            list.insert(FoundPrinter(host: model.host, name: ""), at: 0)
         }
         return list
     }
@@ -432,7 +442,8 @@ struct PrinterSidebar: View {
                             Image(systemName: "printer").foregroundStyle(current ? .green : .secondary)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(printer.host).font(.callout.monospacedDigit())
-                                Text(printer.name).font(.caption).foregroundStyle(.secondary)
+                                Text(current ? model.firmwareLine : "принтер Klipper в сети")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
                             if current {
@@ -448,9 +459,8 @@ struct PrinterSidebar: View {
                                     .disabled(model.busy)
                             }
                         }
-                        if current {
-                            Label(model.customLogin ? "Вход: свой логин \(model.user)" : "Вход: стандартный QIDI",
-                                  systemImage: "person.crop.circle")
+                        if current && model.customLogin {
+                            Label("Свой вход: \(model.user)", systemImage: "person.crop.circle")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -543,7 +553,7 @@ struct VersionsView: View {
             row("Программа", model.appVersion)
             row("Пакет здесь", model.packageVersion)
             row("Пакет на принтере", model.installed.isEmpty ? "не установлен" : (model.printerPackage ?? "неизвестна"))
-            row("Прошивка при установке", model.firmware ?? "неизвестна")
+            row("Прошивка принтера", model.firmware ?? "неизвестна")
             row("Проверено на прошивке", model.testedFirmware.joined(separator: ", "))
             if let firmware = model.firmware, !model.testedFirmware.contains(firmware) {
                 Label("Эта прошивка не проверялась, модули могут не работать", systemImage: "exclamationmark.triangle.fill")

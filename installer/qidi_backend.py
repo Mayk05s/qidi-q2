@@ -62,6 +62,25 @@ def blocked_by_macos(error):
     return isinstance(reason, OSError) and reason.errno == errno.EHOSTUNREACH
 
 
+FIRMWARE_CACHE = pathlib.Path.home() / "Library" / "Caches" / "QIDI Q2 Patcher" / "firmware.json"
+FIRMWARE_CACHE_SECONDS = 3600
+
+
+def load_firmware_cache():
+    try:
+        return json.loads(FIRMWARE_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_firmware_cache(cache):
+    try:
+        FIRMWARE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        FIRMWARE_CACHE.write_text(json.dumps(cache), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def send(kind, **fields):
     print(json.dumps(dict(fields, type=kind), ensure_ascii=False), flush=True)
 
@@ -226,6 +245,37 @@ class Printer:
     def _ssh_env(self, askpass):
         return dict(os.environ, SSH_ASKPASS=askpass, SSH_ASKPASS_REQUIRE="force", PRINTER_PASSWORD=self.password)
 
+    def ssh_read(self, command, timeout=15):
+        """Output of a command that only reads, run on the printer with the saved login."""
+        with tempfile.TemporaryDirectory() as work:
+            askpass = os.path.join(work, "askpass")
+            with open(askpass, "w") as f:
+                f.write('#!/bin/sh\nprintf "%s\\n" "$PRINTER_PASSWORD"\n')
+            os.chmod(askpass, 0o700)
+            done = subprocess.run(["ssh"] + SSH_OPTS + ["%s@%s" % (self.user, self.host), command],
+                                  env=self._ssh_env(askpass), stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=timeout)
+        if done.returncode != 0:
+            raise Failed(done.stderr.strip() or "ssh exited with %d" % (done.returncode,))
+        return done.stdout
+
+    def live_firmware(self):
+        """The firmware QIDI installed last; kept an hour per address, since it needs a login."""
+        cache = load_firmware_cache()
+        entry = cache.get(self.host)
+        if entry and time.time() - entry["at"] < FIRMWARE_CACHE_SECONDS:
+            return entry["firmware"]
+        try:
+            text = self.ssh_read("grep 'Add QD_' %s" % (remote_setup.FIRMWARE_FILE,))
+        except (Failed, OSError, subprocess.TimeoutExpired) as e:
+            note_error("firmware of " + self.host, e)
+            return entry["firmware"] if entry else None
+        found = re.findall(r"Add (QD_\S+)", text)
+        firmware = found[-1] if found else None
+        cache[self.host] = {"firmware": firmware, "at": time.time()}
+        save_firmware_cache(cache)
+        return firmware
+
     def remote(self, action, features=None, versions=None):
         """Copy everything into one folder on the printer and run remote_setup.py there."""
         info = self.json("/printer/info")
@@ -355,6 +405,9 @@ class DemoPrinter:
     def print_state(self):
         return "standby"
 
+    def live_firmware(self):
+        return "QD_Q2_01.01.03.02"
+
     def installed(self):
         """At first an older package, so the window shows what an update looks like."""
         if self.STATE.exists():
@@ -373,19 +426,21 @@ class DemoPrinter:
 
 def status(printer):
     state = printer.print_state() if printer else "unavailable"
-    features, versions = set(), {}
+    features, versions, firmware = set(), {}, None
     if printer and state != "unavailable":
         try:
             features, versions = printer.installed()
         except (OSError, ValueError):
             state = "unavailable"
+    if printer and state != "unavailable":
+        firmware = printer.live_firmware()
     catalog = load_catalog()
     custom_login = printer is not None and (getattr(printer, "user", DEFAULT_USER), getattr(
         printer, "password", DEFAULT_PASSWORD)) != (DEFAULT_USER, DEFAULT_PASSWORD)
     send("status", state=state, host=printer.host if printer else "", user=getattr(printer, "user", ""),
          custom_login=custom_login, configured=printer is not None,
          network_blocked=getattr(printer, "blocked", False),
-         firmware=(getattr(printer, "state", None) or {}).get("firmware"), features=sorted(features),
+         firmware=firmware or (getattr(printer, "state", None) or {}).get("firmware"), features=sorted(features),
          installed_versions=versions, **catalog)
 
 
