@@ -1,6 +1,6 @@
 {
   "id": "spools",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "icon": "square.stack.3d.up",
   "title": "Мультиподача",
   "summary": "Катушки подаются одновременно, метки определяются по паре",
@@ -31,7 +31,7 @@
   },
   "changes": [
     "printer_data/config/qidi_patcher.cfg: опция box_takeover в секциях считывателей",
-    "printer_data/config/box_feed.json: режим скорости, пишет панель или BOX_FEED_MODE",
+    "printer_data/config/box_feed.json: режим, свои скорости, моторов сразу и ночное время, пишет панель",
     "saved_variables.cfg: auto_read_rfid = 0, материал, цвет и готовность слота",
     "В памяти Klipper: штатные slot_load, EJECT_FILAMENT_CONTROL и READ_RFID для незаправленных слотов заменяются, файлы box_*.so не меняются"
   ],

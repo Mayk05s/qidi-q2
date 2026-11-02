@@ -216,22 +216,64 @@ class Printer:
         # A file rather than G-code: G-code waits behind a running print.
         self.upload("spool_set_%d.txt" % (index,), "%d\n" % (grams,))
 
-    FEED_MODES = ("quiet", "normal", "fast")
+    FEED_MODES = ("quiet", "normal", "fast", "custom")
     FEED_MODE_FILE = "box_feed.json"
+    # Limits of a custom mode, mm/s and mm/s². The stock firmware moves the Box motors at
+    # 80-90 mm/s with 50 mm/s²; 200 mm/s² is what our feed has run at on this printer.
+    FEED_LIMITS = {"feed": (20, 80), "eject": (20, 100), "eject_slow": (10, 50), "accel": (50, 200)}
+    # How many Box motors may turn at once: all, up to 3 or 2, one per reader (1A+1C, 1B+1D), one.
+    FEED_MOTORS = ("4", "3", "2", "pairs", "1")
+    FEED_DEFAULT = {"mode": "normal",
+                    "custom": {"feed": 60, "eject": 90, "eject_slow": 40, "accel": 200, "motors": "4"},
+                    "night": {"on": False, "from": "23:00", "to": "07:00", "follow_printer": False}}
 
     def feed_mode(self):
-        """Speed mode of the multi-feed (spools package); its box_feed.py reads the same file."""
+        """Settings of the multi-feed (spools package); its box_feed.py reads the same file."""
         try:
-            mode = self.fetch("/server/files/config/" + self.FEED_MODE_FILE).get("mode")
-        except (PrinterError, AttributeError):
-            mode = None
-        return {"mode": mode if mode in self.FEED_MODES else "normal"}
+            saved = self.fetch("/server/files/config/" + self.FEED_MODE_FILE)
+        except PrinterError:
+            saved = None
+        try:
+            return self._feed_settings(saved if isinstance(saved, dict) else {})
+        except PrinterError:
+            return json.loads(json.dumps(self.FEED_DEFAULT))
 
-    def set_feed_mode(self, mode):
+    def _feed_settings(self, body):
+        settings = json.loads(json.dumps(self.FEED_DEFAULT))
+        mode = body.get("mode", settings["mode"])
         if mode not in self.FEED_MODES:
             raise PrinterError("Нет такого режима")
+        settings["mode"] = mode
+        custom = body.get("custom", {})
+        if not isinstance(custom, dict):
+            raise PrinterError("Неверные настройки")
+        for key, (low, high) in self.FEED_LIMITS.items():
+            value = custom.get(key, settings["custom"][key])
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+                raise PrinterError("Значение %s должно быть от %d до %d" % (key, low, high))
+            settings["custom"][key] = int(value)
+        motors = custom.get("motors", settings["custom"]["motors"])
+        if motors not in self.FEED_MOTORS:
+            raise PrinterError("Нет такого числа моторов")
+        settings["custom"]["motors"] = motors
+        night = body.get("night", {})
+        if not isinstance(night, dict):
+            raise PrinterError("Неверное ночное время")
+        settings["night"]["on"] = night.get("on", False) is True
+        # QIDI's own "Silent (50%)" print mode is a 50% speed factor; Box can be quiet with it.
+        settings["night"]["follow_printer"] = night.get("follow_printer", False) is True
+        for key in ("from", "to"):
+            value = night.get(key, settings["night"][key])
+            if not isinstance(value, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+                raise PrinterError("Время должно быть в виде ЧЧ:ММ")
+            settings["night"][key] = value
+        return settings
+
+    def set_feed_mode(self, body):
+        settings = self._feed_settings(body if isinstance(body, dict) else {})
         # A file rather than G-code: G-code waits behind a running print.
-        self.upload(self.FEED_MODE_FILE, json.dumps({"mode": mode}) + "\n")
+        self.upload(self.FEED_MODE_FILE, json.dumps(settings, ensure_ascii=False) + "\n")
+        return settings
 
     def loaded_slot(self):
         """Label of the slot whose filament is in the toolhead. The stock read refuses to run then
@@ -879,8 +921,7 @@ class App:
         return self._require_printer().feed_mode()
 
     def set_feed_mode(self, body):
-        self._require_printer().set_feed_mode(body.get("mode"))
-        return {"ok": True, "mode": body.get("mode")}
+        return self._require_printer().set_feed_mode(body)
 
     def read_slot(self, body):
         self._require_printer().read_slot(body.get("index"), body.get("skip_neighbour") is True)
@@ -1342,11 +1383,132 @@ dialog .actions{justify-content:flex-end;margin:0}
 .stepper button{width:32px;height:32px;font:inherit;font-size:18px;line-height:1;color:var(--accent);background:transparent;border:1px solid var(--line);border-radius:8px;cursor:pointer;padding:0}
 .stepper button:disabled{opacity:.4;cursor:not-allowed}
 .stepper output{width:26px;text-align:center;font-weight:600}
-.feed-modes{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0}
-.feed-mode{text-align:left;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);cursor:pointer;font:inherit}
+.feed-layout{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:14px;align-items:start}
+@media (max-width:860px){.feed-layout{grid-template-columns:minmax(0,1fr)}}
+.feed-main{display:grid;gap:14px;min-width:0}
+.feed-main .card{margin:0}
+.feed-title{font-size:16px;margin:0 0 4px}
+.feed-note{margin:10px 0 0}
+.feed-modes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:14px 0 0}
+@media (max-width:640px){.feed-modes{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.feed-mode{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;padding:14px 8px;border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);cursor:pointer;font:inherit}
+.feed-mode:hover{border-color:var(--muted)}
 .feed-mode[aria-checked=true]{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
-.feed-mode b{display:block;margin-bottom:4px}
-.feed-mode span{font-size:13px;color:var(--muted)}
+.feed-mode[aria-checked=true] .feed-icon{color:var(--accent)}
+.feed-mode b{font-size:14px}
+.feed-mode small{font-size:12px;color:var(--muted);line-height:1.3}
+.feed-icon{display:inline-flex;color:var(--muted);flex:none}
+.feed-icon svg{width:28px;height:28px}
+.feed-group-head{display:flex;gap:10px;align-items:flex-start}
+.feed-group-head>div{flex:1;min-width:0}
+.feed-group-head h3{font-size:15px;margin:4px 0 0;flex:1}
+.feed-group-head .hint{margin:0}
+.feed-group>.hint{margin:6px 0 0}
+.feed-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:1100px){.feed-pair{grid-template-columns:minmax(0,1fr)}}
+.feed-pair .card{margin:0;display:flex;flex-direction:column}
+.feed-gauges{display:flex;justify-content:space-around;gap:8px;margin-top:auto;padding-top:8px}
+.feed-gauge{display:flex;flex-direction:column;align-items:center;flex:1;max-width:220px;min-width:0}
+.feed-gauge-name{font-size:13px;font-weight:600;margin-bottom:2px}
+.feed-gauge svg{width:100%;max-width:200px;touch-action:none;cursor:pointer;outline:none;display:block}
+.feed-gauge svg:focus-visible .feed-g-knob{stroke:var(--ink);stroke-width:3}
+.feed-g-track{fill:none;stroke:var(--line);stroke-width:10;stroke-linecap:round}
+.feed-g-value{fill:none;stroke:var(--accent);stroke-width:10;stroke-linecap:round}
+.feed-g-tick{stroke:var(--muted);stroke-width:1.2;opacity:.6}
+.feed-g-label{font-size:9px;fill:var(--muted);font-variant-numeric:tabular-nums}
+.feed-g-knob{fill:var(--card);stroke:var(--accent);stroke-width:2.5}
+.feed-g-spool{transform-box:fill-box;transform-origin:center;animation:feed-spin linear infinite}
+.feed-g-spool .rim{fill:color-mix(in srgb,var(--accent) 14%,var(--card));stroke:var(--accent);stroke-width:1.5}
+.feed-g-spool .hub{fill:var(--card);stroke:var(--accent);stroke-width:1.5}
+.feed-g-spool .spoke{stroke:var(--accent);stroke-width:2;stroke-linecap:round}
+.feed-g-spool .mark{fill:var(--accent)}
+@keyframes feed-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.feed-g-spool{animation:none}}
+.feed-gauge-row{display:flex;align-items:center;gap:8px;margin-top:-6px}
+.feed-gauge-row button{font:inherit;font-size:17px;line-height:1;width:30px;height:30px;border-radius:50%;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer;flex:none}
+.feed-gauge-row output{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;min-width:44px;text-align:center}
+.feed-gauge-unit{font-size:12px;color:var(--muted);margin-top:2px;text-align:center}
+.feed-stat{text-align:right;flex:none}
+.feed-stat b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
+.feed-stat small{font-size:12px;color:var(--muted)}
+.feed-path{display:flex;align-items:center;gap:8px;margin:16px 0 6px;font-size:12px;color:var(--muted)}
+.feed-node{flex:none;max-width:84px;line-height:1.25}
+.feed-node:last-child{text-align:right}
+.feed-seg{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0}
+.feed-seg i{display:block;width:100%;height:8px;border-radius:4px;background:var(--accent)}
+.feed-seg em{font-style:normal;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums;white-space:nowrap}
+.feed-seg small{font-size:11px}
+.feed-seg-in{flex:1}
+.feed-seg-in i{background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 35%,transparent),var(--accent))}
+.feed-seg-fast{flex:85}
+.feed-seg-slow{flex:15;min-width:64px}
+.feed-seg-slow i{background:repeating-linear-gradient(90deg,var(--accent) 0 6px,transparent 6px 10px)}
+.feed-slider{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;align-items:center;margin-top:14px}
+.feed-slider label{font-size:14px}
+.feed-slider output{font-variant-numeric:tabular-nums;font-weight:600;font-size:14px;min-width:92px;text-align:right}
+.feed-slider input{grid-column:1/-1;width:100%;accent-color:var(--accent);margin:6px 0 0}
+.feed-ends{grid-column:1/-1;display:flex;justify-content:space-between;font-size:12px;color:var(--muted)}
+.feed-label{display:block;font-size:14px;margin-bottom:8px}
+.feed-motors{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;margin-top:18px}
+@media (max-width:520px){.feed-motors{grid-template-columns:minmax(0,1fr)}}
+.feed-seg-ctl{display:flex;flex-wrap:wrap;gap:6px}
+.feed-seg-ctl button{font:inherit;font-size:13px;padding:7px 11px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
+.feed-seg-ctl button[aria-checked=true]{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.feed-motors .hint{margin:8px 0 0}
+.feed-box{display:grid;grid-template-columns:repeat(4,46px);gap:6px;padding:10px;border:1px solid var(--line);border-radius:12px}
+.feed-slot{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;border-radius:8px;font-size:12px;font-weight:600;background:var(--bg);color:var(--muted)}
+.feed-slot i{font-style:normal;font-size:11px;font-weight:500}
+.feed-slot.g1{background:color-mix(in srgb,var(--accent) 22%,transparent);color:var(--ink)}
+.feed-slot.g2{background:color-mix(in srgb,#c58a1c 26%,transparent);color:var(--ink)}
+.feed-slot.g3{background:color-mix(in srgb,var(--ok) 24%,transparent);color:var(--ink)}
+.feed-slot.g4{background:color-mix(in srgb,var(--err) 20%,transparent);color:var(--ink)}
+.feed-warn{color:var(--err);margin:0}
+.feed-subtabs{display:flex;gap:4px;padding:4px;border-radius:12px;background:var(--line);width:max-content;max-width:100%}
+.feed-subtabs button{font:inherit;font-size:14px;font-weight:600;padding:7px 14px;border:0;border-radius:9px;background:transparent;color:var(--muted);cursor:pointer}
+.feed-subtabs button[aria-selected=true]{background:var(--card);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.feed-sub{display:grid;gap:14px}
+.feed-sub[hidden]{display:none}
+.feed-night{--night:#3a3f9a;--day:#e9b949;position:sticky;top:12px;margin:0}
+@media (prefers-color-scheme:dark){.feed-night{--night:#8d93f0;--day:#f0c35a}}
+@media (max-width:860px){.feed-night{position:relative;top:auto}}
+.feed-night-top{display:flex;gap:12px;align-items:flex-start}
+.feed-night-top>div{flex:1}
+.feed-night h2{font-size:16px;margin:2px 0 2px}
+.feed-night .hint{margin:0}
+.feed-moon{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;flex:none;background:color-mix(in srgb,var(--night) 16%,transparent)}
+.feed-moon svg{width:20px;height:20px;fill:var(--night)}
+.feed-day{margin:18px 0 6px}
+.feed-day-bar{position:relative;height:28px;border-radius:8px;overflow:hidden;background:color-mix(in srgb,var(--day) 22%,transparent)}
+.feed-day-night{position:absolute;top:0;bottom:0;background:var(--night)}
+.feed-off .feed-day-night{background:color-mix(in srgb,var(--night) 35%,transparent)}
+.feed-day-now{position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:var(--ink)}
+.feed-day-ends{display:flex;justify-content:space-between;margin-top:6px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.feed-day-icons{position:absolute;inset:0;display:flex;align-items:center;pointer-events:none}
+.feed-day-icons svg{position:absolute;width:16px;height:16px;margin-left:-8px}
+.feed-times{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.feed-time{border:1px solid var(--line);border-radius:12px;padding:8px;min-width:0}
+.feed-time small{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+.feed-time-row{display:flex;align-items:center;justify-content:space-between;gap:4px}
+.feed-time output{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+.feed-time button{font:inherit;font-size:17px;line-height:1;width:28px;height:28px;flex:none;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
+.feed-time button:disabled{opacity:.35;cursor:default}
+.feed-off .feed-time output{color:var(--muted)}
+.feed-now{display:flex;align-items:center;gap:8px;margin:14px 0 0;font-size:13px;line-height:1.4;color:var(--muted)}
+.feed-now::before{content:"";flex:none;width:8px;height:8px;border-radius:50%;background:var(--line)}
+.feed-now.is-night::before{background:var(--night)}
+.feed-now.is-day::before{background:var(--day)}
+.feed-follow{display:flex;gap:12px;align-items:center;margin-top:14px;padding-top:14px;border-top:1px solid var(--line);cursor:pointer}
+.feed-follow>span:first-child{flex:1}
+.feed-follow b{display:block;font-size:14px}
+.feed-follow small{font-size:12px;color:var(--muted);line-height:1.35}
+.feed-switch{position:relative;display:inline-block;width:44px;height:26px;flex:none;cursor:pointer}
+.feed-switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+.feed-switch span{position:absolute;inset:0;border-radius:13px;background:var(--line);transition:background .15s}
+.feed-switch span::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2);transition:transform .15s}
+.feed-switch input:checked+span{background:var(--accent)}
+.feed-switch input:checked+span::after{transform:translateX(18px)}
+.feed-switch input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 </style></head><body><main>
 <header>
 <h1>QIDI Box</h1>
@@ -1389,11 +1551,85 @@ dialog .actions{justify-content:flex-end;margin:0}
 </div>
 <div id="panel-guide" hidden><iframe id="guide-frame" title="Справка по пластику" style="width:100%;height:80vh;border:0;border-radius:12px"></iframe></div>
 <div id="panel-feed" hidden>
+<div class="feed-layout">
+<div class="feed-main">
 <div class="card">
-<p class="hint">Скорость, с которой Box подаёт, перечитывает и выгружает катушки. Новый режим действует со следующей подачи или выгрузки.</p>
+<h2 class="feed-title">Режим</h2>
+<p class="hint">Как Box подаёт, перечитывает и выгружает катушки. Новый режим действует со следующей подачи или выгрузки.</p>
 <div class="feed-modes" id="feed-modes" role="radiogroup" aria-label="Режим мультиподачи"></div>
-<p class="hint" id="feed-hint"></p>
+<p class="hint feed-note">Сдвинь любую настройку ниже, и режим станет «Своим».</p>
 </div>
+
+<div class="feed-subtabs" role="tablist" aria-label="Настройки мультиподачи">
+<button type="button" role="tab" id="feed-sub-speed-tab" aria-selected="true" aria-controls="feed-sub-speed">Подача и выгрузка</button>
+<button type="button" role="tab" id="feed-sub-more-tab" aria-selected="false" aria-controls="feed-sub-more">Дополнительно</button>
+</div>
+<div class="feed-sub" id="feed-sub-speed" role="tabpanel" aria-labelledby="feed-sub-speed-tab">
+<div class="feed-pair">
+<section class="card feed-group" aria-labelledby="feed-g-in">
+<header class="feed-group-head"><span class="feed-icon" data-icon="feedin"></span>
+<h3 id="feed-g-in">Подача</h3>
+<div class="feed-stat"><b id="feed-t-in"></b><small>до готовности</small></div></header>
+<p class="hint">От датчика слота к безопасной точке, по дороге ищется метка.</p>
+<div class="feed-path" aria-hidden="true">
+<span class="feed-node">Датчик</span>
+<span class="feed-seg feed-seg-in"><i></i><small>1000 мм</small></span>
+<span class="feed-node">Безопасная точка</span>
+</div>
+<div class="feed-gauges"><div class="feed-gauge" data-key="feed"></div></div>
+</section>
+
+<section class="card feed-group" aria-labelledby="feed-g-out">
+<header class="feed-group-head"><span class="feed-icon" data-icon="feedout"></span>
+<h3 id="feed-g-out">Выгрузка</h3>
+<div class="feed-stat"><b id="feed-t-out"></b><small>на катушку</small></div></header>
+<p class="hint">Почти весь путь быстро, у датчика медленно, пока нить не выйдет.</p>
+<div class="feed-path" aria-hidden="true">
+<span class="feed-node">Датчик</span>
+<span class="feed-seg feed-seg-slow"><i></i><small>150 мм</small></span>
+<span class="feed-seg feed-seg-fast"><i></i><small>850 мм</small></span>
+<span class="feed-node">Безопасная точка</span>
+</div>
+<div class="feed-gauges"><div class="feed-gauge" data-key="eject_slow"></div><div class="feed-gauge" data-key="eject"></div></div>
+</section>
+</div>
+</div>
+
+<div class="feed-sub" id="feed-sub-more" role="tabpanel" aria-labelledby="feed-sub-more-tab" hidden>
+<section class="card feed-group" aria-labelledby="feed-g-motors">
+<header class="feed-group-head"><span class="feed-icon" data-icon="motors"></span>
+<div><h3 id="feed-g-motors">Моторы</h3><p class="hint">Плавный разгон тише и бережнее к моторам. Меньше моторов сразу тоже тише, но дольше.</p></div></header>
+<div class="feed-slider" data-key="accel"></div>
+<div class="feed-motors">
+<div><span class="feed-label" id="feed-motors-label">Одновременно крутятся</span>
+<div class="feed-seg-ctl" id="feed-motors" role="radiogroup" aria-labelledby="feed-motors-label"></div>
+<p class="hint" id="feed-motors-text"></p></div>
+<div class="feed-box" id="feed-box" aria-hidden="true"></div>
+</div>
+</section>
+</div>
+<p class="hint feed-warn" id="feed-warn" hidden></p>
+</div>
+
+<aside class="card feed-night" aria-labelledby="feed-night-title">
+<div class="feed-night-top">
+<span class="feed-moon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg></span>
+<div><h2 id="feed-night-title">Ночной режим</h2><p class="hint">В это время Box сам работает тихо.</p></div>
+<label class="feed-switch"><input type="checkbox" id="feed-night-on"><span></span><b class="sr">Включить ночной режим</b></label>
+</div>
+<div class="feed-day" id="feed-day" aria-hidden="true"></div>
+<div class="feed-times" id="feed-night-time">
+<div class="feed-time" data-key="from"><small>Тихо с</small>
+<div class="feed-time-row"><button type="button" data-step="-30" aria-label="На 30 минут раньше">−</button><output id="feed-night-from"></output><button type="button" data-step="30" aria-label="На 30 минут позже">+</button></div></div>
+<div class="feed-time" data-key="to"><small>До</small>
+<div class="feed-time-row"><button type="button" data-step="-30" aria-label="На 30 минут раньше">−</button><output id="feed-night-to"></output><button type="button" data-step="30" aria-label="На 30 минут позже">+</button></div></div>
+</div>
+<p class="feed-now" id="feed-night-text"></p>
+<label class="feed-follow"><span><b>Как принтер</b><small>Тихо и днём, когда на экране QIDI выбран тихий режим печати (50%)</small></span>
+<span class="feed-switch"><input type="checkbox" id="feed-night-follow"><span></span></span></label>
+</aside>
+</div>
+<p class="hint" id="feed-hint" aria-live="polite"></p>
 </div>
 <div id="panel-materials" hidden>
 <div class="card enabled" id="enabled"></div>
@@ -2040,26 +2276,177 @@ $("tab-guide").onclick=()=>showTab("guide");
 $("tab-feed").onclick=()=>showTab("feed");
 
 /* Multi-feed tab (spools package) */
-const FEED_MODES=[
-  ["quiet","Тихий","Медленно и тихо, например ночью. Подача 30 мм/с, выгрузка 40 мм/с."],
-  ["normal","Обычный","Подача 60 мм/с, выгрузка 90 мм/с, у датчика медленнее."],
-  ["fast","Быстрый","Подача 80 мм/с, выгрузка 120 мм/с. Громче, на моторах Box ещё не проверен."]];
-function renderFeedModes(current){
+const FEED_ICONS={
+  quiet:'<path d="M4 9h3l5-4v14l-5-4H4z"/><path d="M15.5 9.5a3.5 3.5 0 0 1 0 5"/>',
+  normal:'<path d="M4 16a8 8 0 1 1 16 0"/><path d="M12 16l4-5"/><circle cx="12" cy="16" r="1.2"/>',
+  fast:'<path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"/>',
+  custom:'<path d="M5 6h9M18 6h1M5 12h3M12 12h7M5 18h11M20 18h-1"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
+  feedin:'<circle cx="7" cy="12" r="4"/><circle cx="7" cy="12" r="1"/><path d="M11 12h9M17 9l3 3-3 3"/>',
+  feedout:'<circle cx="17" cy="12" r="4"/><circle cx="17" cy="12" r="1"/><path d="M13 12H4M7 9l-3 3 3 3"/>',
+  motors:'<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/>'};
+const feedIcon=name=>'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+FEED_ICONS[name]+'</svg>';
+const FEED_PRESETS={
+  quiet:{name:"Тихий",text:"Плавно и по двое",values:{feed:30,eject:40,eject_slow:20,accel:50,motors:"2"}},
+  normal:{name:"Обычный",text:"Проверен на этом принтере",values:{feed:60,eject:90,eject_slow:40,accel:200,motors:"4"}},
+  fast:{name:"Быстрый",text:"На пределе, громче",values:{feed:80,eject:100,eject_slow:50,accel:200,motors:"4"}},
+  custom:{name:"Свой",text:"Свои настройки",values:null}};
+// key: label, min, max, step, unit, left end, right end
+const FEED_SLIDERS={
+  feed:["Скорость подачи",20,80,5,"мм/с","Медленно, метка видна дольше","Быстро"],
+  eject:["Быстрый ход",20,100,5,"мм/с","Тише","Быстрее"],
+  eject_slow:["У датчика",10,50,5,"мм/с","Точнее","Быстрее"],
+  accel:["Разгон и торможение",50,200,10,"мм/с²","Мягко, как QIDI","Резко"]};
+const FEED_MOTORS=[["4","Все 4"],["3","До 3"],["2","До 2"],["pairs","Попарно"],["1","По одному"]];
+const FEED_MOTORS_TEXT={
+  "4":"Все четыре мотора могут крутиться разом.",
+  "3":"Не больше трёх сразу, четвёртый ждёт.",
+  "2":"Не больше двух сразу, остальные ждут своей очереди.",
+  "pairs":"Сначала 1A и 1C, потом 1B и 1D: по одному мотору на каждый считыватель.",
+  "1":"Моторы крутятся строго по одному. Тише всего, но дольше всего."};
+const FEED_GROUPS={"4":[1,1,1,1],"3":[1,1,1,2],"2":[1,1,2,2],"pairs":[1,2,1,2],"1":[1,2,3,4]};
+const FEED_TURNS=["сразу","потом","третьим","четвёртым"];
+let feed={mode:"normal",custom:{feed:60,eject:90,eject_slow:40,accel:200,motors:"4"},night:{on:false,from:"23:00",to:"07:00",follow_printer:false}};
+let feedTimer=null;
+const feedValues=()=>feed.mode==="custom"?feed.custom:FEED_PRESETS[feed.mode].values;
+function feedOwn(){if(feed.mode!=="custom"){feed.custom={...feedValues()};feed.mode="custom"}}
+// Seconds for a run of length mm at speed v with acceleration a, from and to standstill.
+function feedSeconds(mm,v,a){const d=v*v/a;return d>=mm?2*Math.sqrt(mm/a):mm/v+v/a}
+const feedTime=t=>t<60?Math.round(t)+" с":Math.floor(t/60)+" мин "+String(Math.round(t%60)).padStart(2,"0")+" с";
+function buildFeedTab(){
   const box=$("feed-modes");box.textContent="";
-  FEED_MODES.forEach(([id,name,text])=>{
-    const b=document.createElement("button");b.type="button";b.className="feed-mode";
-    b.setAttribute("role","radio");b.setAttribute("aria-checked",String(id===current));
-    const t=document.createElement("b");t.textContent=name;const d=document.createElement("span");d.textContent=text;
-    b.append(t,d);b.onclick=()=>setFeedMode(id);box.append(b)});
+  Object.entries(FEED_PRESETS).forEach(([id,p])=>{
+    const b=document.createElement("button");b.type="button";b.className="feed-mode";b.dataset.mode=id;
+    b.setAttribute("role","radio");
+    b.innerHTML='<span class="feed-icon">'+feedIcon(id)+'</span><b></b><small></small>';
+    b.querySelector("b").textContent=p.name;b.querySelector("small").textContent=p.text;
+    b.onclick=()=>{if(id==="custom")feedOwn();else feed.mode=id;renderFeed();saveFeed()};
+    box.append(b)});
+  document.querySelectorAll("#panel-feed [data-icon]").forEach(el=>el.innerHTML=feedIcon(el.dataset.icon));
+  document.querySelectorAll("#panel-feed .feed-gauge").forEach(buildGauge);
+  document.querySelectorAll("#panel-feed .feed-slider").forEach(row=>{
+    const key=row.dataset.key,[label,min,max,step,unit,left,right]=FEED_SLIDERS[key];
+    row.innerHTML='<label for="feed-'+key+'"></label><output id="feed-'+key+'-out" for="feed-'+key+'"></output><input type="range" id="feed-'+key+'"><span class="feed-ends"><span></span><span></span></span>';
+    row.querySelector("label").textContent=label;
+    const ends=row.querySelectorAll(".feed-ends span");ends[0].textContent=left;ends[1].textContent=right;
+    const input=row.querySelector("input");Object.assign(input,{min,max,step});input.dataset.unit=unit;
+    input.oninput=()=>{feedOwn();feed.custom[key]=+input.value;renderFeed();saveFeed()}});
+  const motors=$("feed-motors");
+  FEED_MOTORS.forEach(([id,name])=>{
+    const b=document.createElement("button");b.type="button";b.dataset.motors=id;b.textContent=name;
+    b.setAttribute("role","radio");
+    b.onclick=()=>{feedOwn();feed.custom.motors=id;renderFeed();saveFeed()};motors.append(b)});
+  $("feed-night-on").onchange=e=>{feed.night.on=e.target.checked;renderFeed();saveFeed()};
+  $("feed-night-follow").onchange=e=>{feed.night.follow_printer=e.target.checked;saveFeed()};
+  document.querySelectorAll(".feed-time").forEach(box=>box.querySelectorAll("button").forEach(b=>b.onclick=()=>{
+    const k=box.dataset.key,t=(feedMinutes(feed.night[k])+Number(b.dataset.step)+1440)%1440;
+    feed.night[k]=String(Math.floor(t/60)).padStart(2,"0")+":"+String(t%60).padStart(2,"0");renderFeed();saveFeed()}));
+  [["speed","more"],["more","speed"]].forEach(([on,off])=>$("feed-sub-"+on+"-tab").onclick=()=>{
+    $("feed-sub-"+on+"-tab").setAttribute("aria-selected","true");$("feed-sub-"+off+"-tab").setAttribute("aria-selected","false");
+    $("feed-sub-"+on).hidden=false;$("feed-sub-"+off).hidden=true});
+}
+// A speedometer: 270° arc, the knob can be dragged; the spool in the middle turns at the real
+// speed of a spool of about 630 mm around.
+const GAUGE={cx:80,cy:78,r:60,start:135,sweep:270};
+const gaugePoint=(deg,r)=>{const a=deg*Math.PI/180;return [GAUGE.cx+r*Math.cos(a),GAUGE.cy+r*Math.sin(a)]};
+const gaugeArc=(from,to,r)=>{const [x1,y1]=gaugePoint(from,r),[x2,y2]=gaugePoint(to,r);
+  return "M"+x1.toFixed(2)+" "+y1.toFixed(2)+" A"+r+" "+r+" 0 "+(to-from>180?1:0)+" 1 "+x2.toFixed(2)+" "+y2.toFixed(2)};
+const GAUGE_NAMES={feed:"Скорость подачи",eject:"Быстрый ход",eject_slow:"У датчика"};
+function buildGauge(el){
+  const key=el.dataset.key,[label,min,max,step,unit]=FEED_SLIDERS[key];
+  const deg=v=>GAUGE.start+(v-min)/(max-min)*GAUGE.sweep;
+  let ticks="";
+  for(let v=min;v<=max;v+=10){const [a,b]=gaugePoint(deg(v),47),[c,d]=gaugePoint(deg(v),v%20?51:53);
+    ticks+='<line class="feed-g-tick" x1="'+a.toFixed(1)+'" y1="'+b.toFixed(1)+'" x2="'+c.toFixed(1)+'" y2="'+d.toFixed(1)+'"/>'}
+  const ends=[min,max].map(v=>{const [x,y]=gaugePoint(deg(v),40);return '<text class="feed-g-label" x="'+x.toFixed(1)+'" y="'+(y+3).toFixed(1)+'" text-anchor="middle">'+v+'</text>'}).join("");
+  const spokes=[0,120,240].map(a=>{const [x,y]=[80+15*Math.cos(a*Math.PI/180),78+15*Math.sin(a*Math.PI/180)];return '<line class="spoke" x1="80" y1="78" x2="'+x.toFixed(1)+'" y2="'+y.toFixed(1)+'"/>'}).join("");
+  el.innerHTML='<span class="feed-gauge-name"></span>'+
+    '<svg viewBox="0 0 160 136" role="slider" tabindex="0" aria-valuemin="'+min+'" aria-valuemax="'+max+'">'+
+    '<path class="feed-g-track" d="'+gaugeArc(GAUGE.start,GAUGE.start+GAUGE.sweep,GAUGE.r)+'"/>'+
+    '<path class="feed-g-value"/>'+ticks+ends+
+    '<g class="feed-g-spool"><circle class="rim" cx="80" cy="78" r="30"/><circle class="hub" cx="80" cy="78" r="8"/>'+spokes+'<circle class="mark" cx="80" cy="54" r="3"/></g>'+
+    '<circle class="feed-g-knob" r="8"/></svg>'+
+    '<div class="feed-gauge-row"><button type="button" data-d="-1" aria-label="Медленнее">−</button><output></output><button type="button" data-d="1" aria-label="Быстрее">+</button></div>'+
+    '<div class="feed-gauge-unit">'+unit+'</div>';
+  el.querySelector(".feed-gauge-name").textContent=GAUGE_NAMES[key];
+  const svg=el.querySelector("svg");svg.setAttribute("aria-label",GAUGE_NAMES[key]);
+  const set=v=>{v=Math.min(max,Math.max(min,Math.round(v/step)*step));if(v===feedValues()[key])return;
+    feedOwn();feed.custom[key]=v;renderFeed();saveFeed()};
+  const fromPointer=e=>{const r=svg.getBoundingClientRect(),x=(e.clientX-r.left)/r.width*160-GAUGE.cx,y=(e.clientY-r.top)/r.height*136-GAUGE.cy;
+    let a=Math.atan2(y,x)*180/Math.PI;if(a<GAUGE.start-45)a+=360;
+    // The gap at the bottom snaps to the nearer end.
+    if(a>GAUGE.start+GAUGE.sweep)a=a>GAUGE.start+GAUGE.sweep+45?GAUGE.start:GAUGE.start+GAUGE.sweep;
+    if(a<GAUGE.start)a=GAUGE.start;
+    set(min+(a-GAUGE.start)/GAUGE.sweep*(max-min))};
+  svg.onpointerdown=e=>{svg.setPointerCapture(e.pointerId);fromPointer(e);svg.onpointermove=fromPointer};
+  svg.onpointerup=svg.onpointercancel=()=>{svg.onpointermove=null};
+  svg.onkeydown=e=>{const d={ArrowRight:1,ArrowUp:1,ArrowLeft:-1,ArrowDown:-1}[e.key];
+    if(d){e.preventDefault();set(feedValues()[key]+d*step)}};
+  el.querySelectorAll("button").forEach(b=>b.onclick=()=>set(feedValues()[key]+Number(b.dataset.d)*step));
+}
+function renderGauge(el,v){
+  const key=el.dataset.key,[label,min,max,step]=FEED_SLIDERS[key],a=GAUGE.start+(v-min)/(max-min)*GAUGE.sweep;
+  el.querySelector(".feed-g-value").setAttribute("d",gaugeArc(GAUGE.start,Math.max(a,GAUGE.start+.01),GAUGE.r));
+  const [x,y]=gaugePoint(a,GAUGE.r),knob=el.querySelector(".feed-g-knob");knob.setAttribute("cx",x.toFixed(2));knob.setAttribute("cy",y.toFixed(2));
+  el.querySelector("output").textContent=v;
+  const svg=el.querySelector("svg");svg.setAttribute("aria-valuenow",v);svg.setAttribute("aria-valuetext",v+" мм/с");
+  // One turn of a spool takes 630 mm of filament.
+  el.querySelector(".feed-g-spool").style.animationDuration=(630/v).toFixed(2)+"s";
+  const [minus,plus]=el.querySelectorAll("button");minus.disabled=v<=min;plus.disabled=v>=max;
+}
+const feedMinutes=t=>{const [h,m]=t.split(":").map(Number);return h*60+m};
+// Whether a minute of the day falls in the night window, which may run past midnight.
+const feedIsNight=(min,from,to)=>from<=to?min>=from&&min<to:min>=from||min<to;
+function renderDay(){
+  const from=feedMinutes(feed.night.from),to=feedMinutes(feed.night.to),pct=m=>(m/1440*100).toFixed(2)+"%";
+  const parts=from<=to?[[from,to]]:[[from,1440],[0,to]];
+  const now=new Date(),nowMin=now.getHours()*60+now.getMinutes();
+  const sun='<svg viewBox="0 0 24 24" fill="none" stroke="var(--day)" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
+  const moon='<svg viewBox="0 0 24 24" fill="#fff"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>';
+  // The sun in the middle of the day, the moon in the middle of the night.
+  const nightMid=(from+((to-from+1440)%1440)/2)%1440,dayMid=(nightMid+720)%1440;
+  $("feed-day").className="feed-day"+(feed.night.on?"":" feed-off");
+  $("feed-day").innerHTML='<div class="feed-day-bar">'+parts.map(([a,b])=>'<span class="feed-day-night" style="left:'+pct(a)+';width:'+pct(b-a)+'"></span>').join("")+
+    '<span class="feed-day-icons"><span style="position:absolute;left:'+pct(dayMid)+'">'+sun+'</span><span style="position:absolute;left:'+pct(nightMid)+'">'+moon+'</span></span>'+
+    '<span class="feed-day-now" style="left:'+pct(nowMin)+'" title="Сейчас"></span></div>'+
+    '<div class="feed-day-ends"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>';
+  return feedIsNight(nowMin,from,to);
+}
+function renderFeed(){
+  document.querySelectorAll(".feed-mode").forEach(b=>b.setAttribute("aria-checked",String(b.dataset.mode===feed.mode)));
+  const v=feedValues();
+  document.querySelectorAll("#panel-feed .feed-slider").forEach(row=>{const key=row.dataset.key,i=$("feed-"+key);
+    i.value=v[key];$("feed-"+key+"-out").textContent=v[key]+" "+i.dataset.unit});
+  document.querySelectorAll("#panel-feed .feed-gauge").forEach(g=>renderGauge(g,v[g.dataset.key]));
+  $("feed-t-in").textContent="≈ "+feedTime(feedSeconds(1000,v.feed,v.accel));
+  $("feed-t-out").textContent="≈ "+feedTime(feedSeconds(850,v.eject,v.accel)+feedSeconds(150,v.eject_slow,v.accel));
+  document.querySelectorAll("#feed-motors button").forEach(b=>b.setAttribute("aria-checked",String(b.dataset.motors===v.motors)));
+  $("feed-motors-text").textContent=FEED_MOTORS_TEXT[v.motors];
+  const groups=FEED_GROUPS[v.motors];
+  $("feed-box").innerHTML=["1A","1B","1C","1D"].map((l,i)=>'<span class="feed-slot g'+groups[i]+'">'+l+'<i>'+FEED_TURNS[groups[i]-1]+'</i></span>').join("");
+  $("feed-warn").hidden=!(v.eject>90||v.feed>60&&v.accel>150);
+  $("feed-warn").textContent="Выше 90 мм/с штатная прошивка моторы Box не крутит, а подача быстрее 60 мм/с на этом принтере ещё не проверялась.";
+  $("feed-night-on").checked=feed.night.on;
+  $("feed-night-follow").checked=!!feed.night.follow_printer;
+  $("feed-night-from").textContent=feed.night.from;$("feed-night-to").textContent=feed.night.to;
+  document.querySelectorAll(".feed-time button").forEach(b=>b.disabled=!feed.night.on);
+  $("feed-night-time").classList.toggle("feed-off",!feed.night.on);
+  const night=renderDay(),text=$("feed-night-text"),day=FEED_PRESETS[feed.mode].name;
+  text.className="feed-now"+(feed.night.on?(night?" is-night":" is-day"):"");
+  text.textContent=!feed.night.on?"Выключен: Box всегда работает в режиме «"+day+"».":
+    night?"Сейчас ночь: Box работает тихо до "+feed.night.to+".":"Сейчас день: режим «"+day+"», с "+feed.night.from+" станет тихо.";
 }
 async function loadFeedMode(){
-  try{const r=await api("/api/feed_mode");renderFeedModes(r.mode);$("feed-hint").textContent=""}
-  catch(e){renderFeedModes(null);$("feed-hint").textContent=e.message}
-}
-async function setFeedMode(id){
-  try{await api("/api/feed_mode",{mode:id});renderFeedModes(id);$("feed-hint").textContent="Сохранено."}
+  try{feed=await api("/api/feed_mode");$("feed-hint").textContent=""}
   catch(e){$("feed-hint").textContent=e.message}
+  renderFeed();
 }
+function saveFeed(){
+  clearTimeout(feedTimer);$("feed-hint").textContent="";
+  feedTimer=setTimeout(async()=>{
+    try{feed=await api("/api/feed_mode",feed);$("feed-hint").textContent="Сохранено"}
+    catch(e){$("feed-hint").textContent=e.message}},500);
+}
+buildFeedTab();
 const rows={};
 let slotData=[];let editing=null;
 const materialName=id=>{if(/^L\d+$/.test(id||""))return legacyName(+id.slice(1));const m=state.codes.slot_materials.find(x=>x.id===id);return m?m.name:(id||"Не задан")};
@@ -2242,6 +2629,9 @@ function tagFacts(tag){
   if(tag.min_temp&&tag.max_temp)facts.push(["Сопло",`${tag.min_temp}–${tag.max_temp} °C`]);
   if(tag.dry_temp)facts.push(["Сушка",tag.dry_hours?`${tag.dry_temp} °C, ${tag.dry_hours} ч`:`${tag.dry_temp} °C`]);
   facts.push(["UID",tag.uid]);
+  // Both tags of a Bambu spool carry this number, so the plastic count stays one for the spool.
+  if(tag.tray)facts.push(["Номер катушки",tag.tray.slice(0,8)+"…"]);
+  else if(tag.brand==="Bambu Lab")facts.push(["Номер катушки","не прочитан, перечитайте слот"]);
   return facts;
 }
 function openEditor(index){

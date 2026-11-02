@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 
 BOX_SLOTS = 4
 PROFILE_ID = re.compile(r"QF[A-Z0-9]{2,4}")
@@ -23,13 +24,21 @@ EJECT_BATCH_DELAY = 0.2
 # EJECT_SLOW_ZONE goes slowly, in pieces, until the sensor sees the filament leave.
 EJECT_SLOW_ZONE = 150.
 # Speeds of the multi-feed modes, mm/s and mm/s². The stock firmware moves the Box motors at
-# up to 90 mm/s. Tag search was checked in the model at 30 to 100 mm/s feed.
+# up to 90 mm/s with 50 mm/s², our feed has run at 200 mm/s² on this printer. Tag search was checked in the model at 30 to 100 mm/s feed.
 MODES = {
-    "quiet": {"feed": 30., "eject": 40., "eject_slow": 20., "accel": 100.},
-    "normal": {"feed": 60., "eject": 90., "eject_slow": 40., "accel": 200.},
-    "fast": {"feed": 80., "eject": 120., "eject_slow": 50., "accel": 300.},
+    "quiet": {"feed": 30., "eject": 40., "eject_slow": 20., "accel": 50., "motors": "2"},
+    "normal": {"feed": 60., "eject": 90., "eject_slow": 40., "accel": 200., "motors": "4"},
+    "fast": {"feed": 80., "eject": 100., "eject_slow": 50., "accel": 200., "motors": "4"},
 }
 DEFAULT_MODE = "normal"
+# A custom mode is held to these, the same limits as the sliders in the panel.
+LIMITS = {"feed": (20., 80.), "eject": (20., 100.), "eject_slow": (10., 50.), "accel": (50., 200.)}
+# How many Box motors may turn at once: a number, or "pairs" for one per reader (1A+1C, 1B+1D).
+MOTOR_LIMITS = ("4", "3", "2", "pairs", "1")
+# QIDI's own "Silent (50%)" print mode sets this speed factor.
+SILENT_SPEED_FACTOR = 0.5
+# Slots held back by the motor limit are tried again this often.
+LIMIT_RETRY = 0.5
 # Next to printer.cfg; the panel writes it as a file, as G-code would wait behind a print.
 MODE_FILE = "box_feed.json"
 # Our moves must not meet a stock move of the same motor: on 2 Nov the stock check of an
@@ -138,6 +147,9 @@ class BoxMover:
         # How far past the slot sensor each fed spool stands, as far as we fed it.
         self.lengths = {}
         self.mode_path = None
+        self.clock = time.localtime
+        self.reread_pending = set()
+        self.reread_timer = None
         self.eject_pending = set()
         self.eject_timer = None
         self.insert_timer = None
@@ -287,16 +299,59 @@ class BoxMover:
             self.trapqs[slot] = self.ffi_main.gc(self.ffi_lib.trapq_alloc(), self.ffi_lib.trapq_free)
         return self.trapqs[slot]
 
-    def mode(self):
-        """Name and speeds of the multi-feed mode chosen in the panel (BOX_FEED_MODE)."""
+    def _settings(self):
+        """The file the Multi-feed tab of the panel writes; anything odd in it counts as unset."""
         if self.mode_path is None:
             config_file = self.printer.get_start_args().get("config_file", "")
             self.mode_path = os.path.join(os.path.dirname(config_file), MODE_FILE)
         try:
             with open(self.mode_path, encoding="utf-8") as f:
-                name = json.load(f).get("mode", DEFAULT_MODE)
-        except (OSError, ValueError, AttributeError):
-            name = DEFAULT_MODE
+                settings = json.load(f)
+        except (OSError, ValueError):
+            settings = {}
+        return settings if isinstance(settings, dict) else {}
+
+    def _quiet_now(self, settings):
+        """Night time set in the panel, or QIDI's silent print mode when the panel says to follow it."""
+        night = settings.get("night")
+        if not isinstance(night, dict):
+            return None
+        if night.get("on") is True:
+            try:
+                start, end = (int(night[k][:2]) * 60 + int(night[k][3:5]) for k in ("from", "to"))
+            except (KeyError, TypeError, ValueError):
+                start = end = None
+            if start is not None:
+                now = self.clock()
+                minute = now.tm_hour * 60 + now.tm_min
+                if (start <= minute < end) if start <= end else (minute >= start or minute < end):
+                    return "night"
+        if night.get("follow_printer") is True:
+            reactor = self.printer.get_reactor()
+            gcode_move = self.printer.lookup_object("gcode_move", None)
+            if gcode_move is not None and \
+                    gcode_move.get_status(reactor.monotonic())["speed_factor"] <= SILENT_SPEED_FACTOR + 0.01:
+                return "printer"
+        return None
+
+    def mode(self):
+        """Name and speeds to use now: the mode chosen in the panel, or the quiet one at night or
+        while QIDI's silent print mode is on, if the panel asks for that."""
+        settings = self._settings()
+        name = settings.get("mode", DEFAULT_MODE)
+        quiet = self._quiet_now(settings)
+        if quiet:
+            return "quiet (%s)" % (quiet,), MODES["quiet"]
+        if name == "custom" and isinstance(settings.get("custom"), dict):
+            custom = settings["custom"]
+            speeds = dict(MODES[DEFAULT_MODE])
+            for key, (low, high) in LIMITS.items():
+                value = custom.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    speeds[key] = float(min(high, max(low, value)))
+            if custom.get("motors") in MOTOR_LIMITS:
+                speeds["motors"] = custom["motors"]
+            return "custom", speeds
         if name not in MODES:
             name = DEFAULT_MODE
         return name, MODES[name]
@@ -310,10 +365,38 @@ class BoxMover:
         name = name.lower()
         if name not in MODES:
             raise gcmd.error("bambu_rfid: MODE must be one of %s" % (", ".join(MODES),))
-        self.mode()
+        # Only the mode changes; custom values and night time set in the panel stay.
+        settings = self._settings()
+        settings["mode"] = name
         with open(self.mode_path, "w", encoding="utf-8") as f:
-            json.dump({"mode": name}, f)
+            json.dump(settings, f, ensure_ascii=False)
         gcmd.respond_info("bambu_rfid: multi-feed mode %s" % (name,))
+
+    def moving(self):
+        """Slots whose motor turns or is about to: planned moves, ejects and pair runs."""
+        moving = set(self.busy) | set(self.ejecting)
+        for pair in self.pairs.values():
+            moving.update(pair.active)
+        return moving
+
+    def admit(self, slots, extra=()):
+        """Which of these slots may start now under the motor limit of the mode; the rest wait.
+        extra are slots already let in this round."""
+        limit = self.mode()[1].get("motors", "4")
+        moving = self.moving() | set(extra)
+        admitted = []
+        for slot in slots:
+            if slot in moving:
+                admitted.append(slot)
+                continue
+            if limit == "pairs":
+                if any(reader_of(other) == reader_of(slot) for other in moving):
+                    continue
+            elif len(moving) >= int(limit):
+                continue
+            moving.add(slot)
+            admitted.append(slot)
+        return admitted
 
     def _start_batch(self, slots, distance):
         """Start the slots that are free; a slot still moving is left out with a warning."""
@@ -408,11 +491,42 @@ class BoxMover:
                 "box_stepper slot%d" % (slot,)).get_status(now)["runout_button"] != 0:
             self.stock_reread(gcmd)
             return
-        if slot in self.busy or slot in self.ejecting or not self.reread(slot):
+        if slot in self.busy or slot in self.ejecting:
+            gcmd.respond_info("bambu_rfid: slot %d is moving, read it again when it stops" % (slot,))
+            return
+        if not self.admit([slot]):
+            # Too many motors turn already: it starts as soon as one stops.
+            self.reread_pending.add(slot)
+            self._start_reread_timer()
+            gcmd.respond_info("bambu_rfid: slot %d waits for a free motor to read again" % (slot,))
+            return
+        if not self.reread(slot):
             gcmd.respond_info("bambu_rfid: slot %d is moving, read it again when it stops" % (slot,))
             return
         self.feeding.add(slot)
         gcmd.respond_info("bambu_rfid: reading slot %d again" % (slot,))
+
+    def _start_reread_timer(self):
+        if self.reread_timer is None:
+            reactor = self.printer.get_reactor()
+            self.reread_timer = reactor.register_timer(self._run_rereads, reactor.monotonic() + LIMIT_RETRY)
+
+    def _run_rereads(self, eventtime):
+        reactor = self.printer.get_reactor()
+        reactor.unregister_timer(self.reread_timer)
+        self.reread_timer = None
+        try:
+            for slot in self.admit(sorted(self.reread_pending)):
+                self.reread_pending.discard(slot)
+                if slot not in self.busy and slot not in self.ejecting and self.reread(slot):
+                    self.feeding.add(slot)
+            if self.reread_pending:
+                self._start_reread_timer()
+        except Exception:
+            # An error here runs in a reactor timer and would shut the printer down.
+            logging.exception("bambu_rfid: reread of %s failed", sorted(self.reread_pending))
+            self.reread_pending.clear()
+        return reactor.NEVER
 
     def _eject_ourselves(self, slot):
         now = self.printer.get_reactor().monotonic()
@@ -445,9 +559,14 @@ class BoxMover:
         slots, self.eject_pending = sorted(self.eject_pending), set()
         try:
             free = [slot for slot in slots if slot not in self.busy]
+            free = self.admit(free) if free else []
             if free:
                 self.ejecting.update(free)
                 self._eject_start(free)
+            # Slots still moving or held back by the motor limit go as soon as they can.
+            self.eject_pending.update(set(slots) - set(free))
+            if self.eject_pending:
+                self.eject_timer = reactor.register_timer(self._run_ejects, eventtime + LIMIT_RETRY)
         except Exception:
             # An error here runs in a reactor timer and would shut the printer down.
             logging.exception("bambu_rfid: eject of %s failed", slots)
@@ -546,6 +665,7 @@ class BoxMover:
             present = [slot for slot in slots if self.printer.lookup_object(
                 "box_stepper slot%d" % (slot,)).get_status(eventtime)["runout_button"] == 0]
             started = [slot for slot in present if slot not in self.busy]
+            started = self.admit(started) if started else []
             if started:
                 # A short move back and forth lets the gear catch the tip before the pair logic
                 # takes the spool over.
@@ -556,7 +676,8 @@ class BoxMover:
                     (-FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, accel)], finish=False)
                 for slot in started:
                     self._pair_of(slot).insert(slot, eventtime, caught)
-            # A slot just ejected keeps its old plan until that ends, so it starts later.
+            # A slot just ejected keeps its old plan until that ends, and one held back by the
+            # motor limit waits for a free motor, so they start later.
             self.feed_pending.update(set(present) - set(started))
             if self.feed_pending:
                 self.feed_timer = reactor.register_timer(self._run_feeds, eventtime + FEED_RETRY)

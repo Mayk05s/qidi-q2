@@ -10,6 +10,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "printer
 import json
 import os
 import tempfile
+import time
 import unittest
 
 import box_feed as b
@@ -252,6 +253,90 @@ class EjectTests(unittest.TestCase):
         self.assertEqual(self.mover.mode()[0], "normal")
         self.set_mode("fast")
         self.assertEqual(self.mover.mode(), ("fast", b.MODES["fast"]))
+
+    def write_settings(self, settings):
+        with open(self.mover.mode_path, "w") as f:
+            f.write(json.dumps(settings))
+
+    def at(self, hour, minute=0):
+        self.mover.clock = lambda: time.struct_time((2026, 11, 2, hour, minute, 0, 0, 306, 0))
+
+    def test_custom_values_are_kept_within_safe_limits(self):
+        self.write_settings({"mode": "custom", "custom": {"feed": 45, "eject": 500, "eject_slow": "x",
+                                                          "accel": 10, "motors": "pairs"}})
+        name, speeds = self.mover.mode()
+        self.assertEqual(name, "custom")
+        self.assertEqual(speeds, {"feed": 45., "eject": 100., "eject_slow": b.MODES["normal"]["eject_slow"],
+                                  "accel": 50., "motors": "pairs"})
+
+    def test_night_time_is_quiet_across_midnight(self):
+        self.write_settings({"mode": "fast", "night": {"on": True, "from": "23:00", "to": "07:00"}})
+        self.at(23, 30)
+        self.assertEqual(self.mover.mode(), ("quiet (night)", b.MODES["quiet"]))
+        self.at(6, 59)
+        self.assertEqual(self.mover.mode()[0], "quiet (night)")
+        self.at(7, 0)
+        self.assertEqual(self.mover.mode()[0], "fast")
+        self.write_settings({"mode": "fast", "night": {"on": False, "from": "23:00", "to": "07:00"}})
+        self.at(23, 30)
+        self.assertEqual(self.mover.mode()[0], "fast")
+
+    def test_qidi_silent_print_mode_is_followed_when_asked(self):
+        factor = {"speed_factor": 0.5}
+        previous = self.printer.lookup_object
+        self.printer.lookup_object = lambda name, default=None: \
+            self.Status(factor) if name == "gcode_move" else previous(name, default)
+        self.at(12)
+        self.write_settings({"mode": "normal", "night": {"follow_printer": True}})
+        self.assertEqual(self.mover.mode()[0], "quiet (printer)")
+        factor["speed_factor"] = 1.0
+        self.assertEqual(self.mover.mode()[0], "normal")
+        factor["speed_factor"] = 0.5
+        self.write_settings({"mode": "normal", "night": {"follow_printer": False}})
+        self.assertEqual(self.mover.mode()[0], "normal")
+
+    def test_mode_command_keeps_the_panel_settings(self):
+        self.write_settings({"mode": "custom", "custom": {"feed": 45}, "night": {"on": True}})
+        said = []
+
+        class Gcmd:
+            def get(self, name, default=None):
+                return "Quiet"
+
+            def respond_info(self, text):
+                said.append(text)
+        self.mover.cmd_mode(Gcmd())
+        with open(self.mover.mode_path) as f:
+            self.assertEqual(json.load(f), {"mode": "quiet", "custom": {"feed": 45}, "night": {"on": True}})
+
+    def test_motor_limit_holds_slots_back(self):
+        self.write_settings({"mode": "custom", "custom": {"motors": "2"}})
+        self.mover.busy.add(0)
+        self.assertEqual(self.mover.admit([1, 2, 3]), [1])
+        self.write_settings({"mode": "custom", "custom": {"motors": "pairs"}})
+        # One motor per reader: 1A and 1B share one, 1C and 1D the other.
+        self.assertEqual(self.mover.admit([1, 2, 3]), [2])
+        self.mover.busy.clear()
+        self.assertEqual(self.mover.admit([0, 1, 2, 3]), [0, 2])
+        self.write_settings({"mode": "custom", "custom": {"motors": "1"}})
+        self.assertEqual(self.mover.admit([0, 1, 2, 3]), [0])
+        self.write_settings({"mode": "normal"})
+        self.assertEqual(self.mover.admit([0, 1, 2, 3]), [0, 1, 2, 3])
+
+    def test_eject_held_back_by_the_limit_goes_later(self):
+        self.write_settings({"mode": "quiet"})
+        started = []
+        self.mover._eject_start = started.append
+        for slot in (0, 1, 2):
+            self.mover.request_eject(slot)
+        self.reactor.callback(10.)
+        self.assertEqual(started, [[0, 1]])
+        self.assertEqual(self.mover.eject_pending, {2})
+        self.assertEqual(self.reactor.when, 10. + b.LIMIT_RETRY)
+        self.mover.ejecting.discard(0)
+        self.reactor.callback(10.5)
+        self.assertEqual(started, [[0, 1], [2]])
+        self.assertEqual(self.mover.eject_pending, set())
 
     def test_slot_still_moving_is_left_out(self):
         self.mover.busy.add(0)

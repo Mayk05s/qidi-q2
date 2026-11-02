@@ -784,22 +784,36 @@ class PrinterTests(unittest.TestCase):
         return q.Printer("192.0.2.1", fetch)
 
     def test_feed_mode_is_a_file_next_to_printer_cfg(self):
-        printer = q.Printer("192.0.2.1", lambda path, post=False: {"mode": "quiet"})
-        self.assertEqual(printer.feed_mode(), {"mode": "quiet"})
+        saved = {"mode": "custom", "custom": {"feed": 45, "eject": 100, "eject_slow": 30, "accel": 150,
+                                              "motors": "pairs"},
+                 "night": {"on": True, "from": "22:30", "to": "06:00", "follow_printer": True}}
+        printer = q.Printer("192.0.2.1", lambda path, post=False: saved)
+        self.assertEqual(printer.feed_mode(), saved)
         files = {}
         printer.upload = files.__setitem__
-        printer.set_feed_mode("fast")
-        self.assertEqual(q.json.loads(files["box_feed.json"]), {"mode": "fast"})
-        with self.assertRaises(q.PrinterError):
-            printer.set_feed_mode("loud")
+        self.assertEqual(printer.set_feed_mode({"mode": "fast"})["mode"], "fast")
+        written = q.json.loads(files["box_feed.json"])
+        self.assertEqual(written["custom"], q.Printer.FEED_DEFAULT["custom"])
+        self.assertFalse(written["night"]["on"])
+
+    def test_feed_mode_refuses_odd_values(self):
+        printer = q.Printer("192.0.2.1", lambda path, post=False: {})
+        printer.upload = lambda name, text: self.fail("nothing to write")
+        for body in ({"mode": "loud"}, {"mode": "custom", "custom": {"feed": 500}},
+                     {"mode": "custom", "custom": {"accel": True}}, {"custom": {"accel": 300}},
+                     {"custom": {"motors": 4}}, {"custom": {"motors": "5"}},
+                     {"night": {"on": True, "from": "25:00"}},
+                     {"night": "on"}):
+            with self.assertRaises(q.PrinterError):
+                printer.set_feed_mode(body)
 
     def test_feed_mode_missing_or_odd_is_normal(self):
         def missing(path, post=False):
             raise q.PrinterError("404")
-        self.assertEqual(q.Printer("192.0.2.1", missing).feed_mode(), {"mode": "normal"})
+        self.assertEqual(q.Printer("192.0.2.1", missing).feed_mode()["mode"], "normal")
         self.assertEqual(q.Printer("192.0.2.1", lambda path, post=False: {"mode": "x"}).feed_mode(),
-                         {"mode": "normal"})
-        self.assertEqual(q.Printer("192.0.2.1", lambda path, post=False: []).feed_mode(), {"mode": "normal"})
+                         q.Printer.FEED_DEFAULT)
+        self.assertEqual(q.Printer("192.0.2.1", lambda path, post=False: []).feed_mode()["mode"], "normal")
 
     def test_slots_lists_values(self):
         data = self.make().slots()
