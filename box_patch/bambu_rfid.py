@@ -13,6 +13,10 @@
 #   [bambu_rfid card_reader_1]
 #   cs_pin: mcu_box1:PC6
 #   hook_stock_read: True
+#   bambu_tags: True      read Bambu Lab tags (default True)
+#   custom_tags: True     read and write our own tags (default True)
+#   box_takeover: True    several inserted spools are fed together (default True)
+#   spool_usage: True     count the filament left on each spool (default True)
 #
 # G-code:
 #   BAMBU_RFID_DIAG READER=card_reader_1   read chip registers only, RF untouched
@@ -23,6 +27,8 @@
 #   BAMBU_RFID_TAG_WRITE READER=card_reader_1 ID=2 UID=7081205A BLOCK4=<hex> [BLOCK5=<hex>]
 #       read or write a QIDI-format tag; the result is in this object's status as tag_result
 #   BAMBU_RFID_SPOOL_SET SLOT=0 GRAMS=800
+#       the panel instead leaves spool_set_<slot>.txt next to printer.cfg: G-code waits its turn
+#       behind a running print, for most of a minute at its start, while the file is seen at once.
 #       set how much filament the spool in a slot holds; printing then subtracts from it.
 #       Kept in spool_usage.json next to printer.cfg, by tag, so it follows the spool.
 import configparser
@@ -33,6 +39,10 @@ import logging
 import os
 import re
 import struct
+try:
+    from . import box_feed
+except ImportError:
+    import box_feed
 
 # FM17550 registers
 REG_COMMAND = 0x01
@@ -101,14 +111,26 @@ TAG_BLOCKS = (4, 5, 6)
 # Never the sector trailer, block 7: a bad write there locks the sector for good.
 WRITABLE_BLOCKS = (4, 5)
 TAG_READ_TIMEOUT = 15.
+# A read with a loaded toolhead rocks the spool: back first, away from the 4-in-1 joint where
+# the loaded filament passes, then forward. Longer lengths need a test on the printer: going
+# back too far pulls the filament out of the feed gear.
+SLOT_READ_BACK = 100.
+SLOT_READ_FORWARD = 50.
+SLOT_READ_MAX_LENGTH = 300.
+SLOT_READ_STEP = 10.
+SLOT_READ_TIME = 0.5
+SLOT_READ_VELOCITY = 20.
+SLOT_READ_ACCEL = 100.
 # Both tags of a Bambu spool hold the same tray number here, in sector 2.
 TRAY_SECTOR_BLOCK = 8
 TRAY_BLOCK = 9
 USAGE_FILE = "spool_usage.json"
 USAGE_INTERVAL = 1.
 USAGE_SAVE_INTERVAL = 30.
+SPOOL_REQUEST_FILE = "spool_set_%d.txt"
 BOX_SLOTS = 4
 MAX_SPOOL_GRAMS = 5000
+USUAL_SPOOL_GRAMS = 1000.
 FILAMENT_MM2 = 2.405  # Cross-section of 1.75 mm filament.
 DEFAULT_DENSITY = 1.24
 DENSITY = {"PLA": 1.24, "PETG": 1.27, "PET": 1.27, "ABS": 1.04, "ASA": 1.07, "TPU": 1.21,
@@ -511,6 +533,16 @@ class Fm17550:
         out of range while the spool turns. Registers are restored on any exit."""
         return self._retrying(self._read_once, timeout, monotonic, check_abort)
 
+    def read_slot_tag(self, timeout, monotonic, check_abort=None, uids=(), trays=()):
+        """Like read_bambu, but the tags of the neighbouring spool count as no tag:
+        one reader serves two slots, and a Bambu spool has two tags with the same tray."""
+        def action():
+            uid, tag = self._read_once()
+            if uid in uids or tag["tray_uid"] in trays:
+                raise TagAbsent("only the neighbouring spool is in the field")
+            return uid, tag
+        return self._retrying(action, timeout, monotonic, check_abort)
+
     def _retrying(self, action, timeout, monotonic, check_abort):
         saved = self.snapshot()
         try:
@@ -530,6 +562,65 @@ class Fm17550:
                 self.pause(RETRY_DELAY)
         finally:
             self.restore(saved)
+
+
+def swing_read(read, move, release, back, forward, spool_gone):
+    """Try `read` while rocking the spool `back` mm one way and `forward` mm the other, then always
+    return to the start and release the motor. Going back stops as soon as `spool_gone` says so."""
+    position = 0.
+    try:
+        for target in (-back, forward):
+            while True:
+                try:
+                    return read()
+                except (TagAbsent, SeveralTags) as e:
+                    problem = e
+                if position == target:
+                    break
+                step = max(-SLOT_READ_STEP, min(SLOT_READ_STEP, target - position))
+                move(step)
+                position += step
+                if position < 0 and spool_gone():
+                    break
+        raise problem
+    finally:
+        try:
+            if position:
+                move(-position)
+        finally:
+            release()
+
+
+def stock_settings(stepper):
+    """Length, speed and acceleration values of a stock Box stepper, for choosing our own moves."""
+    found = {}
+    for name in dir(stepper):
+        if name.startswith("_") or not re.search("length|speed|accel", name):
+            continue
+        try:
+            value = getattr(stepper, name)
+        except Exception:
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            found[name] = value
+    return found
+
+
+def object_values(obj):
+    """Plain values of a stock object, to look for sensor states kept outside its status."""
+    found = {}
+    for name in dir(obj):
+        if name.startswith("__"):
+            continue
+        try:
+            value = getattr(obj, name)
+        except Exception:
+            continue
+        if isinstance(value, (bool, int, float, str)):
+            found[name] = value
+        elif not callable(value):
+            found[name] = type(value).__name__
+    return found
 
 
 def _clean_text(text):
@@ -602,16 +693,65 @@ class SpoolLedger:
             logging.warning("bambu_rfid: %s ignored: %s", path, e)
             self.spools = {}
 
+    def _resolve(self, key):
+        """A read may miss the tray number, but a tag once seen with it stays that spool."""
+        if key.startswith("uid:"):
+            for other, entry in self.spools.items():
+                if other.startswith("tray:") and key[4:] in entry.get("uids", ()):
+                    return other
+        return key
+
+    def _link(self, key, uid):
+        """Remember the tag of a spool, taking over what was counted under the tag alone."""
+        old = self.spools.pop("uid:%s" % (uid,), None)
+        entry = self.spools.get(key)
+        if old is not None:
+            if entry is None or old.get("manual"):
+                entry = old
+            else:
+                entry["used_g"] += old["used_g"]
+            self.spools[key] = entry
+            self.dirty = True
+        if entry is not None and uid not in entry.get("uids", ()):
+            entry["uids"] = entry.get("uids", []) + [uid]
+            self.dirty = True
+
     def add(self, key, grams):
-        entry = self.spools.setdefault(key, {"set_g": None, "used_g": 0.})
+        entry = self.spools.setdefault(self._resolve(key), {"set_g": None, "used_g": 0.})
         entry["used_g"] += grams
         self.dirty = True
 
     def set_remaining(self, key, grams):
-        self.spools[key] = {"set_g": float(grams), "used_g": 0.}
+        key = self._resolve(key)
+        entry = {"set_g": float(grams), "used_g": 0., "manual": True}
+        if "uids" in self.spools.get(key, {}):
+            entry["uids"] = self.spools[key]["uids"]
+        self.spools[key] = entry
         self.dirty = True
 
+    def adopt(self, variables, slots=BOX_SLOTS):
+        """A spool seen for the first time counts as full: the weight on its tag, or a usual spool."""
+        for slot in range(slots):
+            record = variables.get("bambu_tag_slot%d" % (slot,))
+            if not isinstance(record, dict) or record.get("empty"):
+                continue
+            key = spool_key(variables, slot)
+            if key.startswith("tray:") and record.get("uid"):
+                self._link(key, record["uid"])
+            key = self._resolve(key)
+            entry = self.spools.get(key)
+            if entry is None or entry["set_g"] is None:
+                weight = record.get("weight")
+                valid = isinstance(weight, (int, float)) and 0 < weight <= MAX_SPOOL_GRAMS
+                fresh = {"set_g": float(weight) if valid else USUAL_SPOOL_GRAMS,
+                         "used_g": entry["used_g"] if entry else 0.}
+                if entry and "uids" in entry:
+                    fresh["uids"] = entry["uids"]
+                self.spools[key] = fresh
+                self.dirty = True
+
     def view(self, key):
+        key = self._resolve(key)
         entry = self.spools.get(key) or {"set_g": None, "used_g": 0.}
         remaining = None
         if entry["set_g"] is not None:
@@ -626,6 +766,22 @@ class SpoolLedger:
             json.dump(self.spools, f)
         os.replace(temp, self.path)
         self.dirty = False
+
+
+def take_spool_request(folder, slot):
+    """Grams asked for this slot, or None. The request is used up even when it is bad."""
+    path = os.path.join(folder, SPOOL_REQUEST_FILE % (slot,))
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read(32)
+        os.remove(path)
+    except OSError:
+        return None
+    try:
+        grams = int(text.strip())
+    except ValueError:
+        return None
+    return grams if 0 <= grams <= MAX_SPOOL_GRAMS else None
 
 
 class FilamentMeter:
@@ -666,6 +822,48 @@ def slot_density(box_status, slot):
     return DENSITY.get(kind, DEFAULT_DENSITY)
 
 
+class ScreenWarnings:
+    """Raises a stock window of the printer screen. The screen watches the warning list of
+    multi_color_controller, so an entry is added there for a moment. The stock object is not changed."""
+
+    TEXT = "BOX %d temperature and humidity sensor abnormal, heating and drying functions have been turned off."
+    SHOW_SECONDS = 20.
+
+    def __init__(self, printer):
+        self.printer = printer
+        self.reactor = printer.get_reactor()
+        self.active = []
+        printer.register_event_handler("klippy:ready", self._wrap)
+        printer.lookup_object("gcode").register_command(
+            "BAMBU_SCREEN_WARNING", self.cmd_WARNING, desc="Raise a stock window on the printer screen")
+
+    def _wrap(self):
+        controller = self.printer.lookup_object("multi_color_controller", None)
+        if controller is None:
+            return
+        stock = controller.get_status
+
+        def get_status(eventtime=None):
+            status = dict(stock(eventtime))
+            if self.active:
+                status["box_warning_info"] = list(status.get("box_warning_info") or []) + self.active
+            return status
+        try:
+            controller.get_status = get_status
+        except AttributeError as e:
+            logging.warning("bambu_rfid: no screen warnings: %s", e)
+
+    def cmd_WARNING(self, gcmd):
+        text = self.TEXT % (gcmd.get_int("BOX", minval=3, maxval=4),)
+        if text not in self.active:
+            self.active.append(text)
+        self.reactor.register_callback(lambda e: self._clear(text), self.reactor.monotonic() + self.SHOW_SECONDS)
+
+    def _clear(self, text):
+        if text in self.active:
+            self.active.remove(text)
+
+
 class SpoolUsage:
     """One per printer, whichever reader section creates it first."""
 
@@ -686,6 +884,7 @@ class SpoolUsage:
         if usage is None:
             usage = cls(printer, path)
             printer.add_object("bambu_spool_usage", usage)
+            ScreenWarnings(printer)
         return usage
 
     def _variables(self):
@@ -713,6 +912,13 @@ class SpoolUsage:
         stats = self.printer.lookup_object("print_stats").get_status(eventtime)
         box = self.printer.lookup_object("box_extras", None)
         box_status = box.get_status(eventtime) if box is not None else {}
+        self.ledger.adopt(self._variables())
+        folder = os.path.dirname(self.ledger.path)
+        for slot in range(BOX_SLOTS):
+            grams = take_spool_request(folder, slot)
+            if grams is not None:
+                self.ledger.set_remaining(spool_key(self._variables(), slot), grams)
+                self._flush()
         part = self.meter.feed(stats["state"], stats["filament_used"], active_slot(box_status))
         if part is not None:
             slot, millimeters = part
@@ -737,7 +943,10 @@ class SpoolUsage:
 class StockReadProxy:
     """Stands in for box_rfid's fm17550_read_card query command."""
 
-    def __init__(self, real, chip, report, monotonic, on_bambu=None, on_stock=None):
+    def __init__(self, real, chip, report, monotonic, on_bambu=None, on_stock=None,
+                 bambu_tags=True, custom_tags=True):
+        self.bambu_tags = bambu_tags
+        self.custom_tags = custom_tags
         self.real = real
         self.chip = chip
         self.report = report
@@ -767,6 +976,8 @@ class StockReadProxy:
         return bytes([tag["qidi_material"], tag["qidi_color"], 1]) + bytes(13)
 
     def _read_custom_codes(self):
+        if not self.custom_tags:
+            return None
         try:
             custom = self.chip.read_custom()
         except RfidError:
@@ -786,7 +997,7 @@ class StockReadProxy:
             return {"status": 1, "data": self.held_data}
         self.held_data = None
         try:
-            data = self._read_bambu_codes()
+            data = self._read_bambu_codes() if self.bambu_tags else self._read_custom_codes()
         except TagAbsent:
             # Skipping the stock read here keeps the polling fast between passes.
             return {"status": 0, "data": b""}
@@ -825,24 +1036,59 @@ class BambuRfid:
         self.tag_result = None
         config_file = self.printer.get_start_args().get("config_file", "")
         self.map_path = os.path.join(os.path.dirname(config_file), "bambu_map.cfg")
-        SpoolUsage.of(self.printer, os.path.join(os.path.dirname(config_file), USAGE_FILE))
+        if config.getboolean("spool_usage", True):
+            SpoolUsage.of(self.printer, os.path.join(os.path.dirname(config_file), USAGE_FILE))
         gcode = self.printer.lookup_object("gcode")
         self.gcode = gcode
+        self.box_takeover = box_feed.BOX_TAKEOVER and config.getboolean("box_takeover", True)
+        self.bambu_tags = config.getboolean("bambu_tags", True)
+        self.custom_tags = config.getboolean("custom_tags", True)
         if config.getboolean("hook_stock_read", False):
             self.printer.register_event_handler("klippy:connect", self._hook_stock)
+        elif self.box_takeover:
+            self.printer.register_event_handler("klippy:connect", self._hook_takeover)
         gcode.register_mux_command("BAMBU_RFID_DIAG", "READER", self.name,
                                    self.cmd_DIAG, desc="Read FM17550 registers")
         gcode.register_mux_command("BAMBU_RFID_READ", "READER", self.name,
                                    self.cmd_READ, desc="Read a Bambu Lab tag")
-        gcode.register_mux_command("BAMBU_RFID_TAG_READ", "READER", self.name,
-                                   self.cmd_TAG_READ, desc="Read a QIDI-format tag")
-        gcode.register_mux_command("BAMBU_RFID_TAG_WRITE", "READER", self.name,
-                                   self.cmd_TAG_WRITE, desc="Write a QIDI-format tag")
+        if self.custom_tags:
+            gcode.register_mux_command("BAMBU_RFID_TAG_READ", "READER", self.name,
+                                       self.cmd_TAG_READ, desc="Read a QIDI-format tag")
+            gcode.register_mux_command("BAMBU_RFID_TAG_WRITE", "READER", self.name,
+                                       self.cmd_TAG_WRITE, desc="Write a QIDI-format tag")
+        gcode.register_mux_command("BAMBU_BOX_MOVE", "READER", self.name,
+                                   self.cmd_BOX_MOVE, desc="Move several Box motors together")
+        gcode.register_mux_command("BAMBU_BOX_INFO", "READER", self.name,
+                                   self.cmd_BOX_INFO, desc="Show the stock Box move settings")
+        gcode.register_mux_command("BAMBU_RFID_SLOT_READ", "READER", self.name,
+                                   self.cmd_SLOT_READ, desc="Read a spool tag without the stock read")
 
     def get_status(self, eventtime):
-        return {"tag_result": self.tag_result}
+        return {"tag_result": self.tag_result, "box_sensors": self._box_sensors()}
+
+    def _box_sensors(self):
+        """Stock sensor states that are kept outside the stock status."""
+        found = {}
+        extras = self.printer.lookup_object("box_extras", None)
+        for name in ("b_endstop_state", "buffer_state", "box_button_state", "operate_state"):
+            found[name] = getattr(extras, name, None)
+        for slot in range(BOX_SLOTS):
+            stepper = self.printer.lookup_object("box_stepper slot%d" % (slot,), None)
+            found["r_endstop_%d" % (slot,)] = getattr(stepper, "r_endstop_state", None)
+        return found
 
     def _hook_stock(self):
+        for slot in range(BOX_SLOTS):
+            stepper = self.printer.lookup_object("box_stepper slot%d" % (slot,), None)
+            if stepper is not None and not getattr(stepper, "_bambu_traced", False):
+                try:
+                    stepper._bambu_traced = True
+                except AttributeError:
+                    pass
+                logging.info("bambu_rfid trace set on slot%d: %s", slot,
+                             box_feed.trace_calls(stepper, "slot%d" % (slot,), box_feed.BOX_TRACE, logging.info))
+        if self.box_takeover:
+            self._hook_takeover()
         stock = self.printer.lookup_object("box_rfid " + self.name, None)
         real = getattr(stock, "fm17550_read_card", None)
         if real is None:
@@ -851,7 +1097,8 @@ class BambuRfid:
         self.proxy = StockReadProxy(real, self.chip, self._report,
                                     self.reactor.monotonic,
                                     lambda tag: self._schedule_exact_color(stock, tag),
-                                    lambda: self._schedule_stock_record(stock))
+                                    lambda: self._schedule_stock_record(stock),
+                                    self.bambu_tags, self.custom_tags)
         try:
             stock.fm17550_read_card = self.proxy
         except AttributeError:
@@ -859,6 +1106,13 @@ class BambuRfid:
             logging.warning("bambu_rfid: cannot wrap stock read of %s", self.name)
             return
         logging.info("bambu_rfid: stock read of %s wrapped", self.name)
+
+    def _hook_takeover(self):
+        mover = box_feed.BoxMover.of(self.printer)
+        mover.readers[self.name] = self
+        mover.hook_eject()
+        mover.hook_slot_load()
+        mover.start_insert_watch()
 
     def _schedule_exact_color(self, stock, tag):
         stepper_name = getattr(getattr(stock, "stepper", None), "stepper_name", None)
@@ -969,6 +1223,8 @@ class BambuRfid:
             result = {"ok": False, "error": "absent"}
         except SeveralTags:
             result = {"ok": False, "error": "several"}
+        except NotBambuTag:
+            result = {"ok": False, "error": "unknown_tag"}
         except RfidError as e:
             logging.info("bambu_rfid %s: tag operation failed: %s", self.name, e)
             result = {"ok": False, "error": "failed"}
@@ -1001,6 +1257,130 @@ class BambuRfid:
             raise gcmd.error("bambu_rfid: UID must be 4 bytes and a block 16")
         self._tag_command(gcmd, lambda: self.chip.write_tag(
             uid, blocks, timeout, self.reactor.monotonic, self._check_stock_idle))
+
+    def cmd_BOX_MOVE(self, gcmd):
+        self._check_idle(gcmd)
+        try:
+            slots = box_feed.parse_slots(gcmd.get("SLOTS"))
+        except ValueError as e:
+            raise gcmd.error("bambu_rfid: %s" % (e,))
+        distance = gcmd.get_float("DISTANCE", minval=-box_feed.BOX_MOVE_MAX, maxval=box_feed.BOX_MOVE_MAX)
+        speed = gcmd.get_float("VELOCITY", box_feed.BOX_MOVE_VELOCITY, above=0., maxval=box_feed.BOX_MOVE_MAX_VELOCITY)
+        accel = gcmd.get_float("ACCEL", box_feed.BOX_MOVE_ACCEL, above=0.)
+        now = self.reactor.monotonic()
+        sensor = self.printer.lookup_object("filament_switch_sensor filament_switch_sensor")
+        loaded = self.printer.lookup_object("box_extras").get_status(now).get("loaded_slot")
+        for slot in slots:
+            if sensor.get_status(now)["filament_detected"] and loaded == "slot%d" % (slot,):
+                raise gcmd.error("bambu_rfid: slot %d is loaded in the toolhead" % (slot,))
+        mover = box_feed.BoxMover.of(self.printer)
+        try:
+            mover.move(slots, distance, speed, accel, mover.calc_move_time)
+        finally:
+            mover.release(slots)
+        gcmd.respond_info("bambu_rfid: moved slots %s by %.1f mm" % (slots, distance))
+
+    def cmd_BOX_INFO(self, gcmd):
+        stepper = self.printer.lookup_object("box_stepper slot0")
+        gcmd.respond_info("%s: %s" % (self.name, sorted(stock_settings(stepper).items())))
+        for name, obj in self.printer.lookup_objects():
+            if re.search("box_extras|box_stepper slot2|autofeed|auto_feed|mcb|multi_color", name, re.I):
+                logging.info("bambu_rfid box info %s: %s", name, sorted(object_values(obj).items()))
+                gcmd.respond_info("%s: %s" % (name, sorted(object_values(obj))))
+
+    def cmd_SLOT_READ(self, gcmd):
+        """Read a tag for the panel when the stock read refuses because the toolhead is loaded.
+        Only this slot's motor runs: it rocks the spool and returns it to the start."""
+        slot = gcmd.get_int("SLOT", minval=0, maxval=BOX_SLOTS - 1)
+        if slot // 2 + 1 != int(self.name.rsplit("_", 1)[1]):
+            raise gcmd.error("bambu_rfid: slot %d is not on %s" % (slot, self.name))
+        back = gcmd.get_float("BACK", SLOT_READ_BACK, minval=0., maxval=SLOT_READ_MAX_LENGTH)
+        forward = gcmd.get_float("FORWARD", SLOT_READ_FORWARD, minval=0., maxval=SLOT_READ_MAX_LENGTH)
+        try:
+            uids = [bytes.fromhex(uid) for uid in gcmd.get("EXCLUDE", "").split(",") if uid]
+        except ValueError:
+            raise gcmd.error("bambu_rfid: EXCLUDE must be hex UIDs")
+        trays = [tray for tray in gcmd.get("TRAYS", "").split(",") if tray]
+
+        def action():
+            self._check_slot_free(slot)
+            return swing_read(lambda: self._read_slot_tag(SLOT_READ_TIME, uids, trays),
+                              lambda distance: self._move_slot(slot, distance),
+                              lambda: self._release_slot(slot), back, forward,
+                              lambda: self._spool_gone(slot))
+        self._tag_command(gcmd, action)
+
+    def _check_slot_free(self, slot):
+        now = self.reactor.monotonic()
+        stepper = self.printer.lookup_object("box_stepper slot%d" % (slot,))
+        if stepper.get_status(now)["runout_button"] != 0:
+            raise TagProblem("no_spool")
+        sensor = self.printer.lookup_object("filament_switch_sensor filament_switch_sensor")
+        extras = self.printer.lookup_object("box_extras")
+        if sensor.get_status(now)["filament_detected"] \
+                and extras.get_status(now).get("loaded_slot") == "slot%d" % (slot,):
+            raise TagProblem("slot_loaded")
+
+    def _move_slot(self, slot, distance):
+        self.gcode.run_script_from_command("FORCE_MOVE STEPPER=slot%d DISTANCE=%.1f VELOCITY=%.1f ACCEL=%.1f" % (
+            slot, distance, SLOT_READ_VELOCITY, SLOT_READ_ACCEL))
+
+    def _spool_gone(self, slot):
+        self.printer.lookup_object("toolhead").wait_moves()
+        stepper = self.printer.lookup_object("box_stepper slot%d" % (slot,))
+        return stepper.get_status(self.reactor.monotonic())["runout_button"] != 0
+
+    def _release_slot(self, slot):
+        self.printer.lookup_object("toolhead").wait_moves()
+        self.gcode.run_script_from_command("SET_STEPPER_ENABLE STEPPER=slot%d ENABLE=0" % (slot,))
+
+    def read_during_feed(self, skip, slots):
+        """One try at the tag at the antenna, None if there is none to use. Tags of a spool
+        that stands here and takes no part are skipped, as are those already settled."""
+        saved = self.printer.lookup_object("save_variables").allVariables
+        uids, trays = [bytes.fromhex(uid) for uid in skip], []
+        for slot in range(BOX_SLOTS):
+            record = saved.get("bambu_tag_slot%d" % (slot,))
+            if box_feed.reader_of(slot) != self.name or slot in slots or not isinstance(record, dict):
+                continue
+            if record.get("uid"):
+                uids.append(bytes.fromhex(record["uid"]))
+            if record.get("tray"):
+                trays.append(record["tray"])
+        if self.proxy is not None:
+            self.proxy.busy = True
+        try:
+            return self._read_slot_tag(0., uids, trays)
+        except RfidError:
+            return None
+        finally:
+            if self.proxy is not None:
+                self.proxy.busy = False
+
+    def _read_slot_tag(self, timeout, uids, trays):
+        try:
+            if not self.bambu_tags:
+                raise NotBambuTag("Bambu tags are switched off")
+            uid, tag = self.chip.read_slot_tag(timeout, self.reactor.monotonic,
+                                               self._check_stock_idle, uids, trays)
+            material = tag["qidi_material"]
+        except NotBambuTag:
+            custom = self.chip.read_custom() if self.custom_tags else None
+            if custom is None:
+                raise
+            data, tag = custom
+            uid, material = bytes.fromhex(tag["uid"]), data[0]
+            if uid in uids:
+                raise TagAbsent("only the neighbouring spool is in the field")
+        result = {"uid": uid.hex().upper(), "material": material, "color": tag["color"],
+                  "detail": _clean_text(tag["detail"]), "profile": tag.get("profile"),
+                  "tag_color": tag.get("tag_color", tag["color"]), "tray": tag.get("tray_uid")}
+        for key in ("weight", "diameter", "min_temp", "max_temp", "dry_temp", "dry_hours"):
+            if tag.get(key) is not None:
+                result[key] = tag[key]
+        if tag.get("brand"):
+            result["brand"] = _clean_text(tag["brand"])
+        return result
 
 
 def load_config_prefix(config):

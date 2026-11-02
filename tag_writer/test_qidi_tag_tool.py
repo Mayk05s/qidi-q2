@@ -315,6 +315,17 @@ class BoxTagTests(unittest.TestCase):
         with self.assertRaisesRegex(q.TagError, "прочитай"):
             self.app(printer).write(dict(self.BODY, color="FAFAFA", uid="1 BLOCK4=00"))
 
+    def test_reads_at_the_same_time_do_not_mix_up_results(self):
+        printer = FakeBoxPrinter()
+        original = printer.answer
+        def answer(path, post=False):
+            # Another slot's read starts while this one is on its way.
+            if post:
+                next(printer.tag_requests)
+            return original(path, post)
+        printer.fetch = answer
+        self.assertEqual(printer.tag_command("card_reader_1", ("BAMBU_RFID_TAG_READ", ""))["uid"], "7081205A")
+
     def test_module_error_gets_a_readable_message(self):
         printer = FakeBoxPrinter()
         printer.error = "bambu"
@@ -351,7 +362,7 @@ class BoxTagTests(unittest.TestCase):
         printer = FakeBoxPrinter()
         printer.fetch = lambda path, post=False: {"result": {"status": {
             "save_variables": {"variables": {}}, "print_stats": {"state": "standby"}}}}
-        with self.assertRaisesRegex(q.PrinterError, "Обнови"):
+        with self.assertRaisesRegex(q.PrinterError, "Повтори"):
             self.app(printer).read({"source": "box1"})
 
 
@@ -388,11 +399,77 @@ class LoadedSlotTests(unittest.TestCase):
         printer.scripts = scripts
         return printer
 
-    def test_read_is_refused_and_tag_record_kept_while_loaded(self):
+    def test_loaded_slot_itself_is_refused(self):
         printer = self.printer("slot1", True)
         with self.assertRaisesRegex(q.PrinterError, "1B"):
-            printer.read_slot(0)
+            printer.read_slot(1)
         self.assertEqual(printer.scripts, [])
+
+    def motor_printer(self, answers, neighbour=None):
+        """A printer with slot1 loaded whose module gives `answers` to the tag reads."""
+        scripts = []
+        answers = iter(answers)
+        result = {}
+
+        def fetch(path, post=False):
+            if "box_extras" in path:
+                return {"result": {"status": {"box_extras": {"loaded_slot": "slot1"},
+                                              "filament_switch_sensor filament_switch_sensor": {"filament_detected": True}}}}
+            if path.startswith("/printer/objects/query?save_variables"):
+                return {"result": {"status": {"print_stats": {"state": "standby"},
+                                              "save_variables": {"variables": {"bambu_tag_slot1": neighbour}}}}}
+            if path.startswith("/printer/objects/query?"):
+                name = q.urllib.parse.unquote(path.split("?", 1)[1])
+                return {"result": {"status": {name: {"tag_result": result.get("now")}}}}
+            script = q.urllib.parse.parse_qs(path.split("?", 1)[1])["script"][0]
+            scripts.append(script)
+            if script.startswith("BAMBU_RFID_SLOT_READ"):
+                request = int(dict(p.split("=") for p in script.split()[1:])["ID"])
+                result["now"] = dict(next(answers), id=request)
+            return {"result": "ok"}
+        printer = q.Printer("printer", fetch=fetch)
+        printer.scripts = scripts
+        return printer
+
+    def test_other_slot_is_read_by_module_and_saved(self):
+        tag = {"ok": True, "uid": "AABBCCDD", "material": 2, "color": "112233", "tag_color": "112233",
+               "detail": "PLA Matte", "profile": None, "brand": "Bambu Lab", "weight": 1000, "tray": None}
+        printer = self.motor_printer([tag],
+                                    neighbour={"uid": "11223344", "tray": "ABCD"})
+        printer.read_slot(0)
+        printer.read_thread.join(10)
+        self.assertEqual(printer.read_errors, {})
+        self.assertFalse(printer.reading[0])
+        self.assertNotIn("READ_RFID", " ".join(printer.scripts))
+        self.assertIn("SLOT=0", printer.scripts[0])
+        self.assertIn("EXCLUDE=11223344", printer.scripts[0])
+        self.assertIn("TRAYS=ABCD", printer.scripts[0])
+        self.assertIn("VARIABLE=filament_slot0 VALUE=\"'QFA01'\"", printer.scripts[1])
+        self.assertIn("VARIABLE=color_slot0 VALUE=\"['112233']\"", printer.scripts[2])
+        self.assertIn("'uid': 'AABBCCDD'", printer.scripts[3])
+        self.assertIn("'filament': 'QFA01'", printer.scripts[3])
+
+    def test_tag_not_found_is_reported_once(self):
+        printer = self.motor_printer([{"ok": False, "error": "absent"}])
+        printer.read_slot(0)
+        printer.read_thread.join(10)
+        self.assertIn("Метка не найдена", printer.read_errors[0])
+        self.assertEqual(len(printer.scripts), 1)
+
+    def test_failed_motor_read_keeps_the_slot(self):
+        printer = self.motor_printer([{"ok": False, "error": "several"}])
+        printer.read_slot(0)
+        printer.read_thread.join(10)
+        self.assertIn("несколько", printer.read_errors[0])
+        self.assertEqual(len(printer.scripts), 1)
+
+    def test_material_without_a_profile_is_reported(self):
+        tag = {"ok": True, "uid": "AABBCCDD", "material": 99, "color": "112233", "detail": "Odd"}
+        printer = self.motor_printer([tag])
+        printer.read_slot(0)
+        printer.read_thread.join(10)
+        self.assertIn("Odd", printer.read_errors[0])
+        self.assertEqual(len(printer.scripts), 1)
 
     def test_read_runs_once_filament_is_out(self):
         for slot, detected in (("slot1", False), ("", True)):
@@ -426,8 +503,11 @@ class SpoolTests(unittest.TestCase):
 
     def test_set_sends_the_command(self):
         printer = self.printer()
+        files = {}
+        printer.upload = files.__setitem__
         printer.set_spool(2, 750)
-        self.assertEqual(printer.sent, ["BAMBU_RFID_SPOOL_SET SLOT=2 GRAMS=750"])
+        self.assertEqual(files, {"spool_set_2.txt": "750\n"})
+        self.assertEqual(printer.sent, [])
 
     def test_bad_values_are_refused(self):
         printer = self.printer()
@@ -767,6 +847,43 @@ class PrinterTests(unittest.TestCase):
                                    "READ_RFID SLOT=2"])
         self.assertFalse(printer.reading[2])
 
+    def same_tag_values(self):
+        record = {"uid": "7081205A", "color": "EFE255", "filament": "QFA00"}
+        return {"bambu_tag_slot0": record, "bambu_tag_slot1": dict(record), "bambu_tag_slot2": {"empty": True},
+                "bambu_tag_slot3": {"uid": "472EDD02", "color": "68724D", "filament": "QFA01"},
+                "color_slot0": ["EFE255"], "filament_slot0": "QFA00", "color_slot1": ["EFE255"], "filament_slot1": "QFA00",
+                "color_slot3": ["68724D"], "filament_slot3": "QFA01"}
+
+    def test_same_tag_in_two_slots_is_reported(self):
+        slots = self.make(variables=self.same_tag_values()).slots()["slots"]
+        self.assertEqual([slot["same_tag"] for slot in slots], [[1], [0], [], []])
+
+    def test_two_tags_of_one_spool_count_as_the_same_spool(self):
+        values = self.same_tag_values()
+        values["bambu_tag_slot0"] = dict(values["bambu_tag_slot0"], tray="AA")
+        values["bambu_tag_slot1"] = dict(values["bambu_tag_slot1"], uid="11111111", tray="AA")
+        self.assertEqual(self.make(variables=values).slots()["slots"][0]["same_tag"], [1])
+
+    def test_forget_tag_empties_only_that_slot(self):
+        printer = self.make()
+        printer.forget_tag(1)
+        scripts = [q.urllib.parse.parse_qs(p.split("?", 1)[1])["script"][0] for p, post in self.calls if post]
+        self.assertEqual(scripts, ["SAVE_VARIABLE VARIABLE=bambu_tag_slot1 VALUE=\"{'empty': True}\""])
+
+    def test_forget_tag_refused_while_printing(self):
+        status = {"result": {"status": {"save_variables": {"variables": {}}, "print_stats": {"state": "printing"}}}}
+        with self.assertRaises(q.PrinterError):
+            q.Printer("192.0.2.1", lambda path, post=False: status).forget_tag(1)
+
+    def test_skip_neighbour_uses_our_read_with_empty_head(self):
+        printer = self.make()
+        started = []
+        printer._read_with_motor = started.append
+        printer.read_slot(1, skip_neighbour=True)
+        printer.read_thread.join(2)
+        self.assertEqual(started, [1])
+        self.assertFalse(any(post and "READ_RFID" in p for p, post in self.calls))
+
     def test_read_error_reaches_the_slot(self):
         status = {"result": {"status": {"save_variables": {"variables": {}}, "print_stats": {"state": "standby"}}}}
 
@@ -868,6 +985,27 @@ class TagTests(unittest.TestCase):
         for args in ((0, 1, 1, tail), (1, 25, 1, tail), (1, 1, 256, tail), (1, 1, 1, "00")):
             with self.assertRaises(q.TagError):
                 q.build_block(*args)
+
+
+class FeatureTests(unittest.TestCase):
+    def tearDown(self):
+        q.apply_features(None)
+
+    def test_page_has_a_guide_tab_and_its_panel(self):
+        self.assertIn('id="tab-guide"', q.PAGE)
+        self.assertIn('id="panel-guide"', q.PAGE)
+
+    def test_file_decides_and_no_file_means_all(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "features.json"
+            q.load_features(path)
+            self.assertEqual(q.features, set(q.ALL_FEATURES))
+            path.write_text('["bambu"]')
+            q.load_features(path)
+            self.assertEqual(q.features, {"bambu"})
+            path.write_text("not json")
+            q.load_features(path)
+            self.assertEqual(q.features, set(q.ALL_FEATURES))
 
 
 if __name__ == "__main__":

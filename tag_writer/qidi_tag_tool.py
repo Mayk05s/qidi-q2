@@ -9,6 +9,7 @@ access bits are never touched, so a tag cannot be locked by this tool.
 Slot edits go to the printer through Moonraker, using the address in ../.env.
 """
 import ctypes
+import itertools
 import json
 import pathlib
 import re
@@ -27,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "box_patch"))
 from bambu_rfid import CUSTOM_COLOR_MAGIC, QIDI_COLORS, nearest_qidi_color  # noqa: E402
+import print_check  # noqa: E402
 import sample_model  # noqa: E402
 
 PORT = 18770
@@ -37,6 +39,10 @@ FIRMWARE_MATERIALS = pathlib.Path("/home/qidi/QIDI_Client/resource/filament_conf
 SAMPLE_LINK = re.compile(r"/samples/([0-9a-f]{32})/qidi_samples\.3mf")
 PRINTER_MODE_HOST = re.compile(r"[A-Za-z0-9.\-]{1,253}:%d" % (PORT,))
 printer_mode = False
+ALL_FEATURES = ("bambu", "nfc", "spools", "usage", "mesh", "guide")
+GUIDE_FILE = pathlib.Path(__file__).resolve().parent / "drying_guide.html"
+FEATURES_FILE = pathlib.Path(__file__).resolve().parent / "features.json"
+features = set(ALL_FEATURES)
 DATA_BLOCK = 4
 # Optional block holding the exact color; block 4 keeps the nearest palette code.
 COLOR_BLOCK = 5
@@ -95,6 +101,9 @@ BOX_READERS = {"box1": ("card_reader_1", "Считыватель Box, слоты
                "box2": ("card_reader_2", "Считыватель Box, слоты 1C и 1D")}
 BOX_ERRORS = {
     "absent": "Метка не найдена: поднеси её к антенне слота и повтори",
+    "no_spool": "В этом слоте нет катушки",
+    "slot_loaded": "Пластик из этого слота заправлен в голову. Сначала извлеки его",
+    "unknown_tag": "Это не метка Bambu и не наша. Пока голова заправлена, такую метку прочитать нельзя: задай материал вручную",
     "several": "У антенны несколько меток: убери катушку из соседнего слота",
     "bambu": "Это метка Bambu: она защищена от записи",
     "locked": "Метка защищена неизвестным ключом или была убрана во время чтения",
@@ -123,6 +132,13 @@ def _moonraker_message(error):
         return "Принтер отклонил команду: %s" % (error,)
 
 
+def tag_identity(tag):
+    """What tells one spool from another. The two tags of a Bambu spool share the tray number."""
+    if not isinstance(tag, dict) or tag.get("empty"):
+        return None
+    return tag.get("tray") or tag.get("uid")
+
+
 class Printer:
     """Slot values on the printer, through the Moonraker API."""
 
@@ -133,6 +149,8 @@ class Printer:
         self.reading = {}
         self.read_errors = {}
         self.fetch = fetch or (lambda path, post=False: self._fetch(path, post, READ_TIMEOUT if post else 8))
+        self.upload = self._upload_config
+        self.tag_requests = itertools.count(1)
 
     def _fetch(self, path, post=False, timeout=8):
         url = "http://%s:7125%s" % (self.host, path)
@@ -173,6 +191,10 @@ class Printer:
                            "color": color, "tag": tag, "reading": bool(self.reading.get(index)),
                            "spool": spools[index] if index < len(spools) else None,
                            "read_error": self.read_errors.get(index)})
+        for slot in result:
+            key = tag_identity(slot["tag"])
+            slot["same_tag"] = [other["index"] for other in result if key and other is not slot
+                                and tag_identity(other["tag"]) == key]
         return {"slots": result, "state": status["print_stats"]["state"]}
 
     def set_spool(self, index, grams):
@@ -180,8 +202,8 @@ class Printer:
             raise PrinterError("Нет такого слота")
         if isinstance(grams, bool) or not isinstance(grams, int) or not 0 <= grams <= 5000:
             raise PrinterError("Остаток должен быть от 0 до 5000 г")
-        query = urllib.parse.urlencode({"script": "BAMBU_RFID_SPOOL_SET SLOT=%d GRAMS=%d" % (index, grams)})
-        self.fetch("/printer/gcode/script?" + query, post=True)
+        # A file rather than G-code: G-code waits behind a running print.
+        self.upload("spool_set_%d.txt" % (index,), "%d\n" % (grams,))
 
     def loaded_slot(self):
         """Label of the slot whose filament is in the toolhead. The stock read refuses to run then
@@ -199,8 +221,19 @@ class Printer:
             return None
         return dict(self.SLOTS).get(int(match.group(1)), slot)
 
-    def read_slot(self, index):
-        """Start the stock tag read, the same one as the button on the printer screen."""
+    def forget_tag(self, index):
+        """Drop the tag record of a slot whose spool has moved elsewhere."""
+        if index not in (0, 1, 2, 3):
+            raise PrinterError("В этом слоте нет считывателя")
+        if self._status()["print_stats"]["state"] in ("printing", "paused"):
+            raise PrinterError("Принтер печатает, сейчас этого сделать нельзя")
+        query = urllib.parse.urlencode(
+            {"script": "SAVE_VARIABLE VARIABLE=bambu_tag_slot%d VALUE=\"{'empty': True}\"" % (index,)})
+        self.fetch("/printer/gcode/script?" + query, post=True)
+
+    def read_slot(self, index, skip_neighbour=False):
+        """Start the stock tag read, the same one as the button on the printer screen.
+        skip_neighbour takes our own read, which ignores the spool next to this one on the reader."""
         if index not in (0, 1, 2, 3):
             raise PrinterError("В этом слоте нет считывателя")
         if self._status()["print_stats"]["state"] in ("printing", "paused"):
@@ -208,9 +241,15 @@ class Printer:
         if self.reading.get(index):
             raise PrinterError("Этот слот уже читается")
         loaded = self.loaded_slot()
-        if loaded:
-            raise PrinterError("В голову заправлен пластик из слота %s. Сначала извлеки его на экране принтера, "
-                               "иначе прошивка не даст читать метки" % (loaded,))
+        if loaded == dict(self.SLOTS)[index]:
+            raise PrinterError("Пластик из слота %s заправлен в голову. Сначала извлеки его на экране принтера" % (loaded,))
+        if loaded or skip_neighbour:
+            # The stock read refuses while any slot is loaded, so the tag is read by our module.
+            self.reading[index] = True
+            self.read_errors.pop(index, None)
+            self.read_thread = threading.Thread(target=self._read_with_motor, args=(index,), daemon=True)
+            self.read_thread.start()
+            return
         # What was known about the tag is forgotten first, so the result is only this read.
         clear = urllib.parse.urlencode(
             {"script": "SAVE_VARIABLE VARIABLE=bambu_tag_slot%d VALUE=\"{'empty': True}\"" % (index,)})
@@ -233,13 +272,50 @@ class Printer:
         finally:
             self.reading[index] = False
 
+    def _read_with_motor(self, index):
+        try:
+            neighbour = self._status()["save_variables"]["variables"].get("bambu_tag_slot%d" % (index ^ 1))
+            neighbour = neighbour if isinstance(neighbour, dict) else {}
+            args = "SLOT=%d" % (index,)
+            if neighbour.get("uid"):
+                args += " EXCLUDE=" + neighbour["uid"]
+            if neighbour.get("tray"):
+                args += " TRAYS=" + neighbour["tray"]
+            reader = "card_reader_%d" % (index // 2 + 1,)
+            try:
+                result = self.tag_command(reader, ("BAMBU_RFID_SLOT_READ", args))
+            except BoxTagProblem as e:
+                if e.code == "absent":
+                    raise PrinterError("Метка не найдена: мотор покачал катушку, метка не дошла до антенны")
+                raise
+            self._save_read_tag(index, result)
+        except (PrinterError, TagError) as e:
+            self.read_errors[index] = str(e)
+        finally:
+            self.reading[index] = False
+
+    def _save_read_tag(self, index, result):
+        filament = result.get("profile") or legacy_filament(result.get("material"))
+        if not filament:
+            raise PrinterError("Нет профиля для «%s». Задай его в редакторе слота или в bambu_map.cfg" % (result.get("detail"),))
+        self.save_slot(index, filament, result["color"])
+        record = {k: v for k, v in result.items() if isinstance(v, (int, float))
+                  or (isinstance(v, str) and re.fullmatch(r"[\w +.\-]*", v))}
+        for key in ("ok", "id", "material", "profile"):
+            record.pop(key, None)
+        record["filament"] = filament
+        query = urllib.parse.urlencode(
+            {"script": "SAVE_VARIABLE VARIABLE=bambu_tag_slot%d VALUE=\"%r\"" % (index, record)})
+        self.fetch("/printer/gcode/script?" + query, post=True)
+
     def tag_command(self, reader, script):
         """Run a tag command of our module on the Box reader and return its result."""
         if self._status()["print_stats"]["state"] in ("printing", "paused"):
             raise PrinterError("Принтер печатает, считыватель сейчас занят")
-        self.tag_request = getattr(self, "tag_request", 0) + 1
+        # Local: several slots can be read at once, each thread must check its own request.
+        request = next(self.tag_requests)
         query = urllib.parse.urlencode({"script": "%s READER=%s ID=%d %s" % (
-            script[0], reader, self.tag_request, script[1])})
+            script[0], reader, request, script[1])})
         self.fetch("/printer/gcode/script?" + query, post=True)
         name = "bambu_rfid " + reader
         data = self.fetch("/printer/objects/query?" + urllib.parse.quote(name))
@@ -247,8 +323,8 @@ class Printer:
             result = data["result"]["status"][name]["tag_result"]
         except (KeyError, TypeError):
             result = None
-        if not result or result.get("id") != self.tag_request:
-            raise PrinterError("Модуль на принтере не ответил. Обнови его пунктом 1 в setup.sh")
+        if not result or result.get("id") != request:
+            raise PrinterError("Принтер не прислал результат чтения. Повтори ещё раз")
         if not result["ok"]:
             raise BoxTagProblem(result["error"], result.get("uid"))
         return result
@@ -277,18 +353,21 @@ class Printer:
             raise PrinterError("Нет файла %s на принтере, сначала выполни установку: %s" % (MAP_FILE, e))
 
     def _upload_map(self, text):
+        self.upload(MAP_FILE, text)
+
+    def _upload_config(self, name, text):
         boundary = "qidipanelboundary"
         body = ("--%s\r\nContent-Disposition: form-data; name=\"root\"\r\n\r\nconfig\r\n"
                 "--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n"
                 "Content-Type: text/plain\r\n\r\n%s\r\n--%s--\r\n"
-                % (boundary, boundary, MAP_FILE, text, boundary)).encode("utf-8")
+                % (boundary, boundary, name, text, boundary)).encode("utf-8")
         request = urllib.request.Request(
             "http://%s:7125/server/files/upload" % (self.host,), data=body, method="POST",
             headers={"Content-Type": "multipart/form-data; boundary=" + boundary})
         try:
             urllib.request.urlopen(request, timeout=8).close()
         except (urllib.error.URLError, OSError) as e:
-            raise PrinterError("Не удалось сохранить %s: %s" % (MAP_FILE, e))
+            raise PrinterError("Не удалось сохранить %s: %s" % (name, e))
 
     def save_mapping(self, index, detail, tag_color, filament, color):
         """Save the rule, apply it to the slot and keep the slot's tag record valid."""
@@ -428,6 +507,14 @@ def read_printer_host(path):
         return None
     match = re.search(r"^PRINTER_HOST=(\S+)", text, re.M)
     return match.group(1) if match else None
+
+
+def legacy_filament(code):
+    """Profile id for a tag's material code. The list names materials without the QIDI brand
+    and sometimes shorter than the profile: "PLA Matte" is "QIDI PLA Matte Basic"."""
+    name = "QIDI " + MATERIALS.get(code, "?")
+    found = [m for m in load_materials() if m["name"] == name or m["name"].startswith(name + " ")]
+    return min(found, key=lambda m: len(m["name"]))["id"] if found else None
 
 
 def load_materials(path=pathlib.Path(__file__).resolve().parent / "qidi_materials.json"):
@@ -744,12 +831,21 @@ class App:
     def slots(self):
         return self._require_printer().slots()
 
+    def print_check(self, name):
+        if getattr(self, "plastic_check", None) is None:
+            self.plastic_check = print_check.PrintCheck(self._require_printer())
+        return self.plastic_check.check(name)
+
     def set_spool(self, body):
         self._require_printer().set_spool(body.get("index"), body.get("grams"))
         return {"ok": True}
 
     def read_slot(self, body):
-        self._require_printer().read_slot(body.get("index"))
+        self._require_printer().read_slot(body.get("index"), body.get("skip_neighbour") is True)
+        return {"ok": True}
+
+    def forget_tag(self, body):
+        self._require_printer().forget_tag(body.get("index"))
         return {"ok": True}
 
     def samples(self, body):
@@ -892,6 +988,7 @@ class Handler(BaseHTTPRequestHandler):
                 "my_colors": self.app.my_colors.load(),
                 "my_materials": self.app.my_materials.load(),
                 "on_printer": printer_mode,
+                "features": sorted(features),
                 "box_readers": [{"id": key, "name": value[1]} for key, value in BOX_READERS.items()]
                 if self.app.printer else [],
             })
@@ -899,6 +996,17 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 return self._send(200, self.app.slots())
             except PrinterError as e:
+                return self._send(502, {"error": str(e)})
+        if self.path == "/guide" and "guide" in features and GUIDE_FILE.exists():
+            return self._send(200, GUIDE_FILE.read_bytes(), "text/html; charset=utf-8")
+        if self.path == "/print_check.js":
+            script = print_check.SCRIPT if "usage" in features else ""
+            return self._send(200, script.encode(), "text/javascript; charset=utf-8")
+        if self.path.partition("?")[0] == "/api/print_check":
+            query = urllib.parse.parse_qs(self.path.partition("?")[2])
+            try:
+                return self._send(200, self.app.print_check((query.get("file") or [None])[0]))
+            except (PrinterError, print_check.CheckError) as e:
                 return self._send(502, {"error": str(e)})
         link = SAMPLE_LINK.fullmatch(self.path)
         data = self.app.sample_file_data(link.group(1)) if link else None
@@ -941,6 +1049,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.app.set_spool(body))
             if self.path == "/api/slot_read":
                 return self._send(200, self.app.read_slot(body))
+            if self.path == "/api/slot_forget":
+                return self._send(200, self.app.forget_tag(body))
             self._send(404, {"error": "not found"})
         except TagError as e:
             self._send(409, {"error": str(e)})
@@ -1030,6 +1140,7 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .find-mini small{display:block;font-size:12px;color:var(--muted)}
 .find-group .action{width:100%;padding:6px 8px;font-size:14px}
 #find-dialog{width:min(520px,calc(100vw - 32px))}
+#same-tag{width:min(540px,calc(100vw - 32px))}
 .preview{position:relative}
 .tag-sync{position:absolute;top:10px;right:10px;z-index:2;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:1.5px solid var(--ok);color:var(--ok);background:var(--card);cursor:help}
 .tag-sync[hidden],.tag-sync.hold{display:none}
@@ -1189,6 +1300,7 @@ dialog .actions{justify-content:flex-end;margin:0}
 <button class="tab" role="tab" id="tab-slots" aria-selected="true">Слоты принтера</button>
 <button class="tab" role="tab" id="tab-tags" aria-selected="false">NFC-метки</button>
 <button class="tab" role="tab" id="tab-materials" aria-selected="false">Материалы</button>
+<button class="tab" role="tab" id="tab-guide" aria-selected="false">Справка</button>
 </div>
 </header>
 
@@ -1220,6 +1332,7 @@ dialog .actions{justify-content:flex-end;margin:0}
 </div>
 </div>
 </div>
+<div id="panel-guide" hidden><iframe id="guide-frame" title="Справка по пластику" style="width:100%;height:80vh;border:0;border-radius:12px"></iframe></div>
 <div id="panel-materials" hidden>
 <div class="card enabled" id="enabled"></div>
 <div class="type-list" id="type-list"></div>
@@ -1252,6 +1365,8 @@ dialog .actions{justify-content:flex-end;margin:0}
 <div class="find-list" id="find-list"></div>
 <div class="actions" style="justify-content:flex-end"><button class="action alt" id="find-close">Отмена</button><button class="action alt" id="find-again" hidden>Искать дальше</button><button class="action" id="find-take" hidden>Выбрать эту метку</button></div>
 </dialog>
+<dialog id="same-tag"><h2 id="same-tag-title"></h2><p id="same-tag-text"></p>
+<div class="actions" style="flex-wrap:wrap"><button class="action alt" id="same-tag-no" type="button">Отмена</button><button class="action alt" id="same-tag-next" type="button"></button><button class="action" id="same-tag-here" type="button"></button></div></dialog>
 <dialog id="confirm"><h2 id="confirm-title"></h2><p id="confirm-text"></p><div id="confirm-body"></div>
 <div class="actions"><button class="action alt" id="confirm-no" type="button">Отмена</button><button class="action" id="confirm-yes" type="button"></button></div></dialog>
 <dialog id="color-editor"><h2 id="ce-title"></h2>
@@ -1849,7 +1964,8 @@ $("write").onclick=async()=>{
 
 /* Slots tab */
 function showTab(name){
-  ["slots","tags","materials"].forEach(n=>{$("tab-"+n).setAttribute("aria-selected",String(n===name));$("panel-"+n).hidden=n!==name});
+  if(name==="guide"&&!$("guide-frame").src)$("guide-frame").src="/guide";
+  ["slots","tags","materials","guide"].forEach(n=>{$("tab-"+n).setAttribute("aria-selected",String(n===name));$("panel-"+n).hidden=n!==name});
   if(name==="slots")loadSlots();
   if(name==="materials")renderMaterials();
   if(name==="tags"){const id=tagMaterial.get();buildTagMaterial(id,tagMaterial.name());loadFindSlots()}
@@ -1857,6 +1973,7 @@ function showTab(name){
 $("tab-slots").onclick=()=>showTab("slots");
 $("tab-tags").onclick=()=>showTab("tags");
 $("tab-materials").onclick=()=>showTab("materials");
+$("tab-guide").onclick=()=>showTab("guide");
 const rows={};
 let slotData=[];let editing=null;
 const materialName=id=>{if(/^L\d+$/.test(id||""))return legacyName(+id.slice(1));const m=state.codes.slot_materials.find(x=>x.id===id);return m?m.name:(id||"Не задан")};
@@ -1875,7 +1992,7 @@ function renderSlot(s){
   r.spool.innerHTML=spool(blank?null:tag?tag.tag_color:s.color);
   if(s.reading){
     r.name.textContent="Читаю метку…";r.hex.textContent="";
-    r.mapped.append(el("div","map-empty","Катушка крутится, до 30 секунд"));
+    r.mapped.append(el("div","map-empty","Катушка крутится, до минуты"));
   }else if(s.tag&&s.tag.empty){
     r.name.textContent="Метка не найдена";r.hex.textContent="";
     r.mapped.append(el("div","map-empty","Пусто"));
@@ -1898,13 +2015,53 @@ function renderSlot(s){
   if(result&&result[0]!=="Метка не найдена")setSlotNote(r,result[0],result[1]);else if(r.note.className!=="note err"||!s.read_error)setSlotNote(r,"");
 }
 async function reread(s,r){
-  const yes=await confirmDialog(`Перечитать слот ${s.label}?`,"Данные метки будут очищены и прочитаны заново. Мотор Box протянет филамент этого слота, катушка будет крутиться. Филамент не должен быть загружен в голову.","Запустить");
+  const yes=await confirmDialog(`Перечитать слот ${s.label}?`,"Данные метки будут очищены и прочитаны заново. Мотор Box протянет филамент этого слота. Если в голову заправлен другой слот, мотор покачает катушку назад и вперёд и вернёт на место, а данные обновятся только когда метка найдётся.","Запустить");
   if(!yes)return;
   try{
     await api("/api/slot_read",{index:s.index});
+    watchedReads.add(s.index);
     await loadSlots();
     followReads();
   }catch(e){setSlotNote(r,e.message,"err")}
+}
+// A read started here that found a tag another slot already holds: only the user knows why.
+const watchedReads=new Set();
+function checkSameTag(){
+  for(const index of [...watchedReads]){
+    const s=slotData.find(x=>x.index===index);
+    if(!s||s.reading)continue;
+    watchedReads.delete(index);
+    if(!s.read_error&&s.same_tag.length)sameTagDialog(s);
+  }
+}
+async function sameTagDialog(s){
+  const others=s.same_tag.map(i=>slotData.find(x=>x.index===i));
+  const names=others.map(o=>o.label).join(", ");
+  const neighbour=s.same_tag.includes(s.index^1);
+  const d=$("same-tag");
+  $("same-tag-title").textContent=`Эта метка уже есть в ${names}`;
+  $("same-tag-text").textContent=`В слоте ${s.label} прочитана метка, которая записана и в ${names}. Одна катушка не может стоять в двух слотах.`+(neighbour?` Считыватель у ${s.label} и ${slotData.find(x=>x.index===(s.index^1)).label} общий, поэтому он мог поймать соседнюю катушку.`:"");
+  $("same-tag-here").textContent=`Катушка теперь в ${s.label}`;
+  $("same-tag-next").textContent="Это соседняя катушка";
+  $("same-tag-next").hidden=!neighbour;
+  const answer=await new Promise(resolve=>{
+    const done=v=>{$("same-tag-here").onclick=$("same-tag-next").onclick=$("same-tag-no").onclick=d.oncancel=null;d.close();resolve(v)};
+    $("same-tag-here").onclick=()=>done("here");
+    $("same-tag-next").onclick=()=>done("next");
+    $("same-tag-no").onclick=()=>done(null);
+    d.oncancel=e=>{e.preventDefault();done(null)};
+    d.showModal();$("same-tag-no").focus();
+  });
+  try{
+    if(answer==="here"){
+      for(const o of others)await api("/api/slot_forget",{index:o.index});
+    }else if(answer==="next"){
+      await api("/api/slot_read",{index:s.index,skip_neighbour:true});
+      watchedReads.add(s.index);
+    }
+    await loadSlots();
+    followReads();
+  }catch(e){setSlotNote(rows[s.index],e.message,"err")}
 }
 let followingReads=false;
 // While a slot is being read the card shows that, whatever the page was opened from.
@@ -1978,11 +2135,15 @@ $("spool-cancel").onclick=()=>$("spool-dialog").close();
 $("spool-save").onclick=async()=>{
   const grams=Number($("spool-grams").value);
   if(!Number.isInteger(grams)||grams<0||grams>5000){$("spool-note").className="note err";$("spool-note").textContent="Укажи целое число от 0 до 5000";return}
+  $("spool-save").disabled=true;
   try{
     await api("/api/spool",{index:spoolSlot.index,grams});
     $("spool-dialog").close();
-    await loadSlots();
+    // The printer picks the value up within a second; the card shows it right away.
+    spoolSlot.spool.remaining=grams;
+    renderSpoolLeft(spoolSlot,rows[spoolSlot.index]);
   }catch(e){$("spool-note").className="note err";$("spool-note").textContent=e.message}
+  finally{$("spool-save").disabled=false}
 };
 function closeEditor(){
   editing=null;$("editor").hidden=true;$("editor").innerHTML="";
@@ -2188,17 +2349,24 @@ async function loadSlots(){
     slotData=data.slots;
     if(!box.children.length)slotData.forEach(s=>box.append(slotCard(s)));
     slotData.forEach(renderSlot);
+    checkSameTag();
     if(slotData.some(s=>s.reading))followReads();
     hint.textContent="Нажми на карточку, чтобы выбрать, какой материал и цвет QIDI использовать для этой метки.";
   }catch(e){hint.textContent=e.message}
 }
 (async()=>{
   state.codes=await api("/api/codes");
+  const has=name=>state.codes.features.includes(name);
+  $("tab-tags").hidden=!has("nfc");
+  $("tab-guide").hidden=!has("guide");
+  const hasSlots=["bambu","nfc","spools","usage"].some(has);
+  $("tab-slots").hidden=!hasSlots;
   buildTagMaterial();
   tagPicker=makePicker($("tag-picker"),"FAFAFA",renderTag);
-  state.source=onPrinter()?null:"usb";renderTag();poll();setInterval(poll,1500);loadSlots();
+  state.source=onPrinter()?null:"usb";renderTag();poll();setInterval(poll,1500);
+  if(hasSlots)loadSlots();else if(has("guide"))showTab("guide");else showTab("materials");
 })();
-</script></body></html>
+</script><script src="/print_check.js"></script></body></html>
 """
 
 
@@ -2251,6 +2419,19 @@ def refresh_materials(raw):
     return items, [m["name"] for m in items if m["id"] not in known_ids]
 
 
+def apply_features(names):
+    """Without a list, as with a panel from before the switches, everything is on."""
+    global features
+    features = set(names) if isinstance(names, list) else set(ALL_FEATURES)
+
+
+def load_features(path=FEATURES_FILE):
+    try:
+        apply_features(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        apply_features(None)
+
+
 def pull_state(host):
     """The Mac panel uses the palette and materials chosen on the printer's panel."""
     try:
@@ -2258,6 +2439,7 @@ def pull_state(host):
             codes = json.loads(res.read())
     except (urllib.error.URLError, OSError, ValueError):
         return
+    apply_features(codes.get("features"))
     if isinstance(codes.get("my_materials"), dict):
         MY_MATERIALS_FILE.write_text(json.dumps(codes["my_materials"]))
     if isinstance(codes.get("my_colors"), list):
@@ -2276,11 +2458,14 @@ def main():
         return
     if sys.argv[1:] == ["--printer"]:
         printer_mode = True
+        load_features()
         try:
             refresh_materials(FIRMWARE_MATERIALS.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
             print("Список материалов не обновлён: %s" % (e,), flush=True)
         Handler.app = App(printer=Printer("127.0.0.1"))
+        if "usage" in features:
+            print_check.PrintWatcher(Handler.app.printer).start()
         print("QIDI Box panel on port %d" % (PORT,), flush=True)
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
         return

@@ -364,6 +364,128 @@ class TrayTests(unittest.TestCase):
         self.assertEqual(tag["detail"], "PLA Lite")
 
 
+class SlotReadTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = FakeClock()
+
+    def read(self, chip, **kwargs):
+        return b.Fm17550(chip, self.clock.pause).read_slot_tag(1., self.clock.monotonic, **kwargs)
+
+    def test_returns_the_spool_tag(self):
+        uid, tag = self.read(FakeChip())
+        self.assertEqual(uid, UID)
+        self.assertEqual(tag["detail"], "PLA Lite")
+
+    def test_neighbour_uid_counts_as_no_tag(self):
+        with self.assertRaises(b.TagAbsent):
+            self.read(FakeChip(), uids=[UID])
+
+    def test_neighbour_tray_counts_as_no_tag(self):
+        chip = FakeChip()
+        chip.tray_ok = True
+        chip.blocks[b.TRAY_BLOCK] = bytes(range(1, 17))
+        with self.assertRaises(b.TagAbsent):
+            self.read(chip, trays=[bytes(range(1, 17)).hex().upper()])
+
+
+class StockSettingsTests(unittest.TestCase):
+    def test_keeps_only_move_numbers(self):
+        class Stepper:
+            slot_load_length_1 = 120.
+            slot_load_length_1_speed = 80
+            unload_length_name = "text"
+            speed_enabled = True
+            name = "slot0"
+            _private_length = 1.
+
+            @property
+            def broken_length(self):
+                raise ValueError("no value")
+        self.assertEqual(b.stock_settings(Stepper()),
+                         {"slot_load_length_1": 120., "slot_load_length_1_speed": 80})
+
+
+class ObjectValuesTests(unittest.TestCase):
+    def test_keeps_values_and_names_other_objects(self):
+        class Stock:
+            b_endstop_state = 1
+            label = "x"
+            pins = [1]
+
+            def method(self):
+                pass
+
+            @property
+            def broken(self):
+                raise ValueError("no value")
+        self.assertEqual(b.object_values(Stock()), {"b_endstop_state": 1, "label": "x", "pins": "list"})
+
+
+class SwingReadTests(unittest.TestCase):
+    def run_swing(self, answers, back=20., forward=10., gone_at=None):
+        answers, log = iter(answers), []
+
+        def read():
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        def spool_gone():
+            return gone_at is not None and sum(x for x in log if x != "release") <= gone_at
+        try:
+            result = b.swing_read(read, log.append, lambda: log.append("release"), back, forward, spool_gone)
+        except b.RfidError as e:
+            result = e
+        return result, log
+
+    def test_found_at_once_moves_nothing(self):
+        self.assertEqual(self.run_swing(["tag"]), ("tag", ["release"]))
+
+    def test_goes_back_first_and_returns(self):
+        result, log = self.run_swing([b.TagAbsent("x"), "tag"])
+        self.assertEqual(result, "tag")
+        self.assertEqual(log, [-10., 10., "release"])
+
+    def test_found_on_the_forward_leg_returns(self):
+        result, log = self.run_swing([b.TagAbsent("x")] * 5 + ["tag"])
+        self.assertEqual(result, "tag")
+        self.assertEqual(log, [-10., -10., 10., 10., "release"])
+
+    def test_not_found_covers_both_legs_and_returns(self):
+        result, log = self.run_swing([b.TagAbsent("x")] * 9)
+        self.assertIsInstance(result, b.TagAbsent)
+        self.assertEqual(log, [-10., -10., 10., 10., 10., -10., "release"])
+
+    def test_spool_gone_ends_the_back_leg(self):
+        result, log = self.run_swing([b.TagAbsent("x")] * 9, back=50., gone_at=-20.)
+        self.assertIsInstance(result, b.TagAbsent)
+        self.assertEqual(log, [-10., -10., 10., 10., 10., -10., "release"])
+
+    def test_several_tags_keep_rocking(self):
+        result, log = self.run_swing([b.SeveralTags("x"), "tag"])
+        self.assertEqual(result, "tag")
+
+    def test_another_problem_still_returns(self):
+        result, log = self.run_swing([b.TagAbsent("x"), b.NotBambuTag("x")])
+        self.assertIsInstance(result, b.NotBambuTag)
+        self.assertEqual(log, [-10., 10., "release"])
+
+    def test_motor_is_released_when_the_way_back_fails(self):
+        log = []
+
+        def move(distance):
+            log.append(distance)
+            if distance > 0:
+                raise ValueError("bus")
+
+        def read():
+            raise b.TagAbsent("x")
+        with self.assertRaises(ValueError):
+            b.swing_read(read, move, lambda: log.append("release"), 10., 0., lambda: False)
+        self.assertEqual(log, [-10., 10., 10., "release"])
+
+
 class SpoolKeyTests(unittest.TestCase):
     def test_tray_then_uid_then_slot(self):
         self.assertEqual(b.spool_key({"bambu_tag_slot1": {"uid": "A1", "tray": "T1"}}, 1), "tray:T1")
@@ -372,11 +494,110 @@ class SpoolKeyTests(unittest.TestCase):
         self.assertEqual(b.spool_key({}, 2), "slot:2")
 
 
+class ScreenWarningsTests(unittest.TestCase):
+    def make(self):
+        class Controller:
+            def get_status(self, eventtime=None):
+                return {"box_warning_info": ["stock"], "enable_box": 1}
+        self.controller = Controller()
+        self.commands, self.handlers, self.later = {}, {}, []
+        outer = self
+
+        class Gcode:
+            def register_command(self, name, func, desc=None):
+                outer.commands[name] = func
+
+        class Reactor:
+            def monotonic(self):
+                return 0.
+
+            def register_callback(self, func, when):
+                outer.later.append(func)
+
+        class Printer:
+            def get_reactor(self):
+                return Reactor()
+
+            def register_event_handler(self, name, func):
+                outer.handlers[name] = func
+
+            def lookup_object(self, name, default=None):
+                return {"gcode": Gcode(), "multi_color_controller": outer.controller}.get(name, default)
+        warnings = b.ScreenWarnings(Printer())
+        self.handlers["klippy:ready"]()
+        return warnings
+
+    class Command:
+        def get_int(self, name, minval=None, maxval=None):
+            return 4
+
+    def test_warning_appears_with_the_stock_ones_and_goes_away(self):
+        self.make()
+        self.assertEqual(self.controller.get_status()["box_warning_info"], ["stock"])
+        self.commands["BAMBU_SCREEN_WARNING"](self.Command())
+        listed = self.controller.get_status()["box_warning_info"]
+        self.assertEqual(listed[0], "stock")
+        self.assertIn("BOX 4 temperature", listed[1])
+        self.assertEqual(self.controller.get_status()["enable_box"], 1)
+        self.later[0](0.)
+        self.assertEqual(self.controller.get_status()["box_warning_info"], ["stock"])
+
+
 class SpoolLedgerTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.path = os.path.join(folder.name, b.USAGE_FILE)
+
+    def seen_with_tray(self):
+        ledger = b.SpoolLedger(self.path)
+        ledger.set_remaining("tray:T", 250)
+        ledger.add("tray:T", 3)
+        ledger.adopt({"bambu_tag_slot1": {"uid": "A", "tray": "T", "weight": 1000}})
+        return ledger
+
+    def test_read_without_tray_keeps_the_count(self):
+        ledger = self.seen_with_tray()
+        ledger.adopt({"bambu_tag_slot1": {"uid": "A", "weight": 1000}})
+        self.assertEqual(ledger.view("uid:A")["remaining"], 247)
+        self.assertNotIn("uid:A", ledger.spools)
+
+    def test_link_survives_a_restart(self):
+        ledger = self.seen_with_tray()
+        ledger.save()
+        again = b.SpoolLedger(self.path)
+        self.assertEqual(again.view("uid:A")["remaining"], 247)
+
+    def test_printing_and_setting_without_tray_reach_the_spool(self):
+        ledger = self.seen_with_tray()
+        ledger.add("uid:A", 7)
+        self.assertEqual(ledger.view("tray:T")["remaining"], 240)
+        ledger.set_remaining("uid:A", 100)
+        self.assertEqual(ledger.view("tray:T")["remaining"], 100)
+        self.assertEqual(ledger.view("uid:A")["remaining"], 100)
+        self.assertEqual(ledger.spools["tray:T"]["uids"], ["A"])
+
+    def test_automatic_full_spool_gives_way_to_the_real_count(self):
+        ledger = b.SpoolLedger(self.path)
+        ledger.set_remaining("tray:T", 250)
+        ledger.add("tray:T", 3)
+        ledger.adopt({"bambu_tag_slot1": {"uid": "A", "weight": 1000}})
+        ledger.add("uid:A", 2)
+        ledger.adopt({"bambu_tag_slot1": {"uid": "A", "tray": "T", "weight": 1000}})
+        self.assertEqual(ledger.view("tray:T")["remaining"], 245)
+        self.assertNotIn("uid:A", ledger.spools)
+
+    def test_value_set_by_hand_under_the_tag_wins(self):
+        ledger = b.SpoolLedger(self.path)
+        ledger.set_remaining("tray:T", 250)
+        ledger.set_remaining("uid:A", 90)
+        ledger.adopt({"bambu_tag_slot1": {"uid": "A", "tray": "T"}})
+        self.assertEqual(ledger.view("tray:T")["remaining"], 90)
+
+    def test_both_tags_of_a_spool_share_its_count(self):
+        ledger = self.seen_with_tray()
+        ledger.adopt({"bambu_tag_slot1": {"uid": "B", "tray": "T"}})
+        self.assertEqual(ledger.view("uid:B")["remaining"], 247)
 
     def test_printing_subtracts_from_what_was_set(self):
         ledger = b.SpoolLedger(self.path)
@@ -402,6 +623,50 @@ class SpoolLedgerTests(unittest.TestCase):
         ledger.set_remaining("uid:A", 5)
         ledger.add("uid:A", 9)
         self.assertEqual(ledger.view("uid:A")["remaining"], 0)
+
+    def test_new_spool_starts_from_the_tag_weight(self):
+        ledger = b.SpoolLedger(self.path)
+        ledger.adopt({"bambu_tag_slot1": {"uid": "A", "weight": 750}})
+        self.assertEqual(ledger.view("uid:A")["remaining"], 750)
+
+    def test_tag_without_weight_counts_as_usual_spool(self):
+        ledger = b.SpoolLedger(self.path)
+        ledger.adopt({"bambu_tag_slot0": {"stock": True}})
+        self.assertEqual(ledger.view("slot:0")["remaining"], b.USUAL_SPOOL_GRAMS)
+
+    def test_known_spool_is_not_refilled(self):
+        ledger = b.SpoolLedger(self.path)
+        ledger.set_remaining("uid:A", 300)
+        ledger.add("uid:A", 20)
+        ledger.adopt({"bambu_tag_slot1": {"uid": "A", "weight": 1000}})
+        self.assertEqual(ledger.view("uid:A")["remaining"], 280)
+
+    def test_empty_slot_is_not_a_spool(self):
+        ledger = b.SpoolLedger(self.path)
+        ledger.adopt({"bambu_tag_slot0": {"empty": True}})
+        self.assertEqual(ledger.spools, {})
+
+    def test_tray_number_takes_over_the_count_of_its_tag(self):
+        ledger = b.SpoolLedger(self.path)
+        ledger.set_remaining("uid:A", 300)
+        ledger.adopt({"bambu_tag_slot1": {"uid": "A", "tray": "T", "weight": 1000}})
+        self.assertEqual(ledger.view("tray:T")["remaining"], 300)
+        self.assertNotIn("uid:A", ledger.spools)
+
+    def test_request_file_is_used_once(self):
+        folder = os.path.dirname(self.path)
+        with open(os.path.join(folder, b.SPOOL_REQUEST_FILE % 2), "w") as f:
+            f.write("750\n")
+        self.assertEqual(b.take_spool_request(folder, 2), 750)
+        self.assertIsNone(b.take_spool_request(folder, 2))
+
+    def test_bad_request_is_dropped(self):
+        folder = os.path.dirname(self.path)
+        for text in ("abc", "99999", "-1"):
+            with open(os.path.join(folder, b.SPOOL_REQUEST_FILE % 0), "w") as f:
+                f.write(text)
+            self.assertIsNone(b.take_spool_request(folder, 0))
+            self.assertFalse(os.path.exists(os.path.join(folder, b.SPOOL_REQUEST_FILE % 0)))
 
     def test_survives_a_restart(self):
         ledger = b.SpoolLedger(self.path)
@@ -553,6 +818,32 @@ class FakeRealRead:
     def send(self, args):
         self.calls += 1
         return {"status": 1, "data": b"stock"}
+
+
+class TagSwitchTests(unittest.TestCase):
+    class Chip:
+        def __init__(self):
+            self.calls = []
+
+        def read_bambu(self):
+            self.calls.append("bambu")
+            raise b.NotBambuTag("no")
+
+        def read_custom(self):
+            self.calls.append("custom")
+            return None
+
+    def reads(self, **switches):
+        chip = self.Chip()
+        real = FakeRealRead()
+        b.StockReadProxy(real, chip, lambda m: None, lambda: 0., **switches).send([])
+        return chip.calls
+
+    def test_each_kind_of_tag_is_read_only_when_on(self):
+        self.assertEqual(self.reads(), ["bambu", "custom"])
+        self.assertEqual(self.reads(bambu_tags=False), ["custom"])
+        self.assertEqual(self.reads(custom_tags=False), ["bambu"])
+        self.assertEqual(self.reads(bambu_tags=False, custom_tags=False), [])
 
 
 class ProxyTests(unittest.TestCase):
