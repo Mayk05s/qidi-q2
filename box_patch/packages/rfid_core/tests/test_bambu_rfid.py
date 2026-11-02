@@ -709,7 +709,8 @@ class SpoolNumberTests(unittest.TestCase):
     def test_slot_read_carries_the_tray(self):
         chip = self.chip(b.SPOOL_MAGIC + self.SPOOL + bytes(4))
         reader = types.SimpleNamespace(bambu_tags=False, custom_tags=True, chip=driver(chip),
-                                       mapping_for_uid=lambda uid: None)
+                                       mapping_for_uid=lambda uid: None, reactor=FakeClock(),
+                                       _check_stock_idle=lambda: None)
         result = b.BambuRfid._read_slot_tag(reader, 1., [], [])
         self.assertEqual(result["tray"], "0123456789ABCDEF")
 
@@ -722,9 +723,92 @@ class SpoolNumberTests(unittest.TestCase):
     def test_neighbours_second_tag_counts_as_no_tag(self):
         chip = self.chip(b.SPOOL_MAGIC + self.SPOOL + bytes(4))
         reader = types.SimpleNamespace(bambu_tags=False, custom_tags=True, chip=driver(chip),
-                                       mapping_for_uid=lambda uid: None)
+                                       mapping_for_uid=lambda uid: None, reactor=FakeClock(),
+                                       _check_stock_idle=lambda: None)
         with self.assertRaises(b.TagAbsent):
             b.BambuRfid._read_slot_tag(reader, 1., [], ["0123456789ABCDEF"])
+
+
+class FastReadTests(unittest.TestCase):
+    """Each register exchange goes through the MCU, so a read is as slow as its exchanges."""
+
+    def own_chip(self, burst=True):
+        chip = (BurstChip if burst else CountingChip)(key=b.DEFAULT_KEY)
+        chip.blocks[4] = bytes([7, 1]) + bytes(14)
+        chip.blocks[5] = b"QXCL" + bytes.fromhex("FF0000") + b"QFL30\0" + bytes(3)
+        return chip
+
+    def reader(self, chip, bambu=True):
+        return types.SimpleNamespace(bambu_tags=bambu, custom_tags=True, chip=driver(chip),
+                                     mapping_for_uid=lambda uid: None, reactor=FakeClock(),
+                                     _check_stock_idle=lambda: None)
+
+    def test_own_tag_is_read_in_one_setup_of_the_reader(self):
+        chip = self.own_chip()
+        result = b.BambuRfid._read_slot_tag(self.reader(chip), 0., [], [])
+        self.assertEqual((result["material"], result["color"]), (7, "FF0000"))
+        # One snapshot of the reader's registers, not one for the Bambu try and one for ours; the
+        # one-time check whether the chip takes several bytes at once reads them once more.
+        self.assertEqual(chip.snapshots, 2)
+
+    def test_known_own_tag_skips_the_bambu_key(self):
+        chip = self.own_chip()
+        reader = self.reader(chip)
+        b.BambuRfid._read_slot_tag(reader, 0., [], [])
+        chip.sent.clear()
+        b.BambuRfid._read_slot_tag(reader, 0., [], [])
+        # Selected once: no rejected Bambu key that halts the tag and needs a new selection.
+        self.assertEqual(len([f for f in chip.sent if f[:2] == [0x93, 0x70]]), 1)
+
+    def test_bambu_tag_is_still_read(self):
+        chip = BurstChip()
+        result = b.BambuRfid._read_slot_tag(self.reader(chip), 0., [], [])
+        self.assertEqual(result["detail"], "PLA Lite")
+
+    def test_burst_exchanges_cut_a_read(self):
+        slow, fast = self.own_chip(burst=False), self.own_chip()
+        b.BambuRfid._read_slot_tag(self.reader(slow), 0., [], [])
+        b.BambuRfid._read_slot_tag(self.reader(fast), 0., [], [])
+        self.assertFalse(driver(slow).burst)
+        self.assertLess(fast.exchanges * 3, slow.exchanges * 2)
+
+    def test_chip_without_burst_reads_byte_by_byte(self):
+        chip = self.own_chip(burst=False)
+        result = b.BambuRfid._read_slot_tag(self.reader(chip), 0., [], [])
+        self.assertEqual(result["color"], "FF0000")
+
+
+class CountingChip(FakeChip):
+    """Counts exchanges and register snapshots; answers only two-byte exchanges, like a chip
+    that does not take several bytes at once."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.exchanges = 0
+        self.snapshots = 0
+
+    def spi_transfer(self, data):
+        self.exchanges += 1
+        if data[0] == ((b.REG_CONTROL << 1) | 0x80) and len(data) > 2:
+            self.snapshots += 1
+        return super().spi_transfer(data[:2])
+
+
+class BurstChip(CountingChip):
+    """Reads several registers and writes several FIFO bytes in one exchange, like the FM17550."""
+
+    def spi_transfer(self, data):
+        if len(data) <= 2:
+            return super().spi_transfer(data)
+        self.exchanges += 1
+        if data[0] & 0x80:
+            if data[0] == ((b.REG_CONTROL << 1) | 0x80):
+                self.snapshots += 1
+            values = [FakeChip.spi_transfer(self, [addr, 0])["response"][1] for addr in data[:-1]]
+            return {"response": bytes([0] + values)}
+        for value in data[1:]:
+            FakeChip.spi_transfer(self, [data[0], value])
+        return {"response": bytes(len(data))}
 
 
 class FakeRealRead:

@@ -112,6 +112,7 @@ DEFAULT_KEY = bytes.fromhex("FFFFFFFFFFFF")
 TAG_KEYS = (("qidi", bytes.fromhex("D3F7D3F7D3F7")), ("default", DEFAULT_KEY))
 CLASSIC_1K_SAK = 0x08
 TAG_BLOCKS = (4, 5, 6)
+OWN_KEYS_KEPT = 64
 # A read with a loaded toolhead rocks the spool: back first, away from the 4-in-1 joint where
 # the loaded filament passes, then forward. Longer lengths need a test on the printer: going
 # back too far pulls the filament out of the feed gear.
@@ -170,6 +171,14 @@ class TagAbsent(RfidError):
 
 class NotBambuTag(RfidError):
     """A failed authentication halts the tag, so retrying cannot help."""
+
+
+class KnownOwnTag(NotBambuTag):
+    """The tag opened with a key of ours before. No key was tried, so it is still selected."""
+
+    def __init__(self, uid):
+        RfidError.__init__(self, "tag %s opened with our key before" % (uid.hex().upper(),))
+        self.uid = uid
 
 
 class SeveralTags(RfidError):
@@ -327,12 +336,53 @@ class Fm17550:
         self.pause = pause
         self.get_mapping = get_mapping
         self.sak = None
+        # Each SPI exchange goes through the MCU and takes several milliseconds, so a read was
+        # mostly waiting for them. The chip reads several registers and takes several FIFO bytes
+        # in one exchange; whether this one does is checked once, None until then.
+        self.burst = None
+        # Tags already opened with a key of ours, uid -> key name: on the next read of the same
+        # tag the Bambu key is not tried first.
+        self.own_keys = {}
+        # Values of the saved registers while a read holds the reader, from its snapshot on: a
+        # register is written only when its value changes.
+        self.known = {}
 
     def read_reg(self, reg):
         return bytes(self.spi.spi_transfer([(reg << 1) | 0x80, 0])["response"])[1]
 
     def write_reg(self, reg, value):
         self.spi.spi_transfer([reg << 1, value])
+        if reg in self.known:
+            self.known[reg] = value
+
+    def set_reg(self, reg, value):
+        if self.known.get(reg) != value:
+            self.write_reg(reg, value)
+
+    def read_regs(self, regs):
+        regs = list(regs)
+        if not self.burst or not regs:
+            return [self.read_reg(reg) for reg in regs]
+        data = [(reg << 1) | 0x80 for reg in regs] + [0]
+        return list(bytes(self.spi.spi_transfer(data)["response"])[1:])
+
+    def _check_burst(self):
+        """Use one exchange for several bytes only if the chip answers it like single exchanges."""
+        self.burst = True
+        try:
+            single = [self.read_reg(reg) for reg in SAVED_REGS]
+            if self.read_regs(SAVED_REGS) != single:
+                raise RfidError("burst read differs")
+            self.write_reg(REG_FIFO_LEVEL, 0x80)
+            probe = [0x5A, 0xA5, 0x3C]
+            self._write_fifo(probe)
+            if self.read_reg(REG_FIFO_LEVEL) & 0x7F != len(probe) or self.read_regs([REG_FIFO_DATA] * len(probe)) != probe:
+                raise RfidError("burst FIFO differs")
+        except (RfidError, IndexError):
+            self.burst = False
+        finally:
+            self.write_reg(REG_FIFO_LEVEL, 0x80)
+        logging.info("bambu_rfid: one SPI exchange per several bytes: %s", "yes" if self.burst else "no")
 
     def _reset_comm(self):
         self.write_reg(REG_COMMAND, CMD_IDLE)
@@ -340,13 +390,16 @@ class Fm17550:
         self.write_reg(REG_COM_IRQ, 0x7F)
 
     def _write_fifo(self, data):
+        if self.burst and data:
+            self.spi.spi_transfer([REG_FIFO_DATA << 1] + list(data))
+            return
         for byte in data:
             self.write_reg(REG_FIFO_DATA, byte)
 
     def _crc(self, enabled):
         value = 0x80 if enabled else 0
-        self.write_reg(REG_TX_MODE, value)
-        self.write_reg(REG_RX_MODE, value)
+        self.set_reg(REG_TX_MODE, value)
+        self.set_reg(REG_RX_MODE, value)
 
     def transceive(self, data, last_bits=0, crc=False, tx_crc=False):
         self._crc(crc)
@@ -366,44 +419,54 @@ class Fm17550:
                 self.pause(POLL_DELAY)
             else:
                 raise RfidError("reader did not finish the exchange")
-            err = self.read_reg(REG_ERROR)
+            err, level = self.read_regs([REG_ERROR, REG_FIFO_LEVEL])
             if err & ERR_COLLISION:
                 raise SeveralTags("several tags are in the field")
             if err & (ERR_FATAL | (ERR_CRC if crc else 0)):
                 raise RfidError("reader error 0x%02X" % (err,))
-            level = self.read_reg(REG_FIFO_LEVEL) & 0x7F
-            return bytes(self.read_reg(REG_FIFO_DATA) for _ in range(level))
+            return bytes(self.read_regs([REG_FIFO_DATA] * (level & 0x7F)))
         finally:
             self.write_reg(REG_BIT_FRAMING, 0)
             self.write_reg(REG_COMMAND, CMD_IDLE)
 
     def snapshot(self):
-        return [(reg, self.read_reg(reg)) for reg in SAVED_REGS]
+        if self.burst is None:
+            self._check_burst()
+        saved = list(zip(SAVED_REGS, self.read_regs(SAVED_REGS)))
+        # REG_COMMAND changes by itself when a command ends, so its value is never assumed.
+        self.known = {reg: value for reg, value in saved if reg != REG_COMMAND}
+        return saved
 
     def restore(self, saved):
         self.write_reg(REG_STATUS2, self.read_reg(REG_STATUS2) & ~CRYPTO1_ON)
         self._reset_comm()
         self.write_reg(REG_BIT_FRAMING, 0)
+        # Only what this read changed goes back; outside a read nothing is assumed (the stock code
+        # uses the reader between our reads).
         for reg, value in saved:
-            self.write_reg(reg, value)
+            self.set_reg(reg, value)
+        self.known = {}
 
     def setup_type_a(self):
-        self.write_reg(REG_CONTROL, 0x10)
-        self.write_reg(REG_MOD_WIDTH, 0x26)
+        self.set_reg(REG_CONTROL, 0x10)
+        self.set_reg(REG_MOD_WIDTH, 0x26)
         # Reset values read back from the chip are 0x48 and 0x20. Higher receiver
         # gain and field strength extend the range for a tag passing on a spool.
-        self.write_reg(REG_RF_CFG, 0x68)
-        self.write_reg(REG_CW_GS_P, 0x3F)
-        self.write_reg(REG_TX_AUTO, self.read_reg(REG_TX_AUTO) | 0x40)
+        self.set_reg(REG_RF_CFG, 0x68)
+        self.set_reg(REG_CW_GS_P, 0x3F)
+        self.set_reg(REG_TX_AUTO, self._value(REG_TX_AUTO) | 0x40)
         # 25 ms timeout that starts when transmission ends
-        self.write_reg(REG_T_MODE, 0x80)
-        self.write_reg(REG_T_PRESCALER, 3)
-        self.write_reg(REG_T_RELOAD_HI, 0xBD)
-        self.write_reg(REG_T_RELOAD_LO, 0x2C)
-        tx_control = self.read_reg(REG_TX_CONTROL)
+        self.set_reg(REG_T_MODE, 0x80)
+        self.set_reg(REG_T_PRESCALER, 3)
+        self.set_reg(REG_T_RELOAD_HI, 0xBD)
+        self.set_reg(REG_T_RELOAD_LO, 0x2C)
+        tx_control = self._value(REG_TX_CONTROL)
         if tx_control & RF_ON != RF_ON:
             self.write_reg(REG_TX_CONTROL, tx_control | RF_ON)
             self.pause(FIELD_SETTLE)
+
+    def _value(self, reg):
+        return self.known[reg] if reg in self.known else self.read_reg(reg)
 
     def select_tag(self):
         """Activate a tag with a 4-byte UID and return that UID."""
@@ -541,6 +604,9 @@ class Fm17550:
 
     def _read_once(self):
         uid = self.select_tag()
+        if uid in self.own_keys:
+            # Opened with a key of ours before: a Bambu key would only be rejected and halt the tag.
+            raise KnownOwnTag(uid)
         try:
             self.authenticate(4, derive_sector_keys(uid)[1], uid)
             blocks = [self.read_block(b) for b in (4, 5, 6)]
@@ -605,23 +671,39 @@ class Fm17550:
         saved = self.snapshot()
         try:
             self.setup_type_a()
-            for name, key in sorted(TAG_KEYS, key=lambda item: item[0] != "default"):
-                self.write_reg(REG_STATUS2, 0)
-                uid = self.select_tag()
-                try:
-                    self.authenticate(4, key, uid)
-                except NotBambuTag:
-                    logging.info("bambu_rfid: tag %s: %s key rejected for sector 1", uid.hex().upper(), name)
-                    continue
-                blocks = [self.read_block(b) for b in (4, 5, 6)]
-                logging.info("bambu_rfid: tag %s opened with the %s key, blocks 4-6: %s", uid.hex().upper(),
-                             name, " ".join(block.hex().upper() for block in blocks))
-                title = self.read_name(uid) if custom and name == "default" and has_name(blocks[2]) else None
-                break
-            else:
-                return None
+            return self._open_qidi_format(custom)
         finally:
             self.restore(saved)
+
+    def _open_qidi_format(self, custom, selected=None):
+        """read_qidi_format with the reader already set up. The key that opened the tag last time
+        goes first. `selected` is the uid of a tag that is already selected and not halted."""
+        uid = selected
+        if uid is None:
+            self.write_reg(REG_STATUS2, 0)
+            uid = self.select_tag()
+        known = self.own_keys.get(uid)
+        for attempt, (name, key) in enumerate(sorted(TAG_KEYS, key=lambda item: (item[0] != known, item[0] != "default"))):
+            if attempt:
+                # A rejected key halts the tag: it answers only a new selection.
+                self.write_reg(REG_STATUS2, 0)
+                uid = self.select_tag()
+            try:
+                self.authenticate(4, key, uid)
+            except NotBambuTag:
+                logging.info("bambu_rfid: tag %s: %s key rejected for sector 1", uid.hex().upper(), name)
+                self.own_keys.pop(uid, None)
+                continue
+            blocks = [self.read_block(b) for b in (4, 5, 6)]
+            logging.info("bambu_rfid: tag %s opened with the %s key, blocks 4-6: %s", uid.hex().upper(),
+                         name, " ".join(block.hex().upper() for block in blocks))
+            title = self.read_name(uid) if custom and name == "default" and has_name(blocks[2]) else None
+            break
+        else:
+            return None
+        if len(self.own_keys) >= OWN_KEYS_KEPT:
+            self.own_keys.clear()
+        self.own_keys[uid] = name
         found = self._custom_tag(uid, *blocks, name=title) if custom else None
         return found or self._factory_tag(uid, blocks[0])
 
@@ -642,6 +724,27 @@ class Fm17550:
             if uid in uids or tag["tray_uid"] in trays:
                 raise TagAbsent("only the neighbouring spool is in the field")
             return uid, tag
+        return self._retrying(action, timeout, monotonic, check_abort)
+
+    def read_any_slot_tag(self, timeout, monotonic, check_abort=None, uids=(), trays=(), bambu=True, custom=True):
+        """("bambu", uid, tag) or ("qidi", block 4, tag): a Bambu tag, else our own or a factory QIDI
+        tag, in one setup of the reader. Raises NotBambuTag when the tag is none of them."""
+        def action():
+            selected = None
+            if bambu:
+                try:
+                    uid, tag = self._read_once()
+                    if uid in uids or tag["tray_uid"] in trays:
+                        raise TagAbsent("only the neighbouring spool is in the field")
+                    return "bambu", uid, tag
+                except KnownOwnTag as e:
+                    selected = e.uid
+                except NotBambuTag:
+                    pass
+            found = self._open_qidi_format(custom, selected)
+            if found is None:
+                raise NotBambuTag("key rejected: this is not a Bambu tag")
+            return ("qidi",) + found
         return self._retrying(action, timeout, monotonic, check_abort)
 
     def _retrying(self, action, timeout, monotonic, check_abort):
@@ -1177,19 +1280,15 @@ class BambuRfid:
         return load_tag_rules(self.rules_path).get(str(uid_hex).upper())
 
     def _read_slot_tag(self, timeout, uids, trays):
-        try:
-            if not self.bambu_tags:
-                raise NotBambuTag("Bambu tags are switched off")
-            uid, tag = self.chip.read_slot_tag(timeout, self.reactor.monotonic,
-                                               self._check_stock_idle, uids, trays)
+        # A Bambu tag, else our own or a factory QIDI tag, with one setup of the reader: the motors
+        # wait for every read during a feed.
+        found = self.chip.read_any_slot_tag(timeout, self.reactor.monotonic, self._check_stock_idle,
+                                            uids, trays, bambu=self.bambu_tags, custom=self.custom_tags)
+        if found[0] == "bambu":
+            _, uid, tag = found
             material = tag["qidi_material"]
-        except NotBambuTag:
-            # Our own tag or a factory QIDI tag, read with one opening of the tag: the motors wait
-            # for every read during a feed.
-            custom = self.chip.read_qidi_format(self.custom_tags)
-            if custom is None:
-                raise
-            data, tag = custom
+        else:
+            _, data, tag = found
             uid, material = bytes.fromhex(tag["uid"]), data[0]
             # Like Bambu spools, a spool of ours may carry two tags with one spool number.
             if uid in uids or tag.get("tray_uid") and tag["tray_uid"] in trays:

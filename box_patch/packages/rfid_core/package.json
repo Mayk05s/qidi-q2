@@ -1,6 +1,6 @@
 {
   "id": "rfid_core",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "hidden": true,
   "title": "Модуль Klipper для Box",
   "summary": "Общая основа меток, подачи и расхода",
