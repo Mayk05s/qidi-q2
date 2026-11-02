@@ -140,6 +140,12 @@ final class Model: ObservableObject {
     /// visible packages that bring them, since updating those copies the parts again.
     private func isOld(_ feature: Feature) -> Bool { installedVersions[feature.id] != feature.version }
 
+    /// Titles of the hidden parts of this package that are older on the printer.
+    func oldParts(_ feature: Feature) -> [String] {
+        guard installed.contains(feature.id) else { return [] }
+        return feature.partIds.filter { isOld(id: $0) }.map { title($0) }
+    }
+
     private func isOld(id: String) -> Bool {
         allPackages.first { $0.id == id }.map(isOld) ?? false
     }
@@ -892,11 +898,13 @@ struct ModuleRow: View {
     let feature: Feature
     let installed: Bool
     let installedVersion: String?
+    let oldParts: [String]
     let showFiles: (String) -> Void
     @Binding var isOn: Bool
     @State private var expanded = false
 
-    private var outdated: Bool { installed && installedVersion != feature.version }
+    private var ownOld: Bool { installed && installedVersion != feature.version }
+    private var outdated: Bool { ownOld || !oldParts.isEmpty }
 
     /// What happens to this module on the next install, shown by the colour of the card.
     private var change: (text: String, color: Color)? {
@@ -921,9 +929,12 @@ struct ModuleRow: View {
                     Text(feature.summary).font(.callout).foregroundStyle(.secondary)
                     HStack(spacing: 6) {
                         if installed && !outdated { Badge(text: "установлен", color: .green) }
-                        if outdated {
+                        if ownOld {
                             Badge(text: "на принтере " + (installedVersion.map { "v" + $0 } ?? "старая версия"),
                                   color: .orange)
+                        }
+                        if !oldParts.isEmpty {
+                            Badge(text: "обновится: " + oldParts.joined(separator: ", "), color: .orange)
                         }
                         if let change { Badge(text: change.text, color: change.color) }
                     }
@@ -1003,11 +1014,11 @@ struct ContentView: View {
                         .help("Версии")
                         .popover(isPresented: $showVersions, arrowEdge: .bottom) { VersionsView(model: model) }
                 }
-                if model.hasUpdate {
+                if !model.outdated.isEmpty {
                     HStack {
                         Image(systemName: "arrow.down.circle.fill")
-                        Text("На принтере пакет " + (model.printerPackage.map { "v" + $0 } ?? "неизвестной версии")
-                             + ", здесь v" + model.packageVersion + ". Можно обновить модулей: \(max(model.outdated.count, 1)).")
+                        Text("Можно обновить: " + model.modules.filter { model.outdated.contains($0.id) }
+                                .map(\.title).joined(separator: ", ") + ".")
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .font(.callout)
@@ -1022,6 +1033,7 @@ struct ContentView: View {
                         ForEach(model.modules) { feature in
                             ModuleRow(feature: feature, installed: model.installed.contains(feature.id),
                                       installedVersion: model.installedVersions[feature.id],
+                                      oldParts: model.oldParts(feature),
                                       showFiles: { filesFor = FilesTopic(id: $0) },
                                       isOn: binding(feature.id))
                                 .disabled(!model.canChange)
