@@ -277,5 +277,57 @@ class InstallTests(unittest.TestCase):
                 self.run_install(features)
 
 
+class BackupTests(unittest.TestCase):
+    def test_restore_brings_back_files_and_removes_what_the_patch_added(self):
+        with tempfile.TemporaryDirectory() as d:
+            config = os.path.join(d, "config")
+            os.makedirs(config)
+            cfg = os.path.join(config, "printer.cfg")
+            with open(cfg, "w") as f:
+                f.write("before\n")
+            extras = os.path.join(d, "klipper", "klippy", "extras")
+            os.makedirs(extras)
+            packages = {"x": package("x", install=[{"from": "x.py", "to": "klipper/klippy/extras/x.py"}],
+                                     restore_restart=["some.service"])}
+            saved = r.PANEL_DIR, r.subprocess.run, r.firmware_version
+            calls = []
+            r.PANEL_DIR = os.path.join(d, "panel")
+            r.subprocess.run = lambda command, **kw: calls.append(command)
+            r.firmware_version = lambda: "QD_Q2_01.01.03.02"
+            try:
+                archive = os.path.join(d, "backup.tar.gz")
+                manifest = r.make_backup(packages, os.path.join(d, "klipper"), cfg, archive)
+                self.assertIn(config, manifest["present"])
+                self.assertIn(os.path.join(extras, "x.py"), manifest["absent"])
+                # The patch: printer.cfg changed, our files added.
+                with open(cfg, "w") as f:
+                    f.write("after\n")
+                for path in (os.path.join(extras, "x.py"), os.path.join(config, r.OWN_CFG)):
+                    with open(path, "w") as f:
+                        f.write("ours")
+                with open(os.path.join(config, "user.cfg"), "w") as f:
+                    f.write("made after the backup")
+                import contextlib
+                import io
+                with contextlib.redirect_stdout(io.StringIO()):
+                    r.restore_backup(archive, packages, os.path.join(d, "klipper"), cfg)
+                self.assertEqual(open(cfg).read(), "before\n")
+                self.assertFalse(os.path.exists(os.path.join(extras, "x.py")))
+                self.assertFalse(os.path.exists(os.path.join(config, r.OWN_CFG)))
+                # A file of the user's that is not ours stays.
+                self.assertTrue(os.path.exists(os.path.join(config, "user.cfg")))
+                self.assertIn(["systemctl", "restart", "some.service"], calls)
+            finally:
+                r.PANEL_DIR, r.subprocess.run, r.firmware_version = saved
+
+    def test_backup_takes_folders_whole_and_names_every_package_path(self):
+        packages = {"x": package("x", install=[{"from": "a", "to": "printer_data/config/a.cfg"},
+                                              {"from": "b", "to": "klipper/klippy/extras/b.py"}],
+                                 backup=["/etc/systemd/system/x.service"])}
+        paths = r.backup_paths(packages, "/k", "/c/printer.cfg")
+        self.assertIn("/k/klippy/extras/b.py", paths)
+        self.assertIn("/etc/systemd/system/x.service", paths)
+
+
 if __name__ == "__main__":
     unittest.main()

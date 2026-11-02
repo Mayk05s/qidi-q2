@@ -52,5 +52,13 @@
     "Служба qidi-panel: /etc/systemd/system/qidi-panel.service"
   ],
   "service": "box_patch/packages/panel/printer/qidi-panel.service",
-  "fluidd_script": "box_patch/packages/panel/printer/qidi_panel_link.js"
+  "fluidd_script": "box_patch/packages/panel/printer/qidi_panel_link.js",
+  "backup": [
+    "/home/qidi/fluidd/index.html",
+    "/home/qidi/fluidd/qidi_panel_link.js",
+    "/etc/systemd/system/qidi-panel.service"
+  ],
+  "restore_restart": [
+    "qidi-panel.service"
+  ]
 }

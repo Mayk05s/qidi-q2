@@ -33,7 +33,8 @@ PANEL_PORT = 18770
 # The login QIDI ships the Q2 with; .env holds another one only when it was changed.
 DEFAULT_USER = "mks"
 DEFAULT_PASSWORD = "makerbase"
-REMOTE_DIR = "/tmp/qidi_setup"
+# Each run has its own folder on the printer, so two runs never meet there.
+REMOTE_DIR = "/tmp/qidi_setup_%d" % (os.getpid(),)
 PATCHER_FILE = pathlib.Path(__file__).resolve().parent / "patcher.json"
 # What the printer side needs besides the packages; everything a package needs it names itself.
 SETUP_BUNDLE = ("box_patch/remote_setup.py",)
@@ -55,6 +56,33 @@ def blocked_by_macos(error):
     """macOS answers "no route" for every local address while the Local Network permission is off."""
     reason = getattr(error, "reason", error)
     return isinstance(reason, OSError) and reason.errno == errno.EHOSTUNREACH
+
+
+BACKUP_DIR = pathlib.Path.home() / "Library" / "Application Support" / "QIDI Q2 Patcher" / "backups"
+BACKUPS_KEPT = 15
+
+
+def list_backups(host):
+    """Backups of this printer, newest first."""
+    folder = BACKUP_DIR / host
+    found = []
+    for path in sorted(folder.glob("*.json"), reverse=True) if folder.exists() else ():
+        if (folder / (path.stem + ".tar.gz")).exists():
+            try:
+                found.append(json.loads(path.read_text(encoding="utf-8")))
+            except ValueError:
+                pass
+    return found
+
+
+def prune_backups(folder):
+    """Only the newest BACKUPS_KEPT stay; the very first one, from before any patch, stays too."""
+    names = sorted(p.stem for p in folder.glob("*.json"))
+    for name in names[1:-BACKUPS_KEPT] if len(names) > BACKUPS_KEPT + 1 else ():
+        for suffix in (".json", ".tar.gz"):
+            path = folder / (name + suffix)
+            if path.exists():
+                path.unlink()
 
 
 FIRMWARE_CACHE = pathlib.Path.home() / "Library" / "Caches" / "QIDI Q2 Patcher" / "firmware.json"
@@ -271,12 +299,13 @@ class Printer:
         save_firmware_cache(cache)
         return firmware
 
-    def remote(self, change, versions=None):
-        """Copy the packages into one folder on the printer and run remote_setup.py there.
-        `change` is the list of --features, --add or --remove arguments. True when Klipper
-        was restarted because it has something new to read."""
+    def on_printer(self, action, arguments, upload=None, fetch=None):
+        """Copy the packages into one folder on the printer and run remote_setup.py `action`
+        there as root. `upload` is a local file put next to them as upload.tar.gz; `fetch` is
+        where to save the archive the action leaves as archive.tar.gz. Returns the output lines;
+        Klipper is restarted when the action says it has something new to read."""
         info = self.json("/printer/info")
-        target = "%s@%s" % (self.user, self.host)
+        login = "%s@%s" % (self.user, self.host)
         with tempfile.TemporaryDirectory() as work:
             askpass = os.path.join(work, "askpass")
             with open(askpass, "w") as f:
@@ -284,34 +313,76 @@ class Printer:
             os.chmod(askpass, 0o700)
             bundle = os.path.join(work, "bundle")
             for relative in bundle_files(load_packages()):
-                target = os.path.join(bundle, relative)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                shutil.copy(str(ROOT / relative), target)
+                path = os.path.join(bundle, relative)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                shutil.copy(str(ROOT / relative), path)
             shutil.copy(str(KEY.with_suffix(".pub")), os.path.join(bundle, "id_ed25519.pub"))
+            if upload:
+                shutil.copy(str(upload), os.path.join(bundle, "upload.tar.gz"))
             env = self._ssh_env(askpass)
-            subprocess.run(["ssh"] + SSH_OPTS + [target, "rm -rf " + REMOTE_DIR], env=env, check=True,
+            subprocess.run(["ssh"] + SSH_OPTS + [login, "rm -rf " + REMOTE_DIR], env=env, check=True,
                            stdin=subprocess.DEVNULL)
-            subprocess.run(["scp", "-q", "-r"] + SSH_OPTS + [bundle, target + ":" + REMOTE_DIR], env=env, check=True)
-            arguments = ["python3", REMOTE_DIR + "/box_patch/remote_setup.py", "install", "--root", REMOTE_DIR,
-                         "--klipper", info["klipper_path"], "--cfg", info["config_file"],
-                         "--pubkey", REMOTE_DIR + "/id_ed25519.pub", "--user", self.user] + list(change)
-            if versions:
-                arguments += ["--versions", ",".join("%s=%s" % item for item in sorted(versions.items()))]
-            # Klipper restarts only when the install says it has something new to read.
+            subprocess.run(["scp", "-q", "-r"] + SSH_OPTS + [bundle, login + ":" + REMOTE_DIR], env=env, check=True)
+            command = ["python3", REMOTE_DIR + "/box_patch/remote_setup.py", action, "--root", REMOTE_DIR,
+                       "--klipper", info["klipper_path"], "--cfg", info["config_file"],
+                       "--pubkey", REMOTE_DIR + "/id_ed25519.pub", "--user", self.user] + list(arguments)
+            if upload:
+                command += ["--archive", REMOTE_DIR + "/upload.tar.gz"]
+            if fetch:
+                command += ["--archive", REMOTE_DIR + "/archive.tar.gz"]
+            # Klipper restarts only when the action says it has something new to read.
             inner = ("out=$(%s); rc=$?; printf '%%s\\n' \"$out\"; "
                      "if [ $rc -eq 0 ] && printf '%%s' \"$out\" | grep -qF %s; then systemctl restart klipper; fi; "
-                     "exit $rc" % (shlex.join(arguments), shlex.quote(remote_setup.RESTART_MARK)))
-            command = "chmod -R a+rX %s; sudo -S -p '' sh -c %s; rc=$?; rm -rf %s; exit $rc" % (
-                REMOTE_DIR, shlex.quote(inner), REMOTE_DIR)
-            done = subprocess.run(["ssh"] + SSH_OPTS + [target, command], env=env,
+                     "chmod -R a+rX %s; exit $rc" % (shlex.join(command), shlex.quote(remote_setup.RESTART_MARK),
+                                                     REMOTE_DIR))
+            script = "chmod -R a+rX %s; sudo -S -p '' sh -c %s" % (REMOTE_DIR, shlex.quote(inner))
+            done = subprocess.run(["ssh"] + SSH_OPTS + [login, script], env=env,
                                   input=self.password + "\n", text=True,
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            for line in done.stdout.splitlines():
-                if line != remote_setup.RESTART_MARK:
-                    log(line)
-            if done.returncode != 0:
-                raise Failed("Установка на принтере не удалась (код %d)." % (done.returncode,))
-            return remote_setup.RESTART_MARK in done.stdout.splitlines()
+            try:
+                if done.returncode != 0:
+                    for line in done.stdout.splitlines():
+                        log(line)
+                    raise Failed("Действие на принтере не удалось (код %d)." % (done.returncode,))
+                if fetch:
+                    subprocess.run(["scp", "-q"] + SSH_OPTS + [login + ":" + REMOTE_DIR + "/archive.tar.gz", str(fetch)],
+                                   env=env, check=True)
+            finally:
+                subprocess.run(["ssh"] + SSH_OPTS + [login, "sudo -S -p '' rm -rf " + REMOTE_DIR], env=env,
+                               input=self.password + "\n", text=True, capture_output=True)
+            return done.stdout.splitlines()
+
+    def remote(self, change, versions=None):
+        """Install or remove packages; True when Klipper was restarted for them."""
+        arguments = list(change)
+        if versions:
+            arguments += ["--versions", ",".join("%s=%s" % item for item in sorted(versions.items()))]
+        lines = self.on_printer("install", arguments)
+        for line in lines:
+            if line != remote_setup.RESTART_MARK:
+                log(line)
+        return remote_setup.RESTART_MARK in lines
+
+    def backup(self):
+        """Download a backup of everything an install can change; returns its manifest."""
+        folder = BACKUP_DIR / self.host
+        folder.mkdir(parents=True, exist_ok=True)
+        name = time.strftime("%Y-%m-%d_%H-%M-%S")
+        archive = folder / (name + ".tar.gz")
+        lines = self.on_printer("backup", [], fetch=archive)
+        manifest = next(json.loads(line)["backup"] for line in lines if line.startswith('{"backup"'))
+        manifest["id"] = name
+        (folder / (name + ".json")).write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+        prune_backups(folder)
+        return manifest
+
+    def restore(self, name):
+        archive = BACKUP_DIR / self.host / (name + ".tar.gz")
+        if not archive.exists():
+            raise Failed("Нет такой резервной копии: " + name)
+        for line in self.on_printer("restore", [], upload=archive):
+            if line != remote_setup.RESTART_MARK:
+                log(line)
 
     def diagnose(self):
         since = time.time()
@@ -433,6 +504,16 @@ def versions_for(copied, packages, catalog):
     return versions
 
 
+def restore(printer, name):
+    require_idle(printer)
+    log("Возвращаю на принтер копию %s..." % (name,))
+    printer.restore(name)
+    log("Перезапускаю Klipper...")
+    if not printer.restart_klipper():
+        raise Failed("Копия возвращена, но Klipper не поднялся, проверь Fluidd.")
+    return "Готово: принтер возвращён к копии %s." % (name,)
+
+
 def apply(printer, change):
     require_idle(printer)
     previous, previous_versions = printer.installed()
@@ -440,6 +521,9 @@ def apply(printer, change):
     chosen, after, copied = change.plan(previous, packages)
     ensure_key()
     sync_alias(printer.host)
+    log("Сохраняю резервную копию принтера...")
+    saved = printer.backup()
+    log("Копия %s сохранена на этом компьютере." % (saved["id"],))
     log("Устанавливаю на %s..." % (printer.host,))
     restarted = printer.remote(change.arguments(), versions_for(copied, packages, load_catalog()))
     if restarted:
@@ -514,10 +598,12 @@ def status(printer):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--demo", action="store_true")
-    parser.add_argument("command", choices=("status", "apply", "diag", "save-connection", "discover"))
+    parser.add_argument("command", choices=("status", "apply", "diag", "save-connection", "discover",
+                                                "backup", "backups", "restore"))
     parser.add_argument("--features", help="the whole set of packages")
     parser.add_argument("--add", default="", help="packages to install or update")
     parser.add_argument("--remove", default="", help="packages to remove")
+    parser.add_argument("--backup", help="the backup to restore")
     args = parser.parse_args(argv)
     names = lambda value: {name for name in value.split(",") if name}
     change = Change(None if args.features is None else names(args.features), names(args.add), names(args.remove))
@@ -543,13 +629,21 @@ def main(argv=None):
     if args.command == "status":
         status(printer)
         return 0
+    if args.command == "backups":
+        send("backups", items=list_backups(printer.host) if printer else [])
+        return 0
     try:
         if printer is None:
             raise Failed("Сначала укажи принтер.")
         if args.demo:
-            text = printer.apply(change) if args.command == "apply" else "Демо: считыватели не опрашивались."
+            text = printer.apply(change) if args.command == "apply" else "Демо: на принтере ничего не менялось."
         elif args.command == "apply":
             text = apply(printer, change)
+        elif args.command == "backup":
+            require_idle(printer)
+            text = "Копия %s сохранена на этом компьютере." % (printer.backup()["id"],)
+        elif args.command == "restore":
+            text = restore(printer, args.backup)
         else:
             require_idle(printer)
             if not printer.diagnose():

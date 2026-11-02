@@ -54,5 +54,15 @@
   ],
   "setup": "box_patch/packages/usage/screen_popup_setup.py",
   "panel_feature": "usage",
-  "klipper_config": "printer/bambu_spool_usage.cfg"
+  "klipper_config": "printer/bambu_spool_usage.cfg",
+  "backup": [
+    "/home/qidi/QIDI_Client/resource/qidi_client_error/QDC_300_002_005_003/0.json",
+    "/home/qidi/QIDI_Client/resource/qidi_client_error/QDC_300_002_005_004/0.json",
+    "/home/qidi/QIDI_Client/access/plastic",
+    "/etc/systemd/system/qidi-screen-reload.path",
+    "/etc/systemd/system/qidi-screen-reload.service"
+  ],
+  "restore_restart": [
+    "qidi-client.service"
+  ]
 }

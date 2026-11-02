@@ -17,6 +17,8 @@ import pwd
 import re
 import shutil
 import subprocess
+import tarfile
+import time
 
 PACKAGES_DIR = os.path.join("box_patch", "packages")
 OWN_CFG = "qidi_patcher.cfg"
@@ -397,6 +399,98 @@ def run_setup(root, package, on):
         module.uninstall()
 
 
+# --- backup and restore -------------------------------------------------------------------
+
+BACKUP_MANIFEST = "qidi_backup.json"
+UNIT_DIR = "/etc/systemd/system"
+
+
+def backup_paths(packages, klipper, cfg):
+    """Everything an install can change: the config folder, the panel folder, every file a
+    package installs and every extra path a package names under "backup"."""
+    paths = {os.path.dirname(cfg), PANEL_DIR}
+    for package in packages.values():
+        for entry in package.get("install", ()):
+            paths.add(resolve(entry["to"], klipper, cfg))
+        for target in package.get("uninstall", ()):
+            paths.add(resolve(target, klipper, cfg))
+        paths.update(package.get("backup", ()))
+    # A file inside a folder that is saved whole is saved with it.
+    folders = sorted(p for p in paths if os.path.isdir(p))
+    return sorted(p for p in paths if not any(p != f and p.startswith(f + "/") for f in folders))
+
+
+def make_backup(packages, klipper, cfg, out):
+    paths = backup_paths(packages, klipper, cfg)
+    folder = os.path.dirname(cfg)
+    state = json.loads(_read(os.path.join(folder, STATE_FILE), "{}"))
+    manifest = {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "firmware": firmware_version(),
+        "features": sorted(installed_features(_read(cfg) + "\n" + _read(os.path.join(folder, OWN_CFG)), state)
+                           .intersection(packages)),
+        "versions": installed_versions(state),
+        "present": [p for p in paths if os.path.exists(p)],
+        "absent": [p for p in paths if not os.path.exists(p)],
+    }
+    manifest_path = out + ".json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=1)
+    with tarfile.open(out, "w:gz") as archive:
+        archive.add(manifest_path, arcname=BACKUP_MANIFEST)
+        for path in manifest["present"]:
+            archive.add(path, arcname=path.lstrip("/"))
+    os.remove(manifest_path)
+    return manifest
+
+
+def _inside(path, roots):
+    return any(path == root or path.startswith(root + "/") for root in roots)
+
+
+def restore_backup(archive_path, packages, klipper, cfg):
+    """Put every saved path back as it was and remove what was added after the backup.
+    Prints RESTART_MARK: Klipper always has to read the restored files."""
+    with tarfile.open(archive_path, "r:gz") as archive:
+        manifest = json.load(archive.extractfile(BACKUP_MANIFEST))
+        present = manifest["present"]
+        members = [m for m in archive.getmembers() if m.name != BACKUP_MANIFEST]
+        saved = {"/" + m.name for m in members}
+        for member in members:
+            if not _inside("/" + member.name, present) or ".." in member.name.split("/"):
+                raise SystemExit("Unexpected path in the backup: " + member.name)
+        # What our installs create and the backup did not have goes away.
+        ours = set(manifest["absent"])
+        folder = os.path.dirname(cfg)
+        ours.update(os.path.join(folder, name) for name in (OWN_CFG, STATE_FILE))
+        for package in packages.values():
+            ours.update(resolve(entry["to"], klipper, cfg) for entry in package.get("install", ()))
+        for path in sorted(ours):
+            if path not in saved and not any(s.startswith(path + "/") for s in saved):
+                _remove(path)
+        # A folder a package names under "backup" comes back exactly; the config and panel
+        # folders only get their saved files back, so nothing else of the user's is lost.
+        whole = {path for p in packages.values() for path in p.get("backup", ())}
+        for path in present:
+            if path in whole and os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+        archive.extractall("/", members=members, numeric_owner=True)
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    for path in sorted(set(present) | set(manifest["absent"])):
+        if os.path.dirname(path) != UNIT_DIR:
+            continue
+        unit = os.path.basename(path)
+        if os.path.exists(path):
+            subprocess.run(["systemctl", "enable", "--now", unit], check=False)
+        else:
+            subprocess.run(["systemctl", "disable", "--now", unit], check=False)
+    for service in sorted({s for p in packages.values() for s in p.get("restore_restart", ())}):
+        if os.path.exists(os.path.join(UNIT_DIR, service)) or not service.startswith("qidi-panel"):
+            subprocess.run(["systemctl", "restart", service], check=False)
+    print(RESTART_MARK)
+    return manifest
+
+
 # --- install and uninstall ------------------------------------------------------------------
 
 def _names(value, packages):
@@ -495,9 +589,18 @@ def uninstall(args):
     install(args)
 
 
+def backup(args):
+    manifest = make_backup(load_packages(args.root), args.klipper, args.cfg, args.archive)
+    print(json.dumps({"backup": manifest}, ensure_ascii=False))
+
+
+def restore(args):
+    restore_backup(args.archive, load_packages(args.root), args.klipper, args.cfg)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("install", "uninstall"))
+    parser.add_argument("action", choices=("install", "uninstall", "backup", "restore"))
     parser.add_argument("--root", required=True, help="the unpacked bundle, laid out like the project")
     parser.add_argument("--klipper", required=True)
     parser.add_argument("--cfg", required=True)
@@ -507,8 +610,9 @@ def main():
     parser.add_argument("--add", help="packages to install or update, the rest stays as it is")
     parser.add_argument("--remove", help="packages to remove, with the ones that need them")
     parser.add_argument("--versions", help="versions of the packages copied now")
+    parser.add_argument("--archive", help="backup archive to write or to restore from")
     args = parser.parse_args()
-    (install if args.action == "install" else uninstall)(args)
+    {"install": install, "uninstall": uninstall, "backup": backup, "restore": restore}[args.action](args)
 
 
 if __name__ == "__main__":

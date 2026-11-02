@@ -38,6 +38,24 @@ struct Feature: Identifiable {
     }
 }
 
+/// A backup of the printer kept on this computer.
+struct Backup: Identifiable {
+    let id: String
+    let time: String
+    let features: [String]
+    let package: String?
+    let firmware: String?
+
+    init?(_ item: [String: Any]) {
+        guard let id = item["id"] as? String else { return nil }
+        self.id = id
+        time = item["time"] as? String ?? id
+        features = item["features"] as? [String] ?? []
+        package = (item["versions"] as? [String: String])?["package"]
+        firmware = item["firmware"] as? String
+    }
+}
+
 struct FoundPrinter: Identifiable {
     let host: String
     let name: String
@@ -90,6 +108,7 @@ final class Model: ObservableObject {
     @Published var installed: Set<String> = []
     @Published var chosen: Set<String> = []
     @Published var found: [FoundPrinter] = []
+    @Published var backups: [Backup] = []
     @Published var searching = false
     @Published var logLines: [String] = []
     @Published var busy = false
@@ -137,6 +156,7 @@ final class Model: ObservableObject {
         if !removed.isEmpty { parts.append("Убрать:\n" + names(removed)) }
         if parts.isEmpty { parts.append("Изменений нет, пакеты на принтере уже этой версии.") }
         parts.append(restartsKlipper ? "Klipper перезапустится." : "Klipper не перезапускается.")
+        parts.append("Перед установкой резервная копия принтера сохранится на этом компьютере.")
         return parts.joined(separator: "\n\n")
     }
 
@@ -148,6 +168,11 @@ final class Model: ObservableObject {
         guard !searching else { return }
         searching = true
         run(["discover"], exclusive: false)
+    }
+
+    /// After every action the list of backups may have grown.
+    private func afterAction() {
+        loadBackups()
     }
 
     /// All the chosen changes in one run: new and outdated packages are copied, the ones switched
@@ -178,6 +203,23 @@ final class Model: ObservableObject {
     var restartsKlipper: Bool {
         let touched = chosen.symmetricDifference(installed).union(outdated.intersection(chosen))
         return modules.contains { touched.contains($0.id) && $0.klipper }
+    }
+
+    func loadBackups() {
+        run(["backups"], exclusive: false)
+    }
+
+    func makeBackup() {
+        startAction(["backup"])
+    }
+
+    func restore(_ backup: Backup) {
+        startAction(["restore", "--backup", backup.id])
+    }
+
+    var backupFolder: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/QIDI Q2 Patcher/backups/\(host)")
     }
 
     func diagnose() {
@@ -270,14 +312,17 @@ final class Model: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if !exclusive {
-                    self.searching = false
+                    if command == "discover" { self.searching = false }
                     return
                 }
                 self.busy = false
                 if code != 0 && self.outcome == nil && command != "status" {
                     self.outcome = (false, "Действие остановилось с ошибкой, подробности в журнале.")
                 }
-                if command != "status" { self.refresh() }
+                if command != "status" {
+                    self.refresh()
+                    self.afterAction()
+                }
             }
         }
         // The handler is called one chunk at a time, so the reader needs no lock of its own.
@@ -332,6 +377,8 @@ final class Model: ObservableObject {
             }
             installed = Set(message["features"] as? [String] ?? [])
             chosen = installed
+        case "backups":
+            backups = (message["items"] as? [[String: Any]] ?? []).compactMap(Backup.init)
         case "printers":
             found = (message["items"] as? [[String: String]] ?? []).compactMap { item in
                 item["host"].map { FoundPrinter(host: $0, name: item["name"] ?? $0) }
@@ -720,6 +767,78 @@ struct ReadmeView: View {
     }
 }
 
+struct BackupsView: View {
+    @ObservedObject var model: Model
+    @Environment(\.dismiss) private var dismiss
+    @State private var restoring: Backup?
+
+    private func modules(_ backup: Backup) -> String {
+        backup.features.isEmpty ? "ничего не установлено"
+            : backup.features.map { model.title($0) }.joined(separator: ", ")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Резервные копии").font(.title3.bold())
+                Spacer()
+                Button("Готово") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            Text("Перед каждой установкой программа сама сохраняет копию всего, что патч может изменить: настройки Klipper, файлы пакетов, панель, кнопку в Fluidd и окна экрана. Копии лежат на этом компьютере. Восстановление возвращает принтер к выбранной копии и перезапускает Klipper.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Сделать копию сейчас") { model.makeBackup() }
+                    .disabled(!model.canChange)
+                Button("Показать в Finder") { NSWorkspace.shared.open(model.backupFolder) }
+                    .disabled(model.backups.isEmpty)
+                Spacer()
+                if model.busy { ProgressView().controlSize(.small) }
+            }
+            if let outcome = model.outcome {
+                Label(outcome.text, systemImage: outcome.ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                    .foregroundStyle(outcome.ok ? .green : .red)
+                    .font(.callout)
+            }
+            ScrollView {
+                VStack(spacing: 8) {
+                    if model.backups.isEmpty {
+                        Text("Копий пока нет.").foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    ForEach(model.backups) { backup in
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(backup.time).font(.headline.monospacedDigit())
+                                Text(modules(backup)).font(.callout).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text("Пакет " + (backup.package.map { "v" + $0 } ?? "без версии")
+                                     + " · " + (backup.firmware ?? "прошивка неизвестна"))
+                                    .font(.caption).foregroundStyle(.tertiary)
+                            }
+                            Spacer()
+                            Button("Восстановить") { restoring = backup }
+                                .disabled(!model.canChange)
+                        }
+                        .padding(10)
+                        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+            }
+            .scrollIndicators(.never)
+        }
+        .padding(20)
+        .frame(width: 520, height: 520)
+        .onAppear { model.loadBackups() }
+        .alert(item: $restoring) { backup in
+            Alert(title: Text("Вернуть принтер к копии \(backup.time)?"),
+                  message: Text("Будет: " + modules(backup) + ". Всё, что патч добавил после этой копии, удалится. Klipper перезапустится."),
+                  primaryButton: .destructive(Text("Восстановить")) { model.restore(backup) },
+                  secondaryButton: .cancel(Text("Отмена")))
+        }
+    }
+}
+
 struct Badge: View {
     let text: String
     let color: Color
@@ -815,6 +934,7 @@ struct ContentView: View {
     @State private var confirmRemove = false
     @State private var showVersions = false
     @State private var filesFor: FilesTopic?
+    @State private var showBackups = false
 
     private func binding(_ id: String) -> Binding<Bool> {
         Binding(get: { model.chosen.contains(id) },
@@ -831,6 +951,9 @@ struct ContentView: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Модули").font(.title2.bold())
                     Spacer()
+                    Button { showBackups = true } label: { Image(systemName: "clock.arrow.circlepath") }
+                        .buttonStyle(.borderless)
+                        .help("Резервные копии")
                     Button { filesFor = FilesTopic(id: nil) } label: { Image(systemName: "questionmark.circle") }
                         .buttonStyle(.borderless)
                         .help("Справка по пакетам")
@@ -907,6 +1030,7 @@ struct ContentView: View {
         .frame(height: 760)
         .onAppear { model.refresh() }
         .sheet(item: $filesFor) { topic in FilesHelp(model: model, only: topic.id) }
+        .sheet(isPresented: $showBackups) { BackupsView(model: model) }
         .alert(model.actionTitle + "?", isPresented: $confirmApply) {
             Button(model.actionTitle) { model.apply() }
             Button("Отмена", role: .cancel) {}

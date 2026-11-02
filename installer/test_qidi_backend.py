@@ -72,6 +72,27 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(copied, set())
 
 
+class BackupListTests(unittest.TestCase):
+    def test_newest_first_and_the_first_one_is_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            saved = q.BACKUP_DIR
+            q.BACKUP_DIR = pathlib.Path(d)
+            try:
+                folder = q.BACKUP_DIR / "h"
+                folder.mkdir()
+                for n in range(q.BACKUPS_KEPT + 3):
+                    name = "2026-11-%02d" % (n + 1,)
+                    (folder / (name + ".json")).write_text(json.dumps({"id": name}))
+                    (folder / (name + ".tar.gz")).write_bytes(b"x")
+                q.prune_backups(folder)
+                names = [b["id"] for b in q.list_backups("h")]
+                self.assertEqual(len(names), q.BACKUPS_KEPT + 1)
+                self.assertEqual(names[0], "2026-11-%02d" % (q.BACKUPS_KEPT + 3,))
+                self.assertEqual(names[-1], "2026-11-01")
+            finally:
+                q.BACKUP_DIR = saved
+
+
 class BlockedTests(unittest.TestCase):
     def test_no_route_means_the_permission_is_off(self):
         import errno
@@ -108,6 +129,10 @@ class FakePrinter:
         self.versions.append(versions)
         return self.restarts
 
+    def backup(self):
+        self.calls.append("backup")
+        return {"id": "2026-11-02_12-00-00"}
+
     def restart_klipper(self):
         return self.ready.pop(0)
 
@@ -137,7 +162,7 @@ class ApplyTests(unittest.TestCase):
         printer = FakePrinter(ready=(False, True), features=("bambu", "usage"))
         with self.assertRaises(q.Failed):
             q.apply(printer, q.Change(add={"spools"}))
-        self.assertEqual(printer.calls, [["--add", "spools"], ["--features", "bambu,usage"]])
+        self.assertEqual(printer.calls, ["backup", ["--add", "spools"], ["--features", "bambu,usage"]])
         self.assertEqual(printer.versions[1], {"package": "0.1"})
         self.assertTrue({"package", "spools"} <= set(printer.versions[0]))
 
