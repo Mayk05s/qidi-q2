@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "box_patch"))
 from bambu_rfid import CUSTOM_COLOR_MAGIC, QIDI_COLORS, nearest_qidi_color  # noqa: E402
+import fluidd_card  # noqa: E402
 import print_check  # noqa: E402
 import sample_model  # noqa: E402
 
@@ -831,6 +832,13 @@ class App:
     def slots(self):
         return self._require_printer().slots()
 
+    def fluidd(self):
+        try:
+            check = self.print_check(None)
+        except print_check.CheckError as e:
+            check = {"rows": [], "message": str(e)}
+        return fluidd_card.card_data(self.slots(), check)
+
     def print_check(self, name):
         if getattr(self, "plastic_check", None) is None:
             self.plastic_check = print_check.PrintCheck(self._require_printer())
@@ -962,8 +970,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
-        if self.path == "/api/codes":
-            # Read-only; the Fluidd button script uses it from the printer's own page.
+        if self.path in ("/api/codes", "/api/fluidd"):
+            # Read-only; the Fluidd scripts use them from the printer's own page.
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(data)
@@ -999,6 +1007,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(502, {"error": str(e)})
         if self.path == "/guide" and "guide" in features and GUIDE_FILE.exists():
             return self._send(200, GUIDE_FILE.read_bytes(), "text/html; charset=utf-8")
+        if self.path == "/fluidd_card.js":
+            return self._send(200, fluidd_card.SCRIPT.encode(), "text/javascript; charset=utf-8")
+        if self.path == "/api/fluidd":
+            try:
+                return self._send(200, self.app.fluidd())
+            except (PrinterError, print_check.CheckError) as e:
+                return self._send(502, {"error": str(e)})
         if self.path == "/print_check.js":
             script = print_check.SCRIPT if "usage" in features else ""
             return self._send(200, script.encode(), "text/javascript; charset=utf-8")

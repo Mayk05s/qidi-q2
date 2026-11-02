@@ -86,7 +86,7 @@ remote() {
   local bundle
   bundle="$(mktemp -d)"
   cp remote_setup.py screen_popup_setup.py bambu_rfid.py box_feed.py bambu_map.cfg qidi_panel_link.js qidi-panel.service \
-     "$HOME/.ssh/qidi/id_ed25519.pub" ../tag_writer/qidi_tag_tool.py ../tag_writer/print_check.py ../tag_writer/screen_popup.py ../tag_writer/plastic_picture.py ../tag_writer/slot_font.json ../tag_writer/sample_model.py \
+     "$HOME/.ssh/qidi/id_ed25519.pub" ../tag_writer/qidi_tag_tool.py ../tag_writer/print_check.py ../tag_writer/fluidd_card.py ../tag_writer/screen_popup.py ../tag_writer/plastic_picture.py ../tag_writer/slot_font.json ../tag_writer/sample_model.py \
      ../tag_writer/sample_font.json ../tag_writer/sample_project_settings.json \
      ../tag_writer/qidi_materials.json "$bundle/"
   for name in my_materials.json my_colors.json; do

@@ -210,7 +210,7 @@ FLUIDD_DIR = "/home/qidi/fluidd"
 LINK_SCRIPT = "qidi_panel_link.js"
 LINK_TAG = '<script src="/%s"></script>' % (LINK_SCRIPT,)
 PANEL_FILES = ("drying_guide.html", "box_feed.py", "qidi_tag_tool.py", "print_check.py", "sample_model.py", "sample_font.json", "sample_project_settings.json",
-               "qidi_materials.json", "bambu_rfid.py", "screen_popup.py", "plastic_picture.py", "slot_font.json")
+               "qidi_materials.json", "bambu_rfid.py", "screen_popup.py", "plastic_picture.py", "slot_font.json", "fluidd_card.py")
 # Run as root next to this file during the install; they change files outside the panel folder.
 SETUP_FILES = ("screen_popup_setup.py",)
 OPTIONAL_PANEL_FILES = ("drying_guide.html",)

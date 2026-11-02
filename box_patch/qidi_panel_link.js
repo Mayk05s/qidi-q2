@@ -159,6 +159,11 @@
   }
   setInterval(updatePanel, 2000);
 
+  // Grams under the spools and the plastic card on the dashboard; the panel serves that script.
+  var card = document.createElement("script");
+  card.src = panelUrl() + "fluidd_card.js";
+  document.head.appendChild(card);
+
   // Fluidd draws its menu after loading and may redraw it later.
   new MutationObserver(addLink).observe(document.documentElement, { childList: true, subtree: true });
   addLink();
