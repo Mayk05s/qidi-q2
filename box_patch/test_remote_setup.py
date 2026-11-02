@@ -112,21 +112,36 @@ class FeatureTests(unittest.TestCase):
         args.features = "mesh"
         self.assertEqual(r.chosen_features(args, CFG), {"mesh"})
 
-    def test_guide_mark_is_recorded_and_comes_off_cleanly(self):
-        out = r.add_guide_mark(CFG + SAVED)
-        self.assertEqual(r.add_guide_mark(out), out)
-        self.assertLess(out.index(r.GUIDE_MARK), out.index(r.SAVE_MARKER))
-        self.assertEqual(r.installed_features(out), {"guide"})
-        self.assertEqual(r.remove_guide_mark(out).strip(), (CFG + SAVED).strip())
+    def test_printer_cfg_gets_one_line_and_our_file_the_sections(self):
+        out = r.with_include(CFG + SAVED)
+        self.assertEqual(out.count("[include qidi_patcher.cfg]"), 1)
+        self.assertLess(out.index("[include qidi_patcher.cfg]"), out.index(r.SAVE_MARKER))
+        self.assertEqual(r.with_include(out), out)
+        self.assertEqual(r.without_ours(out).strip(), (CFG + SAVED).strip())
+        own = r.own_config({"bambu", "mesh"})
+        self.assertIn("[bambu_rfid card_reader_1]", own)
+        self.assertIn("[gcode_macro BED_MESH_CALIBRATE]", own)
+        self.assertEqual(r.installed_features(out + own), {"bambu", "mesh"})
+        self.assertEqual(r.own_config({"guide"}), "")
 
-    def test_versions_are_recorded_replaced_and_removed(self):
-        out = r.set_versions(CFG + SAVED, {"package": "1.1.0", "bambu": "1.0.2"})
-        self.assertEqual(r.installed_versions(out), {"package": "1.1.0", "bambu": "1.0.2"})
-        self.assertLess(out.index(r.VERSION_MARK), out.index(r.SAVE_MARKER))
-        out = r.set_versions(out, {"package": "1.2.0"})
-        self.assertEqual(r.installed_versions(out), {"package": "1.2.0"})
-        self.assertEqual(r.set_versions(out, {}).strip(), (CFG + SAVED).strip())
-        self.assertEqual(r.parse_versions("package=1.0,bambu=2.0"), {"package": "1.0", "bambu": "2.0"})
+    def test_earlier_installs_are_cleaned_from_printer_cfg(self):
+        old = r.add_mesh_block(r.add_block(CFG + SAVED)).replace(
+            r.SAVE_MARKER, r.GUIDE_MARK + "# qidi versions (managed by qidi install script): package=1\n" + r.SAVE_MARKER)
+        self.assertEqual(r.without_ours(old).strip(), (CFG + SAVED).strip())
+
+    def test_guide_and_versions_come_from_the_state_file(self):
+        state = {"features": ["guide"], "versions": {"package": "1.0.0"}}
+        self.assertEqual(r.installed_features(CFG, state), {"guide"})
+        self.assertEqual(r.installed_versions(state), {"package": "1.0.0"})
+        self.assertEqual(r.installed_versions(None), {})
+
+    def test_firmware_is_the_last_one_installed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "iso_version.txt")
+            with open(path, "w") as f:
+                f.write("x: Add System_1.1.0\n2026-11-01: Add QD_Q2_01.01.03.02\nINIT: Version: QD_Q2_01.01.03.02\n")
+            self.assertEqual(r.firmware_version(path), "QD_Q2_01.01.03.02")
+            self.assertIsNone(r.firmware_version(os.path.join(d, "none")))
 
     def test_unknown_feature_is_refused(self):
         args = self.Args()

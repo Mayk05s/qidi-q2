@@ -11,6 +11,8 @@ struct Feature: Identifiable {
     let summary: String
     let details: String
     let note: String
+    let adds: [String]
+    let changes: [String]
 
     init?(_ item: [String: Any]) {
         guard let id = item["id"] as? String, let title = item["title"] as? String else { return nil }
@@ -21,6 +23,8 @@ struct Feature: Identifiable {
         summary = item["summary"] as? String ?? ""
         details = item["details"] as? String ?? ""
         note = item["note"] as? String ?? ""
+        adds = item["adds"] as? [String] ?? []
+        changes = item["changes"] as? [String] ?? []
     }
 }
 
@@ -60,6 +64,10 @@ final class Model: ObservableObject {
     @Published var modules: [Feature] = []
     @Published var risks: [String] = []
     @Published var packageVersion = ""
+    @Published var testedFirmware: [String] = []
+    @Published var firmware: String?
+    @Published var commonAdds: [String] = []
+    @Published var commonChanges: [String] = []
     @Published var installedVersions: [String: String] = [:]
     @Published var state = "unknown"
     @Published var host = ""
@@ -258,6 +266,11 @@ final class Model: ObservableObject {
             modules = (message["modules"] as? [[String: Any]] ?? []).compactMap(Feature.init)
             risks = message["risks"] as? [String] ?? []
             packageVersion = message["version"] as? String ?? ""
+            testedFirmware = message["tested_firmware"] as? [String] ?? []
+            firmware = message["firmware"] as? String
+            let common = message["common"] as? [String: [String]] ?? [:]
+            commonAdds = common["adds"] ?? []
+            commonChanges = common["changes"] ?? []
             installedVersions = message["installed_versions"] as? [String: String] ?? [:]
             state = message["state"] as? String ?? "unknown"
             host = message["host"] as? String ?? ""
@@ -530,15 +543,48 @@ struct VersionsView: View {
             row("Программа", model.appVersion)
             row("Пакет здесь", model.packageVersion)
             row("Пакет на принтере", model.installed.isEmpty ? "не установлен" : (model.printerPackage ?? "неизвестна"))
+            row("Прошивка при установке", model.firmware ?? "неизвестна")
+            row("Проверено на прошивке", model.testedFirmware.joined(separator: ", "))
+            if let firmware = model.firmware, !model.testedFirmware.contains(firmware) {
+                Label("Эта прошивка не проверялась, модули могут не работать", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
             Divider()
             ForEach(model.modules) { module in
                 row(module.title, "v" + module.version
                     + (model.installed.contains(module.id) ? " · на принтере " + (model.installedVersions[module.id] ?? "?") : ""))
             }
+            Divider()
+            Text("При любой установке").font(.caption.bold())
+            FileList(title: "Добавляет", icon: "plus.square", items: model.commonAdds)
+            FileList(title: "Меняет", icon: "pencil.line", items: model.commonChanges)
         }
         .font(.callout)
         .padding(16)
-        .frame(width: 340)
+        .frame(width: 380)
+    }
+}
+
+struct FileList: View {
+    let title: String
+    let icon: String
+    let items: [String]
+
+    var body: some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                Label(title, systemImage: icon).font(.caption.bold()).foregroundStyle(.secondary)
+                ForEach(items, id: \.self) { item in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("•")
+                        Text(item).fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 2)
+        }
     }
 }
 
@@ -613,6 +659,8 @@ struct ModuleRow: View {
                     if !feature.note.isEmpty {
                         Label(feature.note, systemImage: "checklist").foregroundStyle(.secondary)
                     }
+                    FileList(title: "Добавляет на принтер", icon: "plus.square", items: feature.adds)
+                    FileList(title: "Меняет", icon: "pencil.line", items: feature.changes)
                 }
                 .font(.callout)
                 .padding(.leading, 38)

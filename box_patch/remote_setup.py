@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Runs on the printer as root: installs or removes bambu_rfid and the panel. Safe to re-run."""
+"""Runs on the printer as root: installs or removes our modules and the panel. Safe to re-run.
+
+Our Klipper sections live in qidi_patcher.cfg next to printer.cfg; printer.cfg only gets one
+[include] line. What is installed, with which versions and on which firmware, is kept in
+qidi_patcher.json in the same folder."""
 import argparse
 import json
 import os
@@ -17,8 +21,14 @@ TAG_FEATURES = ("bambu", "nfc")
 # The panel shows the tags on the slots, writes tags and shows what is left on the spools.
 PANEL_FEATURES = ("bambu", "nfc", "usage", "guide")
 KNOWN_FEATURES = MODULE_FEATURES + ("mesh", "guide")
-# The guide changes nothing in Klipper; this line only records that it is switched on.
+OWN_CFG = "qidi_patcher.cfg"
+STATE_FILE = "qidi_patcher.json"
+INCLUDE_LINE = "[include %s]  # QIDI Q2 Patcher, all its sections are in that file\n" % (OWN_CFG,)
+INCLUDE = re.compile(r"^\[include %s\].*\n?" % (re.escape(OWN_CFG),), re.M)
+FIRMWARE_FILE = "/home/qidi/iso_version.txt"
+# Left in printer.cfg by earlier installs; removed on the next one.
 GUIDE_MARK = "# qidi module: guide (managed by qidi install script)\n"
+VERSION_LINE = re.compile(r"^# qidi versions \(managed by qidi install script\):.*\n?", re.M)
 OPTIONS = (("bambu", "bambu_tags"), ("nfc", "custom_tags"), ("spools", "box_takeover"), ("usage", "spool_usage"))
 SAVE_MARKER = "#*# <---------------------- SAVE_CONFIG"
 BLOCK = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n*", re.S)
@@ -67,38 +77,47 @@ def remove_mesh_block(text):
     return MESH_BLOCK.sub("", text)
 
 
-VERSION_MARK = "# qidi versions (managed by qidi install script):"
-VERSION_LINE = re.compile("^" + re.escape(VERSION_MARK) + r"(.*)\n?", re.M)
-
-
-def installed_versions(text):
-    """{"package": "1.1.0", "bambu": "1.0.0", ...}; empty when installed without the program."""
-    match = VERSION_LINE.search(text)
-    if match is None:
-        return {}
-    return dict(item.split("=", 1) for item in match.group(1).split() if "=" in item)
-
-
-def set_versions(text, versions):
-    text = VERSION_LINE.sub("", text)
-    if not versions:
-        return text
-    items = " ".join("%s=%s" % (name, versions[name]) for name in sorted(versions))
-    return _above_saved(text, "%s %s\n" % (VERSION_MARK, items))
-
-
 def parse_versions(value):
     if not value:
         return {}
     return dict(item.split("=", 1) for item in value.split(",") if "=" in item)
 
 
-def remove_guide_mark(text):
-    return text.replace(GUIDE_MARK, "")
+def without_ours(text):
+    """printer.cfg as it was before any install, earlier ways of installing included."""
+    text = VERSION_LINE.sub("", remove_mesh_block(remove_block(text)).replace(GUIDE_MARK, ""))
+    return INCLUDE.sub("", text)
 
 
-def add_guide_mark(text):
-    return _above_saved(remove_guide_mark(text), GUIDE_MARK)
+def with_include(text):
+    return _above_saved(without_ours(text), INCLUDE_LINE)
+
+
+def own_config(features):
+    """Everything we add to Klipper for these features; empty when Klipper needs nothing."""
+    parts = []
+    module_features = set(features).intersection(MODULE_FEATURES)
+    if module_features:
+        parts.append("%s\n%s%s\n" % (BEGIN, sections(module_features), END))
+    if "mesh" in features:
+        parts.append("%s\n%s%s\n" % (MESH_BEGIN, MESH_MACRO, MESH_END))
+    return "\n".join(parts)
+
+
+def installed_versions(state):
+    """{"package": "1.0.0", "bambu": "1.0.0", ...}; empty when installed without the program."""
+    return dict((state or {}).get("versions") or {})
+
+
+def firmware_version(path=FIRMWARE_FILE):
+    """The last firmware QIDI installed, as the printer's own log names it."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    found = re.findall(r"Add (QD_\S+)", text)
+    return found[-1] if found else None
 
 
 def _above_saved(text, block):
@@ -124,11 +143,12 @@ def sections(features):
     return "\n".join(parts)
 
 
-def installed_features(text):
-    """What the managed block in printer.cfg turns on. A block from before the switches
-    has only hook_stock_read, and the module then has all of them on by default."""
+def installed_features(text, state=None):
+    """What is on: `text` is printer.cfg with qidi_patcher.cfg, `state` our qidi_patcher.json.
+    A block from before the switches has only hook_stock_read, and the module then has all
+    of them on by default."""
     found = {"mesh"} if MESH_BLOCK.search(text) else set()
-    if GUIDE_MARK in text:
+    if GUIDE_MARK in text or "guide" in (state or {}).get("features", ()):
         found.add("guide")
     match = BLOCK.search(text)
     if match is None:
@@ -264,10 +284,10 @@ def uninstall_panel():
         os.remove(script)
 
 
-def chosen_features(args, text):
+def chosen_features(args, text, state=None):
     """Without --features a repeated install keeps what is on; the first one turns on all."""
     if args.features is None:
-        return installed_features(text) or set(MODULE_FEATURES)
+        return installed_features(text, state) or set(MODULE_FEATURES)
     chosen = {name for name in args.features.split(",") if name}
     unknown = chosen - set(KNOWN_FEATURES)
     if unknown:
@@ -301,40 +321,70 @@ def screen_popup(on, source=None):
         screen_popup_setup.uninstall()
 
 
+def _read(path, default=""):
+    if not os.path.exists(path):
+        return default
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _write_beside(path, text, cfg):
+    """A new file next to printer.cfg, with its owner, so Fluidd can show and edit it."""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    owner = os.stat(cfg)
+    os.chown(path, owner.st_uid, owner.st_gid)
+    os.chmod(path, 0o664)
+
+
+def _remove(path):
+    if os.path.exists(path):
+        os.remove(path)
+
+
 def install(args):
-    with open(args.cfg) as f:
-        text = f.read()
-    features = chosen_features(args, text)
+    folder = os.path.dirname(args.cfg)
+    own_path, state_path = os.path.join(folder, OWN_CFG), os.path.join(folder, STATE_FILE)
+    text = _read(args.cfg)
+    state = json.loads(_read(state_path, "{}"))
+    features = chosen_features(args, text + "\n" + _read(own_path), state)
     backup = args.cfg + ".before_bambu_rfid"
     if not os.path.exists(backup):
         shutil.copy2(args.cfg, backup)
-    text = add_mesh_block(text) if "mesh" in features else remove_mesh_block(text)
-    text = add_guide_mark(text) if "guide" in features else remove_guide_mark(text)
-    # Without versions, as from setup.sh, the printer's copy counts as of unknown version.
-    text = set_versions(text, parse_versions(args.versions) if features else {})
-    module_features = features.intersection(MODULE_FEATURES)
-    if not module_features:
-        rewrite(args.cfg, remove_block(text))
+    config = own_config(features)
+    if config:
+        _write_beside(own_path, config, args.cfg)
+        rewrite(args.cfg, with_include(text))
+    else:
+        rewrite(args.cfg, without_ours(text))
+        _remove(own_path)
+    if not features:
+        _remove(state_path)
+    else:
+        # Without versions, as from setup.sh, the printer's copy counts as of unknown version.
+        _write_beside(state_path, json.dumps({
+            "features": sorted(features), "versions": parse_versions(args.versions),
+            "firmware": firmware_version()}, indent=1), args.cfg)
+    if features.intersection(MODULE_FEATURES):
+        extras = os.path.join(args.klipper, "klippy", "extras")
+        if not os.path.isdir(extras):
+            raise SystemExit("Klipper extras folder not found: " + extras)
+        for name in MODULE_FILES:
+            shutil.copyfile(os.path.join(os.path.dirname(args.module), name), os.path.join(extras, name))
+        if args.map:
+            install_map(args.map, args.cfg)
+        if args.pubkey:
+            install_key(args.user, args.pubkey)
+    else:
         remove_module_files(args)
-        install_or_remove_panel(args, features)
-        return
-    extras = os.path.join(args.klipper, "klippy", "extras")
-    if not os.path.isdir(extras):
-        raise SystemExit("Klipper extras folder not found: " + extras)
-    for name in MODULE_FILES:
-        shutil.copyfile(os.path.join(os.path.dirname(args.module), name), os.path.join(extras, name))
-    rewrite(args.cfg, add_block(text, module_features))
-    if args.map:
-        install_map(args.map, args.cfg)
-    if args.pubkey:
-        install_key(args.user, args.pubkey)
     install_or_remove_panel(args, features)
 
 
 def uninstall(args):
-    with open(args.cfg) as f:
-        text = f.read()
-    rewrite(args.cfg, set_versions(remove_guide_mark(remove_mesh_block(remove_block(text))), {}))
+    folder = os.path.dirname(args.cfg)
+    rewrite(args.cfg, without_ours(_read(args.cfg)))
+    for name in (OWN_CFG, STATE_FILE):
+        _remove(os.path.join(folder, name))
     remove_module_files(args)
     uninstall_panel()
 

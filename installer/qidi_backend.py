@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -146,6 +147,7 @@ class Printer:
         self.password = env.get("PRINTER_PASSWORD") or DEFAULT_PASSWORD
         self.api = "http://%s:7125" % (self.host,)
         self.blocked = False
+        self.state = {}
 
     def get(self, path, timeout=8):
         with urllib.request.urlopen(self.api + path, timeout=timeout) as answer:
@@ -174,10 +176,19 @@ class Printer:
         except (OSError, ValueError, KeyError):
             return "unavailable"
 
+    def config_file(self, name, default=""):
+        try:
+            return self.get("/server/files/config/" + urllib.parse.quote(name)).decode("utf-8")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return default
+            raise
+
     def installed(self):
-        """What is on the printer: the modules and the versions they were installed with."""
-        text = self.get("/server/files/config/printer.cfg").decode("utf-8")
-        return remote_setup.installed_features(text), remote_setup.installed_versions(text)
+        """What is on the printer: the modules, their versions and the firmware at install."""
+        text = self.config_file("printer.cfg") + "\n" + self.config_file(remote_setup.OWN_CFG)
+        self.state = json.loads(self.config_file(remote_setup.STATE_FILE, "{}"))
+        return remote_setup.installed_features(text, self.state), remote_setup.installed_versions(self.state)
 
     def run_gcode(self, script):
         query = urllib.parse.urlencode({"script": script})
@@ -373,7 +384,8 @@ def status(printer):
         printer, "password", DEFAULT_PASSWORD)) != (DEFAULT_USER, DEFAULT_PASSWORD)
     send("status", state=state, host=printer.host if printer else "", user=getattr(printer, "user", ""),
          custom_login=custom_login, configured=printer is not None,
-         network_blocked=getattr(printer, "blocked", False), features=sorted(features),
+         network_blocked=getattr(printer, "blocked", False),
+         firmware=(getattr(printer, "state", None) or {}).get("firmware"), features=sorted(features),
          installed_versions=versions, **catalog)
 
 
