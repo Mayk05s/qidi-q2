@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """What the installer window runs. Every output line is one JSON message for the window.
-Printer address and login come only from .env in the project folder."""
+Printer address and login come only from .env in the project folder (on Windows in DATA_DIR)."""
 import argparse
 import errno
 import concurrent.futures
@@ -15,37 +15,47 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
+# The Windows program is one file; PyInstaller unpacks the project files it carries into _MEIPASS.
+ROOT = pathlib.Path(getattr(sys, "_MEIPASS", "") or pathlib.Path(__file__).resolve().parent.parent)
 BOX_PATCH = ROOT / "box_patch"
 sys.path.insert(0, str(BOX_PATCH))
+sys.path.insert(0, str(ROOT / "installer"))
 import remote_setup  # noqa: E402
+import ssh_link  # noqa: E402
 import sync_ssh_alias  # noqa: E402
 
-ENV_PATH = ROOT / ".env"
-KEY = pathlib.Path.home() / ".ssh" / "qidi" / "id_ed25519"
-SSH_OPTS = ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]
+WINDOWS = sys.platform == "win32"
+# What the program keeps for itself: backups, and on Windows, where the program has no project
+# folder around it, also the printer login, the key and the log.
+DATA_DIR = (pathlib.Path(os.environ.get("APPDATA") or pathlib.Path.home()) if WINDOWS
+            else pathlib.Path.home() / "Library" / "Application Support") / "QIDI Q2 Patcher"
+ENV_PATH = DATA_DIR / ".env" if WINDOWS else ROOT / ".env"
+KEY = (DATA_DIR / "ssh" if WINDOWS else pathlib.Path.home() / ".ssh" / "qidi") / "id_ed25519"
+KNOWN_HOSTS = DATA_DIR / "known_hosts"
 PANEL_PORT = 18770
 # The login QIDI ships the Q2 with; .env holds another one only when it was changed.
 DEFAULT_USER = "mks"
 DEFAULT_PASSWORD = "makerbase"
 # Each run has its own folder on the printer, so two runs never meet there.
 REMOTE_DIR = "/tmp/qidi_setup_%d" % (os.getpid(),)
-PATCHER_FILE = pathlib.Path(__file__).resolve().parent / "patcher.json"
+PATCHER_FILE = ROOT / "installer" / "patcher.json"
 # What the printer side needs besides the packages; everything a package needs it names itself.
 SETUP_BUNDLE = ("box_patch/remote_setup.py",)
 
 
-LOG_FILE = pathlib.Path.home() / "Library" / "Logs" / "QIDI Q2 Patcher.log"
+LOG_FILE = DATA_DIR / "patcher.log" if WINDOWS else pathlib.Path.home() / "Library" / "Logs" / "QIDI Q2 Patcher.log"
 
 
 def note_error(what, error):
     """Why the printer did not answer, for the log the window points to."""
     try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(str(LOG_FILE), "a", encoding="utf-8") as f:
             f.write("%s %s: %r\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), what, error))
     except OSError:
@@ -58,7 +68,7 @@ def blocked_by_macos(error):
     return isinstance(reason, OSError) and reason.errno == errno.EHOSTUNREACH
 
 
-BACKUP_DIR = pathlib.Path.home() / "Library" / "Application Support" / "QIDI Q2 Patcher" / "backups"
+BACKUP_DIR = DATA_DIR / "backups"
 BACKUPS_KEPT = 15
 
 
@@ -105,7 +115,7 @@ def prune_backups(folder):
                 path.unlink()
 
 
-FIRMWARE_CACHE = pathlib.Path.home() / "Library" / "Caches" / "QIDI Q2 Patcher" / "firmware.json"
+FIRMWARE_CACHE = (DATA_DIR if WINDOWS else pathlib.Path.home() / "Library" / "Caches" / "QIDI Q2 Patcher") / "firmware.json"
 FIRMWARE_CACHE_SECONDS = 3600
 
 
@@ -124,8 +134,16 @@ def save_firmware_cache(cache):
         pass
 
 
+# The Windows window runs commands in its own threads and takes their messages here instead.
+receiver = threading.local()
+
+
 def send(kind, **fields):
-    print(json.dumps(dict(fields, type=kind), ensure_ascii=False), flush=True)
+    message = dict(fields, type=kind)
+    if getattr(receiver, "send", None):
+        receiver.send(message)
+    else:
+        print(json.dumps(message, ensure_ascii=False), flush=True)
 
 
 def log(text):
@@ -164,6 +182,7 @@ def write_env(connection, path=ENV_PATH):
     # .env is also sourced by setup.sh, so the values are quoted for the shell.
     text = "".join("%s=%s\n" % (name, shlex.quote(connection[key])) for name, key in (
         ("PRINTER_HOST", "host"), ("PRINTER_USER", "user"), ("PRINTER_PASSWORD", "password")))
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
     with os.fdopen(descriptor, "w", encoding="utf-8") as f:
         f.write(text)
@@ -285,22 +304,16 @@ class Printer:
         time.sleep(8)
         return self.wait_ready()
 
-    def _ssh_env(self, askpass):
-        return dict(os.environ, SSH_ASKPASS=askpass, SSH_ASKPASS_REQUIRE="force", PRINTER_PASSWORD=self.password)
+    def link(self):
+        return ssh_link.open_link(self.user, self.host, self.password, KNOWN_HOSTS)
 
     def ssh_read(self, command, timeout=15):
         """Output of a command that only reads, run on the printer with the saved login."""
-        with tempfile.TemporaryDirectory() as work:
-            askpass = os.path.join(work, "askpass")
-            with open(askpass, "w") as f:
-                f.write('#!/bin/sh\nprintf "%s\\n" "$PRINTER_PASSWORD"\n')
-            os.chmod(askpass, 0o700)
-            done = subprocess.run(["ssh"] + SSH_OPTS + ["%s@%s" % (self.user, self.host), command],
-                                  env=self._ssh_env(askpass), stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=timeout)
-        if done.returncode != 0:
-            raise Failed(done.stderr.strip() or "ssh exited with %d" % (done.returncode,))
-        return done.stdout
+        with self.link() as link:
+            code, output, errors = link.run(command, timeout=timeout)
+        if code != 0:
+            raise Failed(errors.strip() or "ssh exited with %d" % (code,))
+        return output
 
     def live_firmware(self):
         """The firmware QIDI installed last; kept an hour per address, since it needs a login."""
@@ -310,7 +323,7 @@ class Printer:
             return entry["firmware"]
         try:
             text = self.ssh_read("grep 'Add QD_' %s" % (remote_setup.FIRMWARE_FILE,))
-        except (Failed, OSError, subprocess.TimeoutExpired) as e:
+        except (Failed, ssh_link.LinkError, OSError, subprocess.TimeoutExpired) as e:
             note_error("firmware of " + self.host, e)
             return entry["firmware"] if entry else None
         found = re.findall(r"Add (QD_\S+)", text)
@@ -325,12 +338,7 @@ class Printer:
         where to save the archive the action leaves as archive.tar.gz. Returns the output lines;
         Klipper is restarted when the action says it has something new to read."""
         info = self.json("/printer/info")
-        login = "%s@%s" % (self.user, self.host)
-        with tempfile.TemporaryDirectory() as work:
-            askpass = os.path.join(work, "askpass")
-            with open(askpass, "w") as f:
-                f.write('#!/bin/sh\nprintf "%s\\n" "$PRINTER_PASSWORD"\n')
-            os.chmod(askpass, 0o700)
+        with tempfile.TemporaryDirectory() as work, self.link() as link:
             bundle = os.path.join(work, "bundle")
             for relative in bundle_files(load_packages()):
                 path = os.path.join(bundle, relative)
@@ -339,10 +347,8 @@ class Printer:
             shutil.copy(str(KEY.with_suffix(".pub")), os.path.join(bundle, "id_ed25519.pub"))
             if upload:
                 shutil.copy(str(upload), os.path.join(bundle, "upload.tar.gz"))
-            env = self._ssh_env(askpass)
-            subprocess.run(["ssh"] + SSH_OPTS + [login, "rm -rf " + REMOTE_DIR], env=env, check=True,
-                           stdin=subprocess.DEVNULL)
-            subprocess.run(["scp", "-q", "-r"] + SSH_OPTS + [bundle, login + ":" + REMOTE_DIR], env=env, check=True)
+            link.run("rm -rf " + REMOTE_DIR)
+            link.put_dir(bundle, REMOTE_DIR)
             command = ["python3", REMOTE_DIR + "/box_patch/remote_setup.py", action, "--root", REMOTE_DIR,
                        "--klipper", info["klipper_path"], "--cfg", info["config_file"],
                        "--pubkey", REMOTE_DIR + "/id_ed25519.pub", "--user", self.user] + list(arguments)
@@ -356,21 +362,17 @@ class Printer:
                      "chmod -R a+rX %s; exit $rc" % (shlex.join(command), shlex.quote(remote_setup.RESTART_MARK),
                                                      REMOTE_DIR))
             script = "chmod -R a+rX %s; sudo -S -p '' sh -c %s" % (REMOTE_DIR, shlex.quote(inner))
-            done = subprocess.run(["ssh"] + SSH_OPTS + [login, script], env=env,
-                                  input=self.password + "\n", text=True,
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            code, output, _ = link.run(script, input=self.password + "\n", merge=True)
             try:
-                if done.returncode != 0:
-                    for line in done.stdout.splitlines():
+                if code != 0:
+                    for line in output.splitlines():
                         log(line)
-                    raise Failed("Действие на принтере не удалось (код %d)." % (done.returncode,))
+                    raise Failed("Действие на принтере не удалось (код %d)." % (code,))
                 if fetch:
-                    subprocess.run(["scp", "-q"] + SSH_OPTS + [login + ":" + REMOTE_DIR + "/archive.tar.gz", str(fetch)],
-                                   env=env, check=True)
+                    link.get(REMOTE_DIR + "/archive.tar.gz", fetch)
             finally:
-                subprocess.run(["ssh"] + SSH_OPTS + [login, "sudo -S -p '' rm -rf " + REMOTE_DIR], env=env,
-                               input=self.password + "\n", text=True, capture_output=True)
-            return done.stdout.splitlines()
+                link.run("sudo -S -p '' rm -rf " + REMOTE_DIR, input=self.password + "\n")
+            return output.splitlines()
 
     def remote(self, change, versions=None):
         """Install or remove packages; True when Klipper was restarted for them."""
@@ -428,6 +430,9 @@ class Printer:
 def ensure_key():
     if not KEY.exists():
         KEY.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if WINDOWS:
+            ssh_link.make_key(KEY, "pc-to-qidi-q2")
+            return
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "mac-to-qidi-q2", "-f", str(KEY)],
                        check=True)
 
@@ -616,7 +621,7 @@ def status(printer):
          installed_versions=versions, **catalog)
 
 
-def main(argv=None):
+def main(argv=None, stdin=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("command", choices=("status", "apply", "diag", "save-connection", "discover",
@@ -632,7 +637,7 @@ def main(argv=None):
 
     if args.command == "save-connection":
         if not args.demo:
-            write_env(json.load(sys.stdin))
+            write_env(json.load(stdin or sys.stdin))
         send("done", ok=True, text="Подключение сохранено.")
         return 0
     if args.command == "discover":
@@ -673,7 +678,7 @@ def main(argv=None):
             if not printer.diagnose():
                 raise Failed("Считыватели ответили не так, как ожидалось.")
             text = "Оба считывателя отвечают."
-    except (Failed, OSError, subprocess.CalledProcessError) as e:
+    except (Failed, ssh_link.LinkError, OSError, subprocess.CalledProcessError) as e:
         send("done", ok=False, text=str(e))
         return 1
     send("done", ok=True, text=text)

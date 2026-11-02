@@ -1,0 +1,26 @@
+# Builds "QIDI Q2 Patcher.exe" on Windows; the program is under the run's Artifacts.
+name: Windows exe
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      # The printer needs its files with Unix line ends, as they are in the repository.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyinstaller paramiko
+      - run: python -B -m unittest test_qidi_window
+        working-directory: installer
+      - run: python -B installer/build_exe.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QIDI Q2 Patcher for Windows
+          path: dist/QIDI Q2 Patcher.exe
