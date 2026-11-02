@@ -9,7 +9,7 @@ import unittest
 import fluidd_card as f
 
 SLOTS = {"slots": [
-    {"label": "1A", "color": "EFE255", "tag": {"detail": "PLA Lite", "weight": 1000}, "spool": {"remaining": 996.4}},
+    {"index": 0, "label": "1A", "color": "EFE255", "tag": {"detail": "PLA Lite", "weight": 1000}, "spool": {"remaining": 996.4}},
     {"label": "1B", "color": None, "tag": None, "spool": None}]}
 
 
@@ -19,10 +19,17 @@ class CardData(unittest.TestCase):
             {"label": "1A", "need": 3, "left_to_print": 3, "remaining": 996, "verdict": "ok"},
             {"label": "1D", "need": 300, "left_to_print": 300, "remaining": 247, "verdict": "short"}]}
         data = f.card_data(SLOTS, check)
-        self.assertEqual(data["spools"][0], {"label": "1A", "color": "EFE255", "material": "PLA Lite",
-                                             "remaining": 996.4, "weight": 1000})
+        self.assertEqual(data["spools"][0], {"index": 0, "label": "1A", "color": "EFE255", "material": "PLA Lite",
+                                             "remaining": 996.4, "weight": 1000, "tagless": False})
         self.assertEqual(data["spools"][1]["remaining"], None)
+        self.assertTrue(data["spools"][1]["tagless"])
         self.assertEqual(data["problems"], [{"label": "1D", "need": 300, "remaining": 247, "verdict": "short"}])
+
+    def test_picked_plastic_shows_its_name_and_weight(self):
+        slots = {"slots": [{"index": 1, "label": "1B", "color": "A878FF", "tag": {"empty": True},
+                            "spool": {"remaining": 640, "full": 750, "name": "eSun PLA+"}}]}
+        spool = f.card_data(slots, {})["spools"][0]
+        self.assertEqual((spool["material"], spool["weight"], spool["tagless"]), ("eSun PLA+", 750, True))
 
     def test_during_print_need_is_what_is_left_to_print(self):
         check = {"file": "a.gcode", "printing": True, "rows": [

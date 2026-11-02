@@ -5,6 +5,7 @@ import sys
 PACKAGES = pathlib.Path(__file__).resolve().parent.parent.parent
 for folder in ("usage/printer",):
     sys.path.insert(0, str(PACKAGES / folder))
+import json
 import os
 import tempfile
 import unittest
@@ -231,6 +232,82 @@ class SpoolLedgerTests(unittest.TestCase):
         with open(self.path, "w") as f:
             f.write("{broken")
         self.assertEqual(b.SpoolLedger(self.path).spools, {})
+
+
+BLACK_TAG = {"uid": "A", "tray": "T", "color": "000000", "filament": "QFA01", "weight": 1000}
+PLASTIC = {"name": "eSun PLA+", "filament": "QFA00", "color": "A878FF", "grams": 1000}
+
+
+def slot(filament, color, record=None):
+    variables = {"filament_slot1": filament, "color_slot1": [color]}
+    if record is not None:
+        variables["bambu_tag_slot1"] = record
+    return variables
+
+
+class TaglessSpoolTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = folder.name
+        self.ledger = b.SpoolLedger(os.path.join(self.folder, b.USAGE_FILE))
+
+    def test_tag_of_an_earlier_spool_is_not_counted(self):
+        # The tag record left from another spool: the slot has another color now.
+        self.assertEqual(b.spool_key(slot("QFA01", "000000", BLACK_TAG), 1), "tray:T")
+        self.assertEqual(b.spool_key(slot("QFA01", "A878FF", BLACK_TAG), 1), "slot:1")
+        self.assertEqual(b.spool_key(slot("QFA00", "000000", BLACK_TAG), 1), "slot:1")
+        self.assertEqual(b.spool_key(slot("QFA00", "A878FF", {"uid": "U", "unread": True}), 1), "uid:U")
+        self.ledger.adopt(slot("QFA01", "A878FF", BLACK_TAG))
+        self.assertEqual(self.ledger.spools, {})
+
+    def test_count_holds_while_the_slot_keeps_its_plastic(self):
+        self.ledger.set_remaining("slot:1", 500, ["QFA00", "A878FF"])
+        self.ledger.add("slot:1", 20, ["QFA00", "A878FF"])
+        self.assertEqual(self.ledger.view("slot:1", ["QFA00", "A878FF"])["remaining"], 480)
+        # Another spool without a tag, of another color: unknown, and printing starts it anew.
+        self.assertIsNone(self.ledger.view("slot:1", ["QFA00", "FFFFFF"])["remaining"])
+        self.ledger.add("slot:1", 5, ["QFA00", "FFFFFF"])
+        self.assertEqual(self.ledger.view("slot:1", ["QFA00", "FFFFFF"])["used"], 5)
+        self.assertIsNone(self.ledger.view("slot:1", ["QFA00", "A878FF"])["remaining"])
+
+    def test_pick_sets_count_name_and_slot(self):
+        scripts = self.ledger.pick(1, PLASTIC, ["QFA01", "000000"], printing=False)
+        self.assertEqual(scripts, ["SAVE_VARIABLE VARIABLE=filament_slot1 VALUE=\"'QFA00'\"",
+                                   "SAVE_VARIABLE VARIABLE=color_slot1 VALUE=\"['A878FF']\"",
+                                   "SAVE_VARIABLE VARIABLE=bambu_tag_slot1 VALUE=\"{'empty': True}\""])
+        view = self.ledger.view("slot:1", ["QFA00", "A878FF"])
+        self.assertEqual((view["remaining"], view["full"], view["name"]), (1000, 1000, "eSun PLA+"))
+        self.assertEqual(self.ledger.pending(), [])
+
+    def test_pick_during_a_print_waits_for_its_end(self):
+        self.assertEqual(self.ledger.pick(1, dict(PLASTIC, grams=700), ["QFA01", "000000"], printing=True), [])
+        # Meanwhile the slot still has the old material and color, and the count is the pick's.
+        self.ledger.add("slot:1", 10, ["QFA01", "000000"])
+        self.assertEqual(self.ledger.view("slot:1", ["QFA01", "000000"])["remaining"], 690)
+        self.assertEqual(len(self.ledger.pending()), 3)
+        self.assertEqual(self.ledger.pending(), [])
+        self.assertEqual(self.ledger.view("slot:1", ["QFA00", "A878FF"])["remaining"], 690)
+        self.assertIsNone(self.ledger.view("slot:1", ["QFA01", "000000"])["remaining"])
+
+    def test_setting_grams_by_hand_keeps_the_name(self):
+        self.ledger.pick(1, PLASTIC, ["QFA01", "000000"], printing=False)
+        self.ledger.set_remaining("slot:1", 300, ["QFA00", "A878FF"])
+        view = self.ledger.view("slot:1", ["QFA00", "A878FF"])
+        self.assertEqual((view["remaining"], view["name"]), (300, "eSun PLA+"))
+
+    def test_pick_request(self):
+        path = os.path.join(self.folder, b.PICK_REQUEST_FILE % 1)
+        with open(path, "w") as f:
+            json.dump(dict(PLASTIC, name="  eSun   PLA+ ", color="a878ff"), f)
+        self.assertEqual(b.take_pick_request(self.folder, 1), PLASTIC)
+        self.assertIsNone(b.take_pick_request(self.folder, 1))
+        for bad in (dict(PLASTIC, filament="PLA"), dict(PLASTIC, color="red"), dict(PLASTIC, grams=9999),
+                    dict(PLASTIC, grams=True), dict(PLASTIC, name=" "), {"name": "x"}):
+            with open(path, "w") as f:
+                json.dump(bad, f)
+            self.assertIsNone(b.take_pick_request(self.folder, 1))
+            self.assertFalse(os.path.exists(path))
 
 
 class FilamentMeterTests(unittest.TestCase):
