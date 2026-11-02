@@ -135,13 +135,15 @@ final class Model: ObservableObject {
 
     var hasUpdate: Bool { !installed.isEmpty && (!outdated.isEmpty || printerPackage != packageVersion) }
 
+    var isReinstall: Bool { !installed.isEmpty && !hasChanges && outdated.isEmpty }
+
     var actionTitle: String {
         if installed.isEmpty { return "Установить" }
         if hasChanges { return "Применить" }
-        return "Обновить"
+        return isReinstall ? "Переустановить" : "Обновить"
     }
 
-    var canRunAction: Bool { canChange && (hasChanges || !outdated.isEmpty) }
+    var canRunAction: Bool { canChange && !chosen.isEmpty || canChange && hasChanges }
 
     /// What the confirmation asks about, module by module.
     var changes: String {
@@ -154,8 +156,11 @@ final class Model: ObservableObject {
         if !added.isEmpty { parts.append("Установить:\n" + names(added)) }
         if !updated.isEmpty { parts.append("Обновить:\n" + names(updated)) }
         if !removed.isEmpty { parts.append("Убрать:\n" + names(removed)) }
-        if parts.isEmpty { parts.append("Изменений нет, пакеты на принтере уже этой версии.") }
-        parts.append(restartsKlipper ? "Klipper перезапустится." : "Klipper не перезапускается.")
+        if isReinstall {
+            parts.append("Выбранные пакеты будут переустановлены:\n" + names(chosen))
+        }
+        let restarts = isReinstall ? modules.contains { chosen.contains($0.id) && $0.klipper } : restartsKlipper
+        parts.append(restarts ? "Klipper перезапустится." : "Klipper не перезапускается.")
         parts.append("Перед установкой резервная копия принтера сохранится на этом компьютере.")
         return parts.joined(separator: "\n\n")
     }
@@ -178,7 +183,8 @@ final class Model: ObservableObject {
     /// All the chosen changes in one run: new and outdated packages are copied, the ones switched
     /// off are removed, and packages that stay as they are are not touched.
     func apply() {
-        let add = chosen.subtracting(installed).union(outdated.intersection(chosen))
+        // Nothing changed and nothing outdated: the chosen packages are put on again.
+        let add = isReinstall ? chosen : chosen.subtracting(installed).union(outdated.intersection(chosen))
         let remove = installed.subtracting(chosen)
         startAction(["apply", "--add", add.sorted().joined(separator: ","),
                      "--remove", remove.sorted().joined(separator: ",")])
@@ -1040,10 +1046,14 @@ struct ContentView: View {
                         .disabled(!model.canChange || model.installed.isEmpty)
                     Spacer()
                     if model.busy { ProgressView().controlSize(.small) }
+                    if model.isReinstall && !model.busy {
+                        Text("Выбранные пакеты будут переустановлены").font(.caption).foregroundStyle(.secondary)
+                    }
                     Button(model.actionTitle) { confirmApply = true }
                         .buttonStyle(.borderedProminent)
                         .tint(model.actionTitle == "Обновить" ? .orange : .accentColor)
                         .disabled(!model.canRunAction)
+                        .help(model.isReinstall ? "Выбранные пакеты будут переустановлены" : "")
                 }
             }
             .padding(18)
