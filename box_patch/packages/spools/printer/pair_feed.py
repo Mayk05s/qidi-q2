@@ -252,6 +252,8 @@ class PairDriver:
             self.active.discard(slot)
             self.mover.feeding.discard(slot)
             self.mover._finish_after([slot], track.end)
+            self.mover.lengths.pop(slot, None)
+            self.mover.mark_empty([slot])
             self.mover.printer.lookup_object("gcode").respond_raw(
                 "!! Filament of slot %d left the sensor, insert it again" % (slot,))
 

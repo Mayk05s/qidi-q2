@@ -88,6 +88,9 @@ class FakeBoxPrinter:
     def lookup_enable(self, name):
         return self.enable_of[name]
 
+    def run_script(self, script):
+        pass
+
     def get_last_move_time(self):
         return 5.
 
@@ -480,11 +483,35 @@ class InsertWatchTests(EjectTests):
 
     def test_motor_stops_when_the_filament_leaves(self):
         self.start_real()
+        scripts = []
+        self.printer.run_script = scripts.append
+        self.mover.lengths[0] = 900.
         self.mover.ejecting.update({0, 2})
         self.mover._stop_finished_ejects({0: False, 2: True}, 50.)
         self.assertEqual(self.printer.enable_of["slot0"].calls, ["off"])
         self.assertEqual(self.printer.enable_of["slot2"].calls, [])
         self.assertEqual(self.mover.ejecting, {2})
+        # The slot counts as empty again, so the stock code calls slot_load for the next spool.
+        self.assertEqual(scripts, ["SAVE_VARIABLE VARIABLE=slot0 VALUE=0"])
+        self.assertNotIn(0, self.mover.lengths)
+
+    def test_spool_put_in_without_slot_load_is_fed(self):
+        # 2 Nov: with the slot left at 3, the stock code only pushed the spool 50 mm.
+        self.saved["auto_read_rfid"] = 0
+        self.mover._feed_new_spools({0: False, 1: True, 2: False, 3: False}, 10.)
+        self.assertEqual(self.mover.feed_pending, set())
+        self.mover.feeding.add(1)
+        self.mover._feed_new_spools({0: False, 1: True, 2: True, 3: True}, 10.1)
+        self.assertEqual(self.mover.feed_pending, {2, 3})
+        # Seen once more, or already asked for by slot_load: no second feed.
+        self.mover._feed_new_spools({0: False, 1: True, 2: True, 3: True}, 10.2)
+        self.assertEqual(self.mover.feed_pending, {2, 3})
+
+    def test_spool_put_in_while_the_stock_read_is_on_is_not_ours(self):
+        self.saved["auto_read_rfid"] = 1
+        self.mover._feed_new_spools({2: False}, 10.)
+        self.mover._feed_new_spools({2: True}, 10.1)
+        self.assertEqual(self.mover.feed_pending, set())
 
     def test_feed_of_a_busy_slot_waits(self):
         self.printer.run_script = lambda script: None
@@ -509,6 +536,7 @@ class InsertWatchTests(EjectTests):
         self.mover.reread = lambda slot: calls.append(slot) or True
         gcmd = self.Gcmd({"SLOT": 2}, said)
         self.present(2)
+        self.saved["slot2"] = 1
         self.mover.cmd_reread(gcmd)
         self.assertEqual(calls, [2])
         self.assertIn(2, self.mover.feeding)
@@ -522,6 +550,17 @@ class InsertWatchTests(EjectTests):
         self.mover.cmd_reread(self.Gcmd({"SLOT": 1}, []))
         self.mover.cmd_reread(self.Gcmd({"SLOT": 3}, []))
         self.assertEqual(calls, ["stock", "stock"])
+
+    def test_reread_of_a_spool_not_fed_feeds_it(self):
+        # Only pushed in a little: turned back as a fed spool, it would come out.
+        said = []
+        self.mover.stock_reread = lambda gcmd: self.fail("not stock")
+        self.mover.reread = lambda slot: self.fail("not a reread")
+        self.present(3)
+        self.saved["slot3"] = 3
+        self.mover.cmd_reread(self.Gcmd({"SLOT": 3}, said))
+        self.assertEqual(self.mover.feed_pending, {3})
+        self.assertEqual(said, ["bambu_rfid: slot 3 was not fed, feeding it"])
 
     def test_reread_of_a_moving_slot_waits(self):
         said = []

@@ -167,6 +167,8 @@ class BoxMover:
         self.pair_jobs = 0
         self.feed_timer = None
         self.feed_pending = set()
+        # What the slot sensors showed at the last look, to see a spool put in.
+        self.seen = None
 
     @classmethod
     def of(cls, printer):
@@ -497,6 +499,11 @@ class BoxMover:
         if slot in self.busy or slot in self.ejecting:
             gcmd.respond_info("bambu_rfid: slot %d is moving, read it again when it stops" % (slot,))
             return
+        if not self.is_fed(slot) and slot not in self.feeding:
+            # Not known how far it is in: turning it back as a fed spool would pull it out.
+            self.request_feed(slot)
+            gcmd.respond_info("bambu_rfid: slot %d was not fed, feeding it" % (slot,))
+            return
         if not self.admit([slot]):
             # Too many motors turn already: it starts as soon as one stops.
             self.reread_pending.add(slot)
@@ -622,6 +629,18 @@ class BoxMover:
         for slot in slots:
             gcode.run_script("SAVE_VARIABLE VARIABLE=slot%d VALUE=1" % (slot,))
 
+    def mark_empty(self, slots):
+        """0 means empty. A slot left at 3 makes the stock code only push a spool put in by 50 mm,
+        without the check our feed takes over (2 Nov, slots 1C and 1D after an eject)."""
+        gcode = self.printer.lookup_object("gcode")
+        for slot in slots:
+            gcode.run_script("SAVE_VARIABLE VARIABLE=slot%d VALUE=0" % (slot,))
+
+    def is_fed(self, slot):
+        """Fed by us in this run, or marked ready for printing."""
+        saved = self.printer.lookup_object("save_variables").allVariables
+        return slot in self.lengths or saved.get("slot%d" % (slot,)) == 1
+
     def start_insert_watch(self):
         """Watch the slot sensors to stop an eject as soon as the filament has left."""
         if self.insert_timer is None:
@@ -641,10 +660,22 @@ class BoxMover:
                 stepper = self.printer.lookup_object("box_stepper slot%d" % (slot,))
                 present[slot] = stepper.get_status(eventtime)["runout_button"] == 0
             self._stop_finished_ejects(present, eventtime)
+            self._feed_new_spools(present, eventtime)
         except Exception:
             # An error here runs in a reactor timer and would shut the printer down.
             logging.exception("bambu_rfid: slot watch failed")
         return eventtime + INSERT_POLL
+
+    def _feed_new_spools(self, present, eventtime):
+        """A spool put in is fed even when the stock code does not call slot_load for it."""
+        seen, self.seen = self.seen, present
+        if seen is None or not self._insert_watch_on(eventtime):
+            return
+        for slot in sorted(present):
+            if present[slot] and not seen.get(slot, True) and slot not in self.ejecting \
+                    and slot not in self.feeding and slot not in self.feed_pending:
+                logging.info("bambu_rfid: slot%d spool put in, fed by us", slot)
+                self.request_feed(slot)
 
     def _stop_finished_ejects(self, present, eventtime):
         """Once the filament has left the sensor the motor has nothing to move. The planned steps
@@ -658,6 +689,8 @@ class BoxMover:
             print_time = toolhead.mcu.estimated_print_time(eventtime) + SLOT_ENABLE_DELAY
             enables.lookup_enable("slot%d" % (slot,)).motor_disable(print_time)
             toolhead.note_mcu_movequeue_activity(print_time)
+            self.lengths.pop(slot, None)
+            self.mark_empty([slot])
 
     def _run_feeds(self, eventtime):
         reactor = self.printer.get_reactor()

@@ -78,6 +78,10 @@ class Mover:
     def _finish_after(self, slots, end):
         self.finished.append((slots, end))
 
+    def mark_empty(self, slots):
+        for slot in slots:
+            self.bench.scripts.append("SAVE_VARIABLE VARIABLE=slot%d VALUE=0" % (slot,))
+
 
 class Bench:
     """Reactor, toolhead, reader and slot sensors around one pair, driven by the world model."""
