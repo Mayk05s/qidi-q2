@@ -228,6 +228,20 @@ class Printer:
         # A file rather than G-code: G-code waits behind a running print.
         self.upload("spool_set_%d.txt" % (index,), "%d\n" % (grams,))
 
+    def pick_plastic(self, index, plastic, grams):
+        """The usage module (bambu_spool_usage) takes the file: the count starts at grams and the
+        slot gets the plastic's material and color, after the print if one is running."""
+        if index not in [i for i, _ in self.SLOTS]:
+            raise PrinterError("Нет такого слота")
+        if isinstance(grams, bool) or not isinstance(grams, int) or not 0 <= grams <= 5000:
+            raise PrinterError("Остаток должен быть от 0 до 5000 г")
+        name = " ".join(x for x in (plastic["maker"], plastic["name"]) if x)
+        if not name:
+            name = next((m["name"] for m in load_materials() if m["id"] == plastic["filament"]), plastic["filament"])
+        self.upload("spool_pick_%d.json" % (index,), json.dumps(
+            {"name": name[:40], "filament": plastic["filament"], "color": plastic["color"], "grams": grams},
+            ensure_ascii=False))
+
     FEED_MODES = ("quiet", "normal", "fast", "custom")
     FEED_MODE_FILE = "box_feed.json"
     # Limits of a custom mode, mm/s and mm/s². The stock firmware moves the Box motors at
@@ -527,6 +541,8 @@ MY_COLORS_LIMIT = 60
 MY_MATERIALS_FILE = pathlib.Path(__file__).resolve().parent / "my_materials.json"
 MY_NAMES_FILE = pathlib.Path(__file__).resolve().parent / "my_names.json"
 MY_NAMES_LIMIT = 100
+MY_PLASTICS_FILE = pathlib.Path(__file__).resolve().parent / "my_plastics.json"
+MY_PLASTICS_LIMIT = 100
 # Print order of sample groups, coolest plastic first, by the start of the plastic type:
 # the first prefix that matches wins, so PETG comes before PET and PCTG before PC.
 HEAT_ORDER = (("PLA", 0), ("TPU", 0), ("PEBA", 0), ("PVA", 0), ("PETG", 1), ("PCTG", 1), ("ABS", 2), ("ASA", 2),
@@ -612,6 +628,57 @@ class MyNames:
                 data["names"] = ([[maker, name]] + [n for n in data["names"] if n != [maker, name]])[:MY_NAMES_LIMIT]
             self.path.write_text(json.dumps(data, ensure_ascii=False))
             return data
+
+
+class MyPlastics:
+    """The user's plastics for spools without a tag: maker, name, material, color and the weight
+    of a full spool. Picked for a slot from the Fluidd card (see usage's fluidd_card.py)."""
+
+    def __init__(self, path=MY_PLASTICS_FILE):
+        self.path = path
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def clean(item):
+        """A valid plastic or None."""
+        if not isinstance(item, dict):
+            return None
+        maker, name = MyNames._text(item.get("maker")), MyNames._text(item.get("name"))
+        filament, color, grams = item.get("filament"), item.get("color"), item.get("grams")
+        if not isinstance(filament, str) or not re.fullmatch(r"QF[A-Z0-9]{2,4}", filament) \
+                or not isinstance(color, str) or not re.fullmatch(r"[0-9A-F]{6}", color) \
+                or isinstance(grams, bool) or not isinstance(grams, int) or not 0 < grams <= 5000:
+            return None
+        plastic_id = item.get("id")
+        if not isinstance(plastic_id, str) or not re.fullmatch(r"[0-9a-z]{1,16}", plastic_id):
+            return None
+        return {"id": plastic_id, "maker": maker, "name": name, "filament": filament, "color": color, "grams": grams}
+
+    def load(self):
+        try:
+            items = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [p for p in map(self.clean, items if isinstance(items, list) else []) if p][:MY_PLASTICS_LIMIT]
+
+    def change(self, add=None, remove=None):
+        plastic = None
+        if add is not None:
+            plastic = self.clean(add)
+            if plastic is None:
+                raise TagError("Пластик: проверь материал, цвет и вес")
+        with self.lock:
+            items = [p for p in self.load() if p["id"] not in (remove, plastic and plastic["id"])]
+            if plastic:
+                items.insert(0, plastic)
+            self.path.write_text(json.dumps(items[:MY_PLASTICS_LIMIT], ensure_ascii=False), encoding="utf-8")
+            return items[:MY_PLASTICS_LIMIT]
+
+    def find(self, plastic_id):
+        for plastic in self.load():
+            if plastic["id"] == plastic_id:
+                return plastic
+        raise TagError("Такого пластика нет в списке")
 
 
 class MyColors:
@@ -1034,7 +1101,8 @@ def build_block(material, color, vendor, tail_hex):
 
 
 class App:
-    def __init__(self, transport=None, printer=None, my_colors=None, my_materials=None, my_names=None):
+    def __init__(self, transport=None, printer=None, my_colors=None, my_materials=None, my_names=None,
+                 my_plastics=None):
         self.lock = threading.Lock()
         # Separate from the USB lock: a Box read waits for a tag and must not hold up the status.
         self.box_lock = threading.Lock()
@@ -1043,6 +1111,19 @@ class App:
         self.my_colors = my_colors or MyColors()
         self.my_materials = my_materials or MyMaterials()
         self.my_names = my_names or MyNames()
+        self.my_plastics = my_plastics or MyPlastics()
+
+    def change_plastics(self, body):
+        items = self.my_plastics.change(body.get("add"), body.get("remove"))
+        if isinstance(body.get("add"), dict):
+            self.my_names.remember(body["add"].get("maker"), body["add"].get("name"))
+        return {"my_plastics": items, "my_names": self.my_names.load()}
+
+    def pick_plastic(self, body):
+        """Puts a plastic of the list in a slot without a tag, with the grams on the spool."""
+        plastic = self.my_plastics.find(body.get("id"))
+        self._require_printer().pick_plastic(body.get("index"), plastic, body.get("grams"))
+        return {"ok": True}
 
     def _tag(self):
         if printer_mode:
@@ -1290,7 +1371,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._host_ok():
             return self._send(403, {"error": "forbidden"})
-        if self.path == "/":
+        # The page with a query too: ?pick=<slot> is the plastic window of the Fluidd card.
+        if self.path.split("?", 1)[0] == "/":
             return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
         if self.path == "/api/status":
             return self._send(200, self.app.status())
@@ -1302,6 +1384,7 @@ class Handler(BaseHTTPRequestHandler):
                 "my_colors": self.app.my_colors.load(),
                 "my_materials": self.app.my_materials.load(),
                 "my_names": self.app.my_names.load(),
+                "my_plastics": self.app.my_plastics.load(),
                 "on_printer": printer_mode,
                 "features": sorted(features),
                 "box_readers": [{"id": key, "name": value[1]} for key, value in BOX_READERS.items()]
@@ -1371,6 +1454,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.app.save_tag_rule(body))
             if self.path == "/api/spool":
                 return self._send(200, self.app.set_spool(body))
+            if self.path == "/api/my_plastics":
+                return self._send(200, self.app.change_plastics(body))
+            if self.path == "/api/spool_pick":
+                return self._send(200, self.app.pick_plastic(body))
             if self.path == "/api/slot_read":
                 return self._send(200, self.app.read_slot(body))
             if self.path == "/api/feed_mode" and "spools" in features:
@@ -1477,6 +1564,20 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .spool-quick button{flex:1;font:inherit;font-size:14px;color:inherit;background:transparent;border:1px solid var(--line);border-radius:8px;padding:7px 8px;cursor:pointer}
 .spool-amount{display:flex;align-items:center;gap:8px;font-size:14px}
 .spool-amount input{width:110px;padding:8px 9px;font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px}
+.pick-mode header{display:none}
+.pick-mode main{max-width:none;padding:16px 16px 24px}
+.pick-head{font-size:18px;margin:0 0 4px}
+.pick-list{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.pick-row{display:flex;align-items:center;gap:4px;padding:4px 6px;background:var(--card);border:1px solid var(--line);border-radius:10px}
+.pick-row.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.pick-item{flex:1;display:flex;align-items:center;gap:12px;min-width:0;padding:4px;border:0;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.pick-spool{flex:none;width:42px;height:42px}.pick-spool svg{width:100%;height:100%}
+.pick-text{display:flex;flex-direction:column;min-width:0}
+.pick-text b,.pick-text small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pick-text small{color:var(--muted);font-size:13px}
+.pick-tool{flex:none;padding:6px 9px;border:0;border-radius:8px;background:none;color:var(--muted);font:inherit;cursor:pointer}
+.pick-tool:hover{background:var(--bg)}.pick-tool.sure{color:var(--err);font-size:13px}
+.pick-form{margin-top:12px}.pick-weight{margin-top:12px}
+.pick-put{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
 .find-slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:12px}
 .find-slots[hidden]{display:none}
 @media (max-width:640px){.find-slots{grid-template-columns:1fr}}
@@ -1901,6 +2002,26 @@ dialog .actions{justify-content:flex-end;margin:0}
 <div class="type-list" id="type-list"></div>
 </div>
 </main>
+<div id="panel-pick" hidden>
+<h2 class="pick-head" id="pick-title">Пластик</h2>
+<p class="hint">Катушка без метки: выбери пластик из своего списка, подтянутся материал, цвет и вес.</p>
+<input type="text" id="pick-find" placeholder="Поиск: производитель, название, материал" autocomplete="off">
+<div class="pick-list" id="pick-list"></div>
+<div class="actions"><button class="action alt" id="pick-new" type="button">+ Новый пластик</button></div>
+<div class="card pick-form" id="pick-form" hidden>
+<div class="names"><div><label class="field" for="pick-maker">Производитель</label><div class="combo"><input type="text" id="pick-maker" maxlength="40" placeholder="Выбери или впиши" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="pick-maker-menu"><button type="button" class="combo-open" tabindex="-1" aria-label="Показать список"></button><div class="combo-menu" id="pick-maker-menu" role="listbox" hidden></div></div></div>
+<div><label class="field" for="pick-name">Название пластика</label><div class="combo"><input type="text" id="pick-name" maxlength="40" placeholder="Выбери или впиши" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="pick-name-menu"><button type="button" class="combo-open" tabindex="-1" aria-label="Показать список"></button><div class="combo-menu" id="pick-name-menu" role="listbox" hidden></div></div></div></div>
+<label class="field">Материал в принтере</label><div id="pick-material"></div>
+<label class="field">Цвет</label><div id="pick-picker"></div>
+<label class="spool-amount pick-weight">Вес полной катушки<input id="pick-weight" type="number" min="1" max="5000" step="10" value="1000"> г</label>
+<div class="actions"><button class="action" id="pick-save" type="button">Сохранить в список</button><button class="action alt" id="pick-cancel" type="button">Отмена</button></div>
+</div>
+<div class="pick-put" id="pick-put" hidden>
+<label class="spool-amount">На катушке<input id="pick-grams" type="number" min="0" max="5000" step="10"> г</label>
+<button class="action" id="pick-apply" type="button">Поставить</button>
+</div>
+<div class="note" id="pick-msg" role="status"></div>
+</div>
 <dialog id="sample-dialog"><h2>Напечатать образцы</h2>
 <p>Укажи, сколько образцов напечатать каждой катушкой. Карандаш меняет надпись на образце.</p>
 <div class="sample-layout"><div id="sample-rows"></div>
@@ -3284,8 +3405,106 @@ async function loadSlots(){
     hint.textContent="Нажми на карточку, чтобы выбрать, какой материал и цвет QIDI использовать для этой метки.";
   }catch(e){hint.textContent=e.message}
 }
+/* A plastic for a spool without a tag: the Fluidd card opens this page as ?pick=<slot> in a frame.
+   The form is the NFC tab's: maker and name with the lists, material by type, the palette. */
+const PICK=new URLSearchParams(location.search).get("pick");
+let pickSlot=null,pickChosen=null,pickEditing=null,pickRemoving=null,pickMaterial=null,pickPicker=null;
+const plasticTitle=p=>[p.maker,p.name].filter(Boolean).join(" ")||materialName(p.filament);
+function pickSay(text,cls){const m=$("pick-msg");m.textContent=text||"";m.className="note"+(cls?" "+cls:"")}
+function renderPickList(){
+  const q=$("pick-find").value.trim().toLowerCase(),box=$("pick-list"),all=state.codes.my_plastics||[];
+  const items=all.filter(p=>!q||[p.maker,p.name,materialName(p.filament)].join(" ").toLowerCase().includes(q));
+  box.replaceChildren();
+  $("pick-find").hidden=all.length<6;
+  if(!items.length)box.append(el("p","hint",all.length?"Ничего не нашлось":"Своих пластиков пока нет. Добавь пластик один раз, дальше он выбирается из списка."));
+  items.forEach(p=>{
+    const row=el("div","pick-row"+(pickChosen&&pickChosen.id===p.id?" on":""));
+    const b=el("button","pick-item");b.type="button";
+    const pic=el("span","pick-spool");pic.innerHTML=spool(p.color);
+    const text=el("span","pick-text");text.append(el("b","",plasticTitle(p)),el("small","",`${materialName(p.filament)} · #${p.color} · ${p.grams} г`));
+    b.append(pic,text);
+    b.onclick=()=>{pickChosen=p;pickRemoving=null;$("pick-grams").value=p.grams;renderPickList();$("pick-put").hidden=false;pickSay("")};
+    const edit=el("button","pick-tool","✎");edit.type="button";edit.title="Изменить";edit.onclick=()=>openPickForm(p);
+    const x=el("button","pick-tool"+(pickRemoving===p.id?" sure":""),pickRemoving===p.id?"Удалить?":"×");x.type="button";x.title="Убрать из списка";
+    x.onclick=async()=>{
+      if(pickRemoving!==p.id){pickRemoving=p.id;renderPickList();return}
+      try{
+        state.codes.my_plastics=(await api("/api/my_plastics",{remove:p.id})).my_plastics;
+        if(pickChosen&&pickChosen.id===p.id){pickChosen=null;$("pick-put").hidden=true}
+      }catch(e){pickSay(e.message,"err")}
+      pickRemoving=null;renderPickList();
+    };
+    row.append(b,edit,x);box.append(row);
+  });
+}
+function openPickForm(p){
+  pickEditing=p||null;
+  const slot=pickSlot||{};
+  const filament=p?p.filament:slot.filament,color=p?p.color:slot.color;
+  $("pick-maker").value=p?p.maker:"";$("pick-name").value=p?p.name:"";
+  pickMaterial=makeMaterialField($("pick-material"),slotMaterialItems(filament),filament);
+  pickPicker.set(isHex(color)?color:"FAFAFA");
+  $("pick-weight").value=p?p.grams:1000;
+  $("pick-save").textContent=p?"Сохранить":"Сохранить в список";
+  $("pick-form").hidden=false;$("pick-new").hidden=true;pickSay("");
+  $("pick-form").scrollIntoView({block:"nearest"});
+}
+function closePickForm(){$("pick-form").hidden=true;$("pick-new").hidden=false;pickEditing=null}
+makeCombo($("pick-maker"),()=>{
+  const mine=myNames().makers;
+  return [{title:mine.length?"Ты уже вводил":"",items:mine},{title:"Известные",items:KNOWN_MAKERS.filter(m=>!mine.includes(m))}];
+});
+makeCombo($("pick-name"),()=>{
+  const maker=$("pick-maker").value.trim(),names=myNames().names;
+  const own=names.filter(n=>maker&&n[0]===maker).map(n=>n[1]);
+  const rest=names.filter(n=>!maker||n[0]!==maker).map(n=>n[1]).filter(n=>!own.includes(n));
+  return [{title:own.length?`У ${maker}`:"",items:own},{title:own.length?"Другие":"Ты уже вводил",items:rest}];
+});
+$("pick-find").oninput=renderPickList;
+$("pick-new").onclick=()=>openPickForm(null);
+$("pick-cancel").onclick=closePickForm;
+$("pick-save").onclick=async()=>{
+  const grams=Number($("pick-weight").value);
+  if(!Number.isInteger(grams)||grams<1||grams>5000){pickSay("Вес полной катушки: целое число от 1 до 5000","err");return}
+  const add={id:pickEditing?pickEditing.id:Date.now().toString(36),maker:$("pick-maker").value.trim(),name:$("pick-name").value.trim(),
+    filament:pickMaterial.get(),color:pickPicker.get(),grams};
+  $("pick-save").disabled=true;
+  try{
+    const r=await api("/api/my_plastics",{add});
+    state.codes.my_plastics=r.my_plastics;state.codes.my_names=r.my_names;
+    pickChosen=r.my_plastics.find(p=>p.id===add.id);$("pick-grams").value=grams;$("pick-put").hidden=false;
+    closePickForm();renderPickList();
+  }catch(e){pickSay(e.message,"err")}
+  finally{$("pick-save").disabled=false}
+};
+$("pick-apply").onclick=async()=>{
+  const grams=Number($("pick-grams").value);
+  if(!Number.isInteger(grams)||grams<0||grams>5000){pickSay("На катушке: целое число от 0 до 5000","err");return}
+  $("pick-apply").disabled=true;
+  try{
+    await api("/api/spool_pick",{index:pickSlot.index,id:pickChosen.id,grams});
+    const printing=["printing","paused"].includes(pickSlot.state);
+    pickSay(printing?"Готово. Остаток считается сразу, материал и цвет слота запишутся после печати":"Готово","ok");
+    setTimeout(()=>parent.postMessage({qidiPick:"done"},"*"),printing?2500:900);
+  }catch(e){pickSay(e.message,"err");$("pick-apply").disabled=false}
+};
+async function startPick(){
+  document.body.classList.add("pick-mode");
+  $("panel-slots").hidden=true;$("panel-pick").hidden=false;
+  pickPicker=makePicker($("pick-picker"),"FAFAFA",()=>{});
+  try{
+    const data=await api("/api/slots");
+    pickSlot=data.slots.find(s=>s.index===Number(PICK));
+    if(!pickSlot)throw new Error("Нет такого слота");
+    pickSlot.state=data.state;
+    $("pick-title").textContent=`Пластик для ${pickSlot.label}`;$("pick-apply").textContent=`Поставить в ${pickSlot.label}`;
+  }catch(e){pickSay(e.message,"err");return}
+  renderPickList();
+  if(!(state.codes.my_plastics||[]).length)openPickForm(null);
+}
 (async()=>{
   state.codes=await api("/api/codes");
+  if(PICK!==null){startPick();return}
   const has=name=>state.codes.features.includes(name);
   $("tab-tags").hidden=!has("nfc");
   $("tab-guide").hidden=!has("guide");

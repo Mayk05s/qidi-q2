@@ -4,10 +4,9 @@ and a card under it that warns when the running or the newest print will not las
 The Fluidd page loads SCRIPT from the panel (see qidi_panel_link.js); the data comes from
 /api/fluidd, which the panel answers to the printer's own page.
 
-A spool without a tag is picked from the user's own list of plastics: a click on its tile opens the
-list. The list is my_plastics.json next to printer.cfg, the choice goes to bambu_spool_usage as
-spool_pick_<slot>.json there; both through Moonraker on the Fluidd page's own address, which the
-panel's server does not take writes from.
+A spool without a tag gets its plastic from the user's own list: a click on its tile opens the
+panel's page as /?pick=<slot> in a frame, with the panel's own form. The panel keeps the list and
+hands the choice to bambu_spool_usage as spool_pick_<slot>.json next to printer.cfg.
 """
 
 
@@ -30,7 +29,7 @@ def card_data(slots, check):
 
 
 SCRIPT = r"""(function(){
-var API=location.protocol+"//"+location.hostname+":18770/api/fluidd";
+var PANEL=location.protocol+"//"+location.hostname+":18770",API=PANEL+"/api/fluidd";
 var data=null,busy=false;
 var style=document.createElement("style");
 style.textContent=[
@@ -62,30 +61,10 @@ style.textContent=[
 "@media (max-width:700px){#qidi-plastic-card .qg{grid-template-columns:repeat(2,minmax(0,1fr))}}",
 "#qidi-plastic-card .qt.pick{cursor:pointer}#qidi-plastic-card .qt.pick:hover{border-color:rgba(127,127,127,.55)}",
 "#qidi-plastic-card .qpk{font-size:12px;font-weight:600;color:#7fa8f5;margin-top:3px}",
-"#qidi-pick{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55);font-family:inherit}",
-"#qidi-pick .qp{width:100%;max-width:440px;max-height:calc(100vh - 32px);display:flex;flex-direction:column;border-radius:8px;background:#262626;color:#e8e8e3;box-shadow:0 12px 40px rgba(0,0,0,.5);overflow:hidden}",
-"#qidi-pick.light .qp{background:#fff;color:#1d1d1b}",
-"#qidi-pick .qph{display:flex;align-items:center;gap:10px;padding:14px 16px;font-size:16px;font-weight:500;border-bottom:1px solid rgba(127,127,127,.22)}",
-"#qidi-pick .qph span{flex:1}#qidi-pick button{font:inherit;color:inherit;cursor:pointer}",
-"#qidi-pick .qx{border:0;background:none;font-size:22px;line-height:1;opacity:.7;padding:0 4px}",
-"#qidi-pick .qpb{padding:12px 16px;overflow:auto;display:flex;flex-direction:column;gap:8px}",
-"#qidi-pick .qr{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border-radius:8px;border:1px solid rgba(127,127,127,.25);background:rgba(127,127,127,.06);text-align:left}",
-"#qidi-pick .qr.on{border-color:#7fa8f5;background:rgba(127,168,245,.14)}",
-"#qidi-pick .qd{flex:none;width:22px;height:22px;border-radius:50%;border:1px solid rgba(127,127,127,.5)}",
-"#qidi-pick .qr .qn{flex:1;min-width:0}#qidi-pick .qr .t{font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-"#qidi-pick .qr .s{font-size:12px;opacity:.65}",
-"#qidi-pick .qdel{flex:none;border:0;background:none;opacity:.55;font-size:12px;padding:4px 6px;border-radius:6px}#qidi-pick .qdel.sure{opacity:1;color:#ff7b7b;background:rgba(255,82,82,.14)}",
-"#qidi-pick .qempty{font-size:13px;opacity:.7}",
-"#qidi-pick .qbtn{padding:8px 14px;border-radius:6px;border:1px solid rgba(127,127,127,.35);background:rgba(127,127,127,.1);font-size:13px;font-weight:600;letter-spacing:.02em}",
-"#qidi-pick .qbtn.main{border-color:#7fa8f5;background:#7fa8f5;color:#10131a}#qidi-pick .qbtn:disabled{opacity:.45;cursor:default}",
-"#qidi-pick label{display:flex;flex-direction:column;gap:4px;font-size:12px;opacity:.85}",
-"#qidi-pick input,#qidi-pick select{font:inherit;font-size:14px;color:inherit;background:rgba(127,127,127,.1);border:1px solid rgba(127,127,127,.35);border-radius:6px;padding:7px 9px}",
-"#qidi-pick select option{color:#1d1d1b}",
-"#qidi-pick .qsw{display:flex;flex-wrap:wrap;gap:6px}#qidi-pick .qsw button{width:26px;height:26px;border-radius:50%;border:2px solid transparent;padding:0;box-shadow:inset 0 0 0 1px rgba(127,127,127,.5)}",
-"#qidi-pick .qsw button.on{border-color:#7fa8f5}#qidi-pick .qsw input[type=color]{width:30px;height:28px;padding:0 2px}",
-"#qidi-pick .qrow{display:flex;gap:8px;align-items:flex-end}#qidi-pick .qrow label{flex:1}",
-"#qidi-pick .qpf{display:flex;gap:8px;align-items:flex-end;padding:12px 16px;border-top:1px solid rgba(127,127,127,.22)}#qidi-pick .qpf label{flex:1}",
-"#qidi-pick .qmsg{font-size:12px;padding:0 16px 12px;opacity:.85}#qidi-pick .qmsg.err{color:#ff7b7b;opacity:1}#qidi-pick .qmsg:empty{display:none}"
+"#qidi-pick{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55)}",
+"#qidi-pick .qp{position:relative;width:100%;max-width:560px;height:min(760px,calc(100vh - 32px));border-radius:12px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.5);background:#21211f}",
+"#qidi-pick iframe{width:100%;height:100%;border:0;display:block}",
+"#qidi-pick .qx{position:absolute;top:8px;right:10px;z-index:1;width:32px;height:32px;border:0;border-radius:50%;background:rgba(127,127,127,.25);color:#fff;font-size:20px;line-height:1;cursor:pointer}"
 ].join("");
 document.head.appendChild(style);
 var ICON_SPOOL='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>';
@@ -99,115 +78,21 @@ function spoolSvg(color){
 }
 function g(n){return Math.round(n)+" г"}
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
-// The user's plastics and the pick for a spool without a tag: files next to printer.cfg, written
-// through Moonraker at the Fluidd page's own address.
-var FILES=location.origin+"/server/files/";
-async function readList(){
-  var res=await fetch(FILES+"config/my_plastics.json",{cache:"no-store"});
-  if(res.status===404)return [];
-  if(!res.ok)throw new Error("Список не прочитался");
-  var list=await res.json();
-  return Array.isArray(list)?list.filter(function(p){return p&&p.name&&/^QF[A-Z0-9]{2,4}$/.test(p.filament)&&/^[0-9A-F]{6}$/.test(p.color)}):[];
-}
-async function upload(name,value){
-  var form=new FormData();form.append("root","config");
-  form.append("file",new Blob([JSON.stringify(value)],{type:"application/json"}),name);
-  var res=await fetch(FILES+"upload",{method:"POST",body:form});
-  if(!res.ok)throw new Error("Принтер не принял файл");
-}
-async function materialList(){
-  var res=await fetch(API.replace(/fluidd$/,"codes"));
-  var codes=await res.json(),my=codes.my_materials||{ids:[],types:[]};
-  var all=codes.slot_materials||[];
-  var mine=all.filter(function(m){return my.ids.indexOf(m.id)>=0&&(!my.types.length||my.types.indexOf(m.type)>=0)});
-  var colors=(codes.my_colors||[]).concat((codes.colors||[]).map(function(c){return c.hex.replace("#","").toUpperCase()}));
-  return {materials:mine.length?mine:all,all:all,colors:colors.filter(function(c,i){return colors.indexOf(c)===i})};
-}
+// A spool without a tag gets its plastic in the panel's own form (maker and name with the lists,
+// material by type, the palette), opened in a frame; the panel says when it is done.
 function openPick(spool){
   var old=document.getElementById("qidi-pick");if(old)old.remove();
-  var light=!!document.querySelector(".theme--light")&&!document.querySelector(".theme--dark");
-  var bg=el("div",light?"light":null);bg.id="qidi-pick";
+  var bg=el("div");bg.id="qidi-pick";
   var box=el("div","qp");bg.appendChild(box);
-  var head=el("div","qph");head.appendChild(el("span",null,"Пластик для "+spool.label));
-  var close=el("button","qx","×");close.title="Закрыть";head.appendChild(close);box.appendChild(head);
-  var body=el("div","qpb");box.appendChild(body);
-  var foot=el("div","qpf");box.appendChild(foot);
-  var msg=el("div","qmsg");box.appendChild(msg);
-  var list=[],codes={materials:[],all:[],colors:[]},chosen=null,deleting=null;
-  function done(){bg.remove();document.removeEventListener("keydown",onKey)}
+  var close=el("button","qx","×");close.title="Закрыть";box.appendChild(close);
+  var frame=document.createElement("iframe");frame.title="Пластик для "+spool.label;
+  frame.src=PANEL+"/?pick="+spool.index;box.appendChild(frame);
+  function done(){bg.remove();window.removeEventListener("message",onMessage);document.removeEventListener("keydown",onKey)}
+  function onMessage(e){if(e.source===frame.contentWindow&&e.data&&e.data.qidiPick==="done"){done();setTimeout(load,1500)}}
   function onKey(e){if(e.key==="Escape")done()}
-  function say(text,bad){msg.textContent=text||"";msg.className="qmsg"+(bad?" err":"")}
-  function materialName(id){for(var i=0;i<codes.all.length;i++)if(codes.all[i].id===id)return codes.all[i].name;return id}
-  close.onclick=done;bg.onclick=function(e){if(e.target===bg)done()};document.addEventListener("keydown",onKey);
-  function showList(){
-    body.textContent="";foot.textContent="";
-    if(!list.length)body.appendChild(el("div","qempty","Своих пластиков пока нет. Добавь пластик один раз, дальше он выбирается из списка."));
-    list.forEach(function(p){
-      var row=el("button","qr"+(chosen===p?" on":""));
-      var dot=el("span","qd");dot.style.background="#"+p.color;row.appendChild(dot);
-      var n=el("span","qn");n.appendChild(el("div","t",p.name));n.appendChild(el("div","s",materialName(p.filament)+" · "+p.grams+" г"));row.appendChild(n);
-      var del=el("span","qdel"+(deleting===p?" sure":""),deleting===p?"Удалить?":"✕");del.title="Убрать из списка";row.appendChild(del);
-      row.onclick=async function(e){
-        if(e.target===del){
-          if(deleting!==p){deleting=p;return showList()}
-          var rest=list.filter(function(x){return x!==p});
-          try{await upload("my_plastics.json",rest);list=rest;if(chosen===p)chosen=null;deleting=null;say("")}catch(err){say(err.message,true)}
-          return showList();
-        }
-        chosen=p;deleting=null;showList();
-      };
-      body.appendChild(row);
-    });
-    var add=el("button","qbtn","+ Добавить пластик");add.onclick=function(){showForm()};body.appendChild(add);
-    if(!chosen)return;
-    var grams=el("input");grams.type="number";grams.min=0;grams.max=5000;grams.value=chosen.grams;
-    var label=el("label",null,"Сколько на катушке, г");label.appendChild(grams);foot.appendChild(label);
-    var put=el("button","qbtn main","Поставить в "+spool.label);foot.appendChild(put);
-    put.onclick=async function(){
-      var value=parseInt(grams.value,10);
-      if(!(value>=0&&value<=5000)){say("Вес от 0 до 5000 г",true);return}
-      put.disabled=true;
-      try{
-        await upload("spool_pick_"+spool.index+".json",{name:chosen.name,filament:chosen.filament,color:chosen.color,grams:value});
-        say(data&&data.printing?"Готово. Остаток считается сразу, материал и цвет слота поменяются после печати":"Готово");
-        setTimeout(load,2500);setTimeout(done,data&&data.printing?2500:900);
-      }catch(err){say(err.message,true);put.disabled=false}
-    };
-  }
-  function showForm(){
-    body.textContent="";foot.textContent="";say("");
-    var name=el("input");name.maxLength=40;name.placeholder="Например, eSun PLA+ чёрный";
-    var l1=el("label",null,"Название");l1.appendChild(name);body.appendChild(l1);
-    var select=el("select");codes.materials.forEach(function(m){var o=el("option",null,m.name);o.value=m.id;select.appendChild(o)});
-    var l2=el("label",null,"Материал в принтере");l2.appendChild(select);body.appendChild(l2);
-    var color=codes.colors[0]||"FAFAFA";
-    var l3=el("label",null,"Цвет");var sw=el("div","qsw");l3.appendChild(sw);body.appendChild(l3);
-    var custom=el("input");custom.type="color";custom.title="Свой цвет";
-    function paint(){
-      sw.textContent="";
-      codes.colors.forEach(function(c){var b=el("button",c===color?"on":null);b.type="button";b.style.background="#"+c;b.title="#"+c;b.onclick=function(){color=c;paint()};sw.appendChild(b)});
-      custom.value="#"+color.toLowerCase();sw.appendChild(custom);
-    }
-    custom.oninput=function(){color=custom.value.replace("#","").toUpperCase();paint()};
-    paint();
-    var weight=el("input");weight.type="number";weight.min=1;weight.max=5000;weight.value=1000;
-    var l4=el("label",null,"Вес полной катушки, г");l4.appendChild(weight);body.appendChild(l4);
-    var cancel=el("button","qbtn","Отмена");cancel.onclick=function(){showList()};foot.appendChild(cancel);
-    var save=el("button","qbtn main","Сохранить");foot.appendChild(save);
-    save.onclick=async function(){
-      var p={id:Date.now().toString(36),name:name.value.trim().replace(/\s+/g," "),filament:select.value,color:color,grams:parseInt(weight.value,10)};
-      if(!p.name){say("Впиши название",true);return}
-      if(!(p.grams>0&&p.grams<=5000)){say("Вес от 1 до 5000 г",true);return}
-      save.disabled=true;
-      try{await upload("my_plastics.json",list.concat([p]));list=list.concat([p]);chosen=p;say("");showList()}
-      catch(err){say(err.message,true);save.disabled=false}
-    };
-    name.focus();
-  }
+  close.onclick=done;bg.onclick=function(e){if(e.target===bg)done()};
+  window.addEventListener("message",onMessage);document.addEventListener("keydown",onKey);
   document.body.appendChild(bg);
-  say("Загружаю список…");
-  Promise.all([readList(),materialList()]).then(function(r){list=r[0];codes=r[1];say("");showList()})
-    .catch(function(err){say(err.message||"Список не загрузился",true)});
 }
 function boxCard(){
   // The innermost card whose title is the Box card's, in Russian or English Fluidd.

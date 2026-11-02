@@ -694,6 +694,47 @@ class SpoolTests(unittest.TestCase):
         self.assertEqual(printer.sent, [])
 
 
+class MyPlasticsTests(unittest.TestCase):
+    PLASTIC = {"id": "a1", "maker": "eSun", "name": "PLA+ сиреневый", "filament": "QFA01", "color": "A878FF", "grams": 1000}
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.files = {}
+        printer = q.Printer("printer", fetch=lambda path, post=False: {})
+        printer.upload = self.files.__setitem__
+        self.app = q.App(printer=printer, my_plastics=q.MyPlastics(pathlib.Path(d.name) / "p.json"),
+                         my_names=q.MyNames(pathlib.Path(d.name) / "n.json"))
+
+    def test_add_edit_remove_and_remember_names(self):
+        r = self.app.change_plastics({"add": self.PLASTIC})
+        self.assertEqual(r["my_plastics"], [self.PLASTIC])
+        self.assertEqual(r["my_names"]["names"], [["eSun", "PLA+ сиреневый"]])
+        edited = dict(self.PLASTIC, grams=750)
+        self.assertEqual(self.app.change_plastics({"add": edited})["my_plastics"], [edited])
+        self.assertEqual(self.app.change_plastics({"remove": "a1"})["my_plastics"], [])
+
+    def test_bad_plastic_is_refused(self):
+        for bad in (dict(self.PLASTIC, filament="PLA"), dict(self.PLASTIC, color="a878ff"),
+                    dict(self.PLASTIC, grams=0), dict(self.PLASTIC, grams=True), dict(self.PLASTIC, id="A B")):
+            with self.assertRaises(q.TagError):
+                self.app.change_plastics({"add": bad})
+
+    def test_pick_hands_the_plastic_to_the_usage_module(self):
+        self.app.change_plastics({"add": self.PLASTIC})
+        self.app.pick_plastic({"index": 1, "id": "a1", "grams": 640})
+        self.assertEqual(q.json.loads(self.files["spool_pick_1.json"]),
+                         {"name": "eSun PLA+ сиреневый", "filament": "QFA01", "color": "A878FF", "grams": 640})
+        # Without a maker and a name the slot shows the material.
+        self.app.change_plastics({"add": dict(self.PLASTIC, id="b2", maker="", name="")})
+        self.app.pick_plastic({"index": 0, "id": "b2", "grams": 10})
+        self.assertEqual(q.json.loads(self.files["spool_pick_0.json"])["name"], "QIDI PLA Matte Basic")
+        with self.assertRaises(q.TagError):
+            self.app.pick_plastic({"index": 0, "id": "zz", "grams": 10})
+        with self.assertRaises(q.PrinterError):
+            self.app.pick_plastic({"index": 7, "id": "a1", "grams": 10})
+
+
 class OpenSamplesTests(unittest.TestCase):
     def app(self):
         app = q.App()

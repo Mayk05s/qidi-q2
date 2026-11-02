@@ -1,6 +1,6 @@
 {
   "id": "panel",
-  "version": "1.7.5",
+  "version": "1.8.0",
   "hidden": true,
   "title": "Панель на принтере",
   "summary": "Страница слотов, меток и материалов на порту 18770",
@@ -55,7 +55,8 @@
   "changes": [
     "fluidd/index.html: одна строка, кнопки панели в меню Fluidd",
     "fluidd/qidi_panel_link.js: добавляется",
-    "Служба qidi-panel: /etc/systemd/system/qidi-panel.service"
+    "Служба qidi-panel: /etc/systemd/system/qidi-panel.service",
+    "qidi_panel/my_plastics.json: твой список пластиков для катушек без метки, при удалении остаётся"
   ],
   "service": "box_patch/packages/panel/printer/qidi-panel.service",
   "fluidd_script": "box_patch/packages/panel/printer/qidi_panel_link.js",
