@@ -933,9 +933,6 @@ struct ModuleRow: View {
                             Badge(text: "на принтере " + (installedVersion.map { "v" + $0 } ?? "старая версия"),
                                   color: .orange)
                         }
-                        if !oldParts.isEmpty {
-                            Badge(text: "обновится: " + oldParts.joined(separator: ", "), color: .orange)
-                        }
                         if let change { Badge(text: change.text, color: change.color) }
                     }
                 }
@@ -954,6 +951,12 @@ struct ModuleRow: View {
             if expanded {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(feature.details).fixedSize(horizontal: false, vertical: true)
+                    if outdated {
+                        Label("Будет обновлено: " + ((ownOld ? [feature.title] : []) + oldParts).joined(separator: ", "),
+                              systemImage: "arrow.down.circle")
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if !feature.note.isEmpty {
                         Label(feature.note, systemImage: "checklist").foregroundStyle(.secondary)
                     }

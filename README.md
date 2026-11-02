@@ -30,7 +30,7 @@ python3 -B installer/build_app.py
 |---|---|
 | Метки Bambu | [box_patch/packages/bambu](box_patch/packages/bambu/README.md) |
 | NFC-метки | [box_patch/packages/nfc](box_patch/packages/nfc/README.md) |
-| Несколько катушек сразу | [box_patch/packages/spools](box_patch/packages/spools/README.md) |
+| Мультиподача | [box_patch/packages/spools](box_patch/packages/spools/README.md) |
 | Расход пластика | [box_patch/packages/usage](box_patch/packages/usage/README.md) |
 | Быстрая печать | [box_patch/packages/mesh](box_patch/packages/mesh/README.md) |
 | Справка по пластику | [box_patch/packages/guide](box_patch/packages/guide/README.md) |
