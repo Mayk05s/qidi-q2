@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+import pathlib
+import sys
+
+# The tested files are those copied to the printer, in ../printer; bambu_rfid.py comes from the
+# rfid_core package. On the printer they all sit in klippy/extras.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "rfid_core" / "printer"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "printer"))
 import unittest
 
 import box_feed as b
@@ -294,18 +302,6 @@ class InsertWatchTests(EjectTests):
         self.assertFalse(moved[0][2])
         self.assertEqual(inserted, [(1, 12., 13.), (3, 12., 13.)])
 
-    def test_without_the_spools_package_spools_go_the_safe_length(self):
-        self.present(1)
-        moved, scripts = [], []
-        self.printer.run_script = scripts.append
-        self.mover.start_sequence = lambda slots, moves, finish: moved.append((slots, moves, finish))
-        self.mover.feed_pending.add(1)
-        self.mover.feed_timer = "timer"
-        self.mover._run_feeds(12.)
-        self.assertEqual([move[0] for move in moved[0][1]],
-                         [b.FEED_CATCH_LENGTH, -b.FEED_CATCH_LENGTH, b.FEED_LENGTH])
-        self.assertEqual(scripts, ["SAVE_VARIABLE VARIABLE=slot1 VALUE=1"])
-
     class Pair:
         def __init__(self, inserted):
             self.inserted = inserted
@@ -350,7 +346,6 @@ class InsertWatchTests(EjectTests):
         self.assertEqual(self.mover.feed_pending, {2})
 
     def test_all_spools_start_together(self):
-        self.mover._start_pair_feeds = lambda slots: self.assertEqual(slots, [0, 1, 2, 3])
         self.present(0, 1, 2, 3)
         self.mover.feed_pending.update({0, 1, 2, 3})
         self.mover.feed_timer = "timer"

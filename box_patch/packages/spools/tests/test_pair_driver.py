@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """PairDriver from pair_feed against the spool model of the emulator: the motors follow the
 pieces the driver plans, the spools turn with slack, and the reader sees what is at the antenna."""
-import pathlib
-import sys
 import unittest
 
-# box_feed.py belongs to the core in box_patch; on the printer both sit in klippy/extras.
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+import pathlib
+import sys
+
+# The tested files are those copied to the printer, in ../printer; bambu_rfid.py comes from the
+# rfid_core package. On the printer they all sit in klippy/extras.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "rfid_core" / "printer"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "printer"))
+import bambu_rfid  # noqa: E402
 import box_feed  # noqa: E402
 import pair_feed as b  # noqa: E402
 import pair_logic as p
@@ -112,15 +117,17 @@ class Bench:
     def respond_raw(self, text):
         self.scripts.append(text)
 
-    # reader
-    def read_for_pair(self):
+    # reader, as bambu_rfid sees it
+    proxy = None
+
+    def _read_slot_tag(self, timeout, uids, trays):
         seen = [name for slot, name in enumerate("AB")
                 if self.inserted[slot] and self.world._zone(self.world.state[name])]
-        kind = p.READ_COLLISION if len(seen) > 1 else p.READ_TAG if seen else p.READ_NONE
-        name = seen[0] if len(seen) == 1 else None
-        if kind == p.READ_TAG:
-            return kind, {"uid": name, "material": "PLA", "color": "ffffff"}
-        return kind, None
+        if len(seen) > 1:
+            raise bambu_rfid.SeveralTags("two tags")
+        if not seen:
+            raise bambu_rfid.TagAbsent("no tag")
+        return {"uid": seen[0], "material": "PLA", "color": "ffffff"}
 
     def insert(self, slot):
         self.inserted[slot] = True

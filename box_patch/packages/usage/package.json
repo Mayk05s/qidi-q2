@@ -1,6 +1,6 @@
 {
   "id": "usage",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "order": 4,
   "icon": "scalemass",
   "title": "Расход пластика",
@@ -11,6 +11,10 @@
     "bambu"
   ],
   "install": [
+    {
+      "from": "box_patch/packages/usage/printer/bambu_spool_usage.py",
+      "to": "klipper/klippy/extras/bambu_spool_usage.py"
+    },
     {
       "from": "box_patch/packages/usage/printer/print_check.py",
       "to": "qidi_panel/print_check.py"
@@ -33,15 +37,13 @@
     }
   ],
   "uninstall": [
+    "klipper/klippy/extras/bambu_spool_usage.py",
     "qidi_panel/print_check.py",
     "qidi_panel/fluidd_card.py",
     "qidi_panel/screen_popup.py",
     "qidi_panel/plastic_picture.py",
     "qidi_panel/slot_font.json"
   ],
-  "klipper_options": {
-    "spool_usage": true
-  },
   "changes": [
     "printer_data/config/spool_usage.json: остаток по катушкам, ведёт модуль bambu_rfid",
     "QIDI_Client/resource/qidi_client_error/QDC_300_002_005_003 и 004/0.json: штатные окна ошибок BOX 3 и 4 используются под окно «мало пластика». Копии штатных лежат в qidi_panel/screen_stock и возвращаются при удалении",
@@ -51,5 +53,6 @@
     "Fluidd: граммы под катушками и карточка добавляются скриптом панели fluidd_card.js через уже вставленный qidi_panel_link.js, файлы Fluidd не меняются"
   ],
   "setup": "box_patch/packages/usage/screen_popup_setup.py",
-  "panel_feature": "usage"
+  "panel_feature": "usage",
+  "klipper_config": "printer/bambu_spool_usage.cfg"
 }

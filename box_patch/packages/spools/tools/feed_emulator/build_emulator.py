@@ -9,8 +9,9 @@ import json
 import pathlib
 
 HERE = pathlib.Path(__file__).resolve().parent
-SOURCES = {name: (HERE.parent / name).read_text(encoding="utf-8")
-           for name in ("pair_logic.py", "test_pair_logic.py")}
+PACKAGE = HERE.parent.parent
+SOURCES = {"pair_logic.py": (PACKAGE / "printer" / "pair_logic.py").read_text(encoding="utf-8"),
+           "test_pair_logic.py": (PACKAGE / "tests" / "test_pair_logic.py").read_text(encoding="utf-8")}
 
 BRIDGE = r'''
 import json, random
@@ -135,7 +136,7 @@ S.logs.forEach((l,p)=>$('log'+p).textContent=l.join('\n'));
 const rep=S.slots.filter(s=>s.inserted).map((s,k)=>{const i=S.slots.indexOf(s),own='AB'[i%2];if(s.out)return s.label+': нить вышла';if(s.tag&&s.tag!==own)return s.label+': ЧУЖАЯ МЕТКА';if(s.tag)return s.label+': метка верная'+(s.pos>=s.limit&&!s.moving?', готова':'');if(s.noTag)return s.label+(s.has?': МЕТКА НЕ НАЙДЕНА':': меток нет, верно');return s.label+': ищем'});
 if(rep.length)$('res').textContent=rep.join(' · ')+(S.guards.some(x=>x)?' · СРАБОТАЛА ЗАЩИТА':'')}
 function frame(t){const dt=Math.min(.05,(t-last)/1000)*Math.max(1,num('px'));last=t;if(ready){py.globals.get('advance')(dt);draw()}requestAnimationFrame(frame)}
-(async()=>{py=await loadPyodide();for(const[n,src]of Object.entries(SOURCES))py.FS.writeFile(n,src);py.runPython(BRIDGE);ready=true;$('ver').textContent='Логика: pair_logic.py из box_patch, сборка '+BUILT+'. Это тот же файл, что ставится на принтер.';reset()})();
+(async()=>{py=await loadPyodide();for(const[n,src]of Object.entries(SOURCES))py.FS.writeFile(n,src);py.runPython(BRIDGE);ready=true;$('ver').textContent='Логика: pair_logic.py из пакета spools, сборка '+BUILT+'. Это тот же файл, что ставится на принтер.';reset()})();
 [0,1,2,3].forEach(i=>{$('i'+i).onclick=()=>py.globals.get('insert')(i);$('r'+i).onclick=()=>py.globals.get('reread')(i);['o','h'].forEach(k=>$(k+i).oninput=reset)});
 ['ps','pm','pg','ph','pd','pl'].forEach(i=>$(i).oninput=reset);$('rs').onclick=reset;
 $('all').onclick=()=>[0,1,2,3].forEach(i=>py.globals.get('insert')(i));

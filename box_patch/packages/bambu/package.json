@@ -13,7 +13,7 @@
   ],
   "install": [
     {
-      "from": "box_patch/bambu_map.cfg",
+      "from": "box_patch/packages/bambu/printer/bambu_map.cfg",
       "to": "printer_data/config/bambu_map.cfg",
       "keep": true
     }

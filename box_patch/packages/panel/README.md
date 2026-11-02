@@ -18,3 +18,12 @@
 - «NFC-метки» и «Справка» появляются со своими пакетами.
 
 Свои цвета добавляются плиткой «+» в редакторе. Палитра и материалы хранятся в `/home/qidi/qidi_panel` и при удалении остаются.
+
+## Что лежит в папке пакета
+
+| Где | Что это |
+|---|---|
+| `README.md`, `package.json` | Справка и описание пакета, их читает патчер |
+| `printer/` | Файлы панели, служба `qidi-panel.service` и скрипт `qidi_panel_link.js` для Fluidd; `bambu_rfid.py` для панели берётся из пакета `rfid_core` |
+| `tests/` | Тесты: `cd tests && python3 -B -m unittest` |
+| `tools/make_font.swift` | Собирает шрифт надписей на образцах `printer/sample_font.json` |

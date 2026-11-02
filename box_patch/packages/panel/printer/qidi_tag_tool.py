@@ -26,9 +26,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # bambu_rfid.py is next to this file on the printer and in ../box_patch on the Mac.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "box_patch"))
-# The plastic usage package lives in its own folder here and next to the panel on the printer.
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "box_patch" / "packages" / "usage" / "printer"))
+# On the printer the other packages' files lie next to this one; in the project each is in
+# box_patch/packages/<id>/printer.
+PACKAGES = pathlib.Path(__file__).resolve().parent.parent.parent
+for package in ("rfid_core", "usage"):
+    sys.path.insert(0, str(PACKAGES / package / "printer"))
 from bambu_rfid import CUSTOM_COLOR_MAGIC, QIDI_COLORS, nearest_qidi_color  # noqa: E402
 # Files of the plastic usage package: without it the panel runs without them.
 try:
@@ -2486,7 +2488,7 @@ def main():
         print("QIDI Box panel on port %d" % (PORT,), flush=True)
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
         return
-    host = read_printer_host(pathlib.Path(__file__).resolve().parent.parent / ".env")
+    host = read_printer_host(PACKAGES.parent.parent / ".env")
     if host:
         pull_state(host)
     Handler.app = App(printer=Printer(host) if host else None)

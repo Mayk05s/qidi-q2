@@ -60,10 +60,11 @@ python3 -B installer/build_app.py
 ## Что где лежит
 
 - `installer/`: QIDI Q2 Patcher. `patcher.json` хранит общую версию, проверенные прошивки и риски, остальное приходит из пакетов.
-- `box_patch/packages/`: пакеты.
+- `box_patch/packages/<id>/`: пакеты. В корне пакета `README.md`, `package.json` и, если нужен, шаг установки; в `printer/` файлы для принтера, в `tests/` тесты, в `tools/` инструменты для Mac.
 - `box_patch/remote_setup.py`: выполняется на принтере при установке, читает описания пакетов.
-- `box_patch/bambu_rfid.py`, `box_feed.py`: модуль Klipper, пакет `rfid_core`.
-- `tag_writer/`: панель и проверка пластика в QIDI Studio (`studio_check.py`, ставится `python3 -B tag_writer/install_studio_check.py`).
+- Модули Klipper: `rfid_core/printer/bambu_rfid.py` (считыватели и метки Bambu), `nfc/printer/bambu_nfc.py` (запись своих меток), `usage/printer/bambu_spool_usage.py` (учёт остатка и окно экрана).
+- Панель: `box_patch/packages/panel/printer/qidi_tag_tool.py`.
+- `tag_writer/`: проверка пластика в QIDI Studio (`studio_check.py`, ставится `python3 -B tag_writer/install_studio_check.py`, сейчас не используется) и черновик справки по сушке.
 - `NEXT_STEPS.md`: текущее состояние и планы.
 
-Тесты: `python3 -B -m unittest` в `box_patch`, `tag_writer`, `installer` и в папках пакетов, где они есть.
+Тесты: `python3 -B -m unittest` в `box_patch`, `tag_writer`, `installer` и в `tests/` каждого пакета.

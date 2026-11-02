@@ -356,7 +356,9 @@ def panel_features(enabled, packages):
     return sorted(packages[p].get("panel_feature", p) for p in enabled if not packages[p].get("hidden"))
 
 
-def install_panel(root, features):
+def install_panel(root, features, package):
+    """`package` is the one asking for the panel: it names the service file and the Fluidd script."""
+    service, script = package["service"], package["fluidd_script"]
     account = pwd.getpwnam("qidi")
     os.makedirs(PANEL_DIR, exist_ok=True)
     with open(os.path.join(PANEL_DIR, FEATURES_FILE), "w") as f:
@@ -364,8 +366,8 @@ def install_panel(root, features):
     for name in os.listdir(PANEL_DIR):
         os.chown(os.path.join(PANEL_DIR, name), account.pw_uid, account.pw_gid)
     os.chown(PANEL_DIR, account.pw_uid, account.pw_gid)
-    shutil.copyfile(os.path.join(root, "box_patch", "qidi-panel.service"), PANEL_UNIT)
-    shutil.copyfile(os.path.join(root, "box_patch", LINK_SCRIPT), os.path.join(FLUIDD_DIR, LINK_SCRIPT))
+    shutil.copyfile(os.path.join(root, service), PANEL_UNIT)
+    shutil.copyfile(os.path.join(root, script), os.path.join(FLUIDD_DIR, LINK_SCRIPT))
     os.chmod(os.path.join(FLUIDD_DIR, LINK_SCRIPT), 0o644)
     _edit_fluidd(add_link_tag)
     _service("daemon-reload")
@@ -462,7 +464,8 @@ def install(args):
     if "ssh_key" in hooks_after and args.pubkey:
         install_key(args.user, args.pubkey)
     if "panel" in hooks_after:
-        install_panel(args.root, panel_features(after, packages))
+        owner = next(packages[p] for p in sorted(after) if "panel" in packages[p].get("hooks", ()))
+        install_panel(args.root, panel_features(after, packages), owner)
     elif "panel" in hooks_before:
         uninstall_panel()
     for name in sorted(after):

@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """The same world as feed_emulator: spools with slack, one tag each, a stop that takes time."""
+import pathlib
 import random
+import sys
 import unittest
+
+# The tested file is the one copied to the printer, in ../printer.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "printer"))
 
 import pair_logic as p
 

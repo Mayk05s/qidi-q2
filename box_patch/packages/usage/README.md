@@ -37,6 +37,7 @@
 
 | Файл в проекте | Куда на принтере |
 |---|---|
+| printer/bambu_spool_usage.py | klipper/klippy/extras/bambu_spool_usage.py |
 | printer/print_check.py | qidi_panel/print_check.py |
 | printer/fluidd_card.py | qidi_panel/fluidd_card.py |
 | printer/screen_popup.py | qidi_panel/screen_popup.py |
@@ -45,7 +46,7 @@
 
 `screen_popup_setup.py` из папки пакета запускается при установке и удалении от root: сохраняет и возвращает штатные окна, создаёт и убирает папку `QIDI_Client/access/plastic` и службы `qidi-screen-reload`. Повторный вызов безопасен.
 
-Учёт остатка и команда окна живут в модуле `bambu_rfid.py`, поэтому пакету нужен пакет «Метки Bambu». Панель работает и без файлов этого пакета: тогда нет карточки во Fluidd и окна при старте печати.
+Учёт остатка и команда окна живут в своём модуле Klipper `bambu_spool_usage.py` с секцией `[bambu_spool_usage]` (`printer/bambu_spool_usage.cfg`). Остаток привязан к меткам, которые сохраняет модуль считывателей, поэтому пакету нужен пакет «Метки Bambu». Панель работает и без файлов этого пакета: тогда нет карточки во Fluidd и окна при старте печати.
 
 ## Что лежит в папке пакета
 
@@ -53,7 +54,7 @@
 |---|---|
 | `README.md`, `package.json` | Справка и описание пакета, их читает патчер |
 | `screen_popup_setup.py` | Шаг установки и удаления от root на принтере, сам на принтер не копируется |
-| `printer/` | Файлы, которые копируются на принтер как есть |
+| `printer/` | Файлы, которые копируются на принтер как есть: модуль Klipper и его секция, файлы панели |
 | `tests/` | Тесты: `cd tests && python3 -B -m unittest` |
 | `tools/` | Инструменты для Mac: `swift tools/make_slot_font.swift > printer/slot_font.json` из папки пакета |
 

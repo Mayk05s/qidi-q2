@@ -4,8 +4,16 @@
 
 ## Что ставит
 
-- `klipper/klippy/extras/bambu_rfid.py` и `box_feed.py`.
+- `klipper/klippy/extras/bambu_rfid.py`.
 - Секции считывателей в `qidi_patcher.cfg`, опции в них включают только выбранные пакеты.
 - Ключ этого компьютера в `~/.ssh/authorized_keys` пользователя `mks`.
 
 Файлы `box_*.so` и прошивка контроллера Box не меняются: модуль перехватывает их работу только в памяти Klipper. Поэтому он зависит от версии прошивки, проверено на `QD_Q2_01.01.03.02`.
+
+## Что лежит в папке пакета
+
+| Где | Что это |
+|---|---|
+| `README.md`, `package.json` | Справка и описание пакета, их читает патчер |
+| `printer/bambu_rfid.py` | Модуль Klipper считывателей, ставится в `klipper/klippy/extras` |
+| `tests/` | Тесты: `cd tests && python3 -B -m unittest` |

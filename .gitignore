@@ -3,7 +3,7 @@
 __pycache__/
 *.pyc
 tag_writer/backups/
-tag_writer/my_colors.json
+box_patch/packages/panel/printer/my_colors.json
 tag_writer/result.json
 QIDI Q2 Patcher.app/
-tag_writer/features.json
+box_patch/packages/panel/printer/features.json

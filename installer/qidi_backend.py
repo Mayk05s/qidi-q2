@@ -36,7 +36,7 @@ DEFAULT_PASSWORD = "makerbase"
 REMOTE_DIR = "/tmp/qidi_setup"
 PATCHER_FILE = pathlib.Path(__file__).resolve().parent / "patcher.json"
 # What the printer side needs besides the packages; everything a package needs it names itself.
-SETUP_BUNDLE = ("box_patch/remote_setup.py", "box_patch/qidi-panel.service", "box_patch/qidi_panel_link.js")
+SETUP_BUNDLE = ("box_patch/remote_setup.py",)
 
 
 LOG_FILE = pathlib.Path.home() / "Library" / "Logs" / "QIDI Q2 Patcher.log"
@@ -370,8 +370,9 @@ def bundle_files(packages):
         files.update(str(path.relative_to(ROOT)) for path in folder.rglob("*") if path.is_file())
         files.update(entry["from"] for entry in package.get("install", ())
                      if not entry.get("optional") or (ROOT / entry["from"]).exists())
-        if package.get("setup"):
-            files.add(package["setup"])
+        for key in ("setup", "service", "fluidd_script"):
+            if package.get(key):
+                files.add(package[key])
     return sorted(files)
 
 

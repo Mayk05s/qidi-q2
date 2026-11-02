@@ -1,6 +1,6 @@
 {
   "id": "nfc",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "order": 2,
   "icon": "wave.3.right",
   "title": "NFC-метки",
@@ -10,8 +10,15 @@
   "requires": [
     "bambu"
   ],
-  "install": [],
-  "uninstall": [],
+  "install": [
+    {
+      "from": "box_patch/packages/nfc/printer/bambu_nfc.py",
+      "to": "klipper/klippy/extras/bambu_nfc.py"
+    }
+  ],
+  "uninstall": [
+    "klipper/klippy/extras/bambu_nfc.py"
+  ],
   "klipper_options": {
     "hook_stock_read": true,
     "custom_tags": true
@@ -21,5 +28,6 @@
     "В памяти Klipper: штатное чтение метки box_rfid перехватывается",
     "На саму метку пишутся только блоки 4 и 5 и только на метку с прочитанным UID; метки Bambu не записываются"
   ],
-  "panel_feature": "nfc"
+  "panel_feature": "nfc",
+  "klipper_config": "printer/bambu_nfc.cfg"
 }

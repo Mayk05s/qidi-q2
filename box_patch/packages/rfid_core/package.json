@@ -6,17 +6,12 @@
   "summary": "Общая основа меток, подачи и расхода",
   "install": [
     {
-      "from": "box_patch/bambu_rfid.py",
+      "from": "box_patch/packages/rfid_core/printer/bambu_rfid.py",
       "to": "klipper/klippy/extras/bambu_rfid.py"
-    },
-    {
-      "from": "box_patch/box_feed.py",
-      "to": "klipper/klippy/extras/box_feed.py"
     }
   ],
   "uninstall": [
-    "klipper/klippy/extras/bambu_rfid.py",
-    "klipper/klippy/extras/box_feed.py"
+    "klipper/klippy/extras/bambu_rfid.py"
   ],
   "klipper_section": true,
   "hooks": [

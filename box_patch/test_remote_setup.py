@@ -169,7 +169,7 @@ class InstallTests(unittest.TestCase):
         self.saved = {name: getattr(r, name) for name in
                       ("PANEL_DIR", "install_panel", "uninstall_panel", "install_key", "run_setup", "firmware_version")}
         r.PANEL_DIR = os.path.join(base, "qidi_panel")
-        r.install_panel = lambda root, features: self.calls.append(("panel", tuple(features)))
+        r.install_panel = lambda root, features, package=None: self.calls.append(("panel", tuple(features)))
         r.uninstall_panel = lambda: self.calls.append(("panel off",))
         r.install_key = lambda user, key: self.calls.append(("key",))
         r.run_setup = lambda root, package, on: self.calls.append(("setup", package["id"], on))

@@ -37,14 +37,11 @@ INSERT_POLL = 0.1
 
 
 def load_pair_feed():
-    """pair_feed.py comes with the spools package; the core works without it."""
+    # Imported late: pair_feed takes its settings from this module.
     try:
         from . import pair_feed
     except ImportError:
-        try:
-            import pair_feed
-        except ImportError:
-            return None
+        import pair_feed
     return pair_feed
 
 
@@ -396,10 +393,8 @@ class BoxMover:
             self.feed_timer = reactor.register_timer(self._run_feeds, reactor.monotonic() + FEED_START_DELAY)
 
     def _pair_of(self, slot):
-        """The driver of the reader pair, or None when the spools package is not installed."""
+        """The driver of the two slots of one reader."""
         pair_feed = load_pair_feed()
-        if pair_feed is None:
-            return None
         reader = reader_of(slot)
         if reader not in self.pairs:
             self.pairs[reader] = pair_feed.PairDriver(self, reader, (slot - slot % 2, slot - slot % 2 + 1))
@@ -407,8 +402,7 @@ class BoxMover:
 
     def reread(self, slot):
         """Read the tag of a fed spool again: the stock read refuses while the toolhead is loaded."""
-        pair = self._pair_of(slot)
-        return pair is not None and pair.reread(slot, self.printer.get_reactor().monotonic())
+        return self._pair_of(slot).reread(slot, self.printer.get_reactor().monotonic())
 
     def _mark_ready(self, slots):
         # 3 means waiting for the stock check, 1 means ready for printing.
@@ -466,17 +460,11 @@ class BoxMover:
                 # A short move back and forth lets the gear catch the tip before the pair logic
                 # takes the spool over.
                 self.feeding.update(started)
-                catch = [(FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, EJECT_ACCEL),
-                         (-FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, EJECT_ACCEL)]
-                if self._pair_of(started[0]) is None:
-                    # Without the spools package every spool goes the same safe length.
-                    self.start_sequence(started, catch + [(FEED_LENGTH, EJECT_VELOCITY, EJECT_ACCEL)],
-                                        finish=True)
-                    self._mark_ready(started)
-                else:
-                    caught = self.start_sequence(started, catch, finish=False)
-                    for slot in started:
-                        self._pair_of(slot).insert(slot, eventtime, caught)
+                caught = self.start_sequence(started, [
+                    (FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, EJECT_ACCEL),
+                    (-FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, EJECT_ACCEL)], finish=False)
+                for slot in started:
+                    self._pair_of(slot).insert(slot, eventtime, caught)
             # A slot just ejected keeps its old plan until that ends, so it starts later.
             self.feed_pending.update(set(present) - set(started))
             if self.feed_pending:

@@ -145,7 +145,7 @@ refresh_materials() {
   copy="$(mktemp)"
   if scp -q -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 \
       "$TARGET:/home/qidi/QIDI_Client/resource/filament_config/filament-0.4.json" "$copy" 2>/dev/null; then
-    /usr/bin/python3 -B ../tag_writer/qidi_tag_tool.py --import-materials "$copy" || true
+    /usr/bin/python3 -B packages/panel/printer/qidi_tag_tool.py --import-materials "$copy" || true
   else
     echo "Принтер недоступен, использую сохранённый список материалов."
   fi
@@ -157,7 +157,7 @@ open_tag_tool() {
   echo "Панель: http://127.0.0.1:18770 (вернуться в меню: Ctrl+C)"
   (sleep 1; open "http://127.0.0.1:18770") &
   trap ':' INT
-  /usr/bin/python3 -B ../tag_writer/qidi_tag_tool.py || true
+  /usr/bin/python3 -B packages/panel/printer/qidi_tag_tool.py || true
   trap - INT
 }
 

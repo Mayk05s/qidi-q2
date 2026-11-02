@@ -1,5 +1,11 @@
 """Tests against a simulated ACR122U + MIFARE Classic tag. Needs no hardware."""
 import pathlib
+import sys
+
+PACKAGES = pathlib.Path(__file__).resolve().parent.parent.parent
+for folder in ("rfid_core/printer", "usage/printer", "panel/printer"):
+    sys.path.insert(0, str(PACKAGES / folder))
+import pathlib
 import tempfile
 import threading
 import unittest

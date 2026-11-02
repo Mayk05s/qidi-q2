@@ -5,8 +5,7 @@
 # answered with the legacy QIDI codes and the stock code saves them to the slot.
 # The exact tag color and any mapped profile then replace the stock values in that
 # slot, and what the tag really holds is saved as bambu_tag_slotN for the panel.
-# Other tags go to the stock read unchanged. Reads never write to a tag; only
-# BAMBU_RFID_TAG_WRITE does, and only to a tag named by its UID.
+# Other tags go to the stock read unchanged. Reads never write to a tag.
 # bambu_map.cfg next to printer.cfg holds editable material and color mappings.
 #
 # Config, one section per reader:
@@ -14,27 +13,19 @@
 #   cs_pin: mcu_box1:PC6
 #   hook_stock_read: True
 #   bambu_tags: True      read Bambu Lab tags (default True)
-#   custom_tags: True     read and write our own tags (default True)
+#   custom_tags: True     read our own tags at insertion (default True)
 #   box_takeover: True    several inserted spools are fed together (default True)
-#   spool_usage: True     count the filament left on each spool (default True)
 #
 # G-code:
 #   BAMBU_RFID_DIAG READER=card_reader_1   read chip registers only, RF untouched
 #   BAMBU_RFID_READ READER=card_reader_1 [TIMEOUT=30]
 #       wait for a tag to pass the antenna while the spool turns, read it,
 #       then restore the registers
-#   BAMBU_RFID_TAG_READ READER=card_reader_1 ID=1 [TIMEOUT=15] [EXCLUDE=7081205A,...]
-#   BAMBU_RFID_TAG_WRITE READER=card_reader_1 ID=2 UID=7081205A BLOCK4=<hex> [BLOCK5=<hex>]
-#       read or write a QIDI-format tag; the result is in this object's status as tag_result
-#   BAMBU_RFID_SPOOL_SET SLOT=0 GRAMS=800
-#       the panel instead leaves spool_set_<slot>.txt next to printer.cfg: G-code waits its turn
-#       behind a running print, for most of a minute at its start, while the file is seen at once.
-#       set how much filament the spool in a slot holds; printing then subtracts from it.
-#       Kept in spool_usage.json next to printer.cfg, by tag, so it follows the spool.
+#   Writing our own tags is in bambu_nfc.py (NFC tags package), the spool count in
+#   bambu_spool_usage.py (plastic usage package).
 import configparser
 import hashlib
 import hmac
-import json
 import logging
 import os
 import re
@@ -42,7 +33,11 @@ import struct
 try:
     from . import box_feed
 except ImportError:
-    import box_feed
+    try:
+        import box_feed
+    except ImportError:
+        # Not installed: the spools package brings box_feed.py with it.
+        box_feed = None
 
 # FM17550 registers
 REG_COMMAND = 0x01
@@ -105,12 +100,7 @@ DEFAULT_KEY = bytes.fromhex("FFFFFFFFFFFF")
 # Tried in this order: QIDI factory tags use the first, blank tags the second.
 TAG_KEYS = (("qidi", bytes.fromhex("D3F7D3F7D3F7")), ("default", DEFAULT_KEY))
 CLASSIC_1K_SAK = 0x08
-MIFARE_WRITE = 0xA0
-MIFARE_ACK = 0x0A
 TAG_BLOCKS = (4, 5, 6)
-# Never the sector trailer, block 7: a bad write there locks the sector for good.
-WRITABLE_BLOCKS = (4, 5)
-TAG_READ_TIMEOUT = 15.
 # A read with a loaded toolhead rocks the spool: back first, away from the 4-in-1 joint where
 # the loaded filament passes, then forward. Longer lengths need a test on the printer: going
 # back too far pulls the filament out of the feed gear.
@@ -124,18 +114,7 @@ SLOT_READ_ACCEL = 100.
 # Both tags of a Bambu spool hold the same tray number here, in sector 2.
 TRAY_SECTOR_BLOCK = 8
 TRAY_BLOCK = 9
-USAGE_FILE = "spool_usage.json"
-USAGE_INTERVAL = 1.
-USAGE_SAVE_INTERVAL = 30.
-SPOOL_REQUEST_FILE = "spool_set_%d.txt"
 BOX_SLOTS = 4
-MAX_SPOOL_GRAMS = 5000
-USUAL_SPOOL_GRAMS = 1000.
-FILAMENT_MM2 = 2.405  # Cross-section of 1.75 mm filament.
-DEFAULT_DENSITY = 1.24
-DENSITY = {"PLA": 1.24, "PETG": 1.27, "PET": 1.27, "ABS": 1.04, "ASA": 1.07, "TPU": 1.21,
-           "PA": 1.14, "PC": 1.20, "PVA": 1.23, "PPS": 1.30}
-TAG_WRITE_TIMEOUT = 5.
 # A QIDI Studio profile id such as QFL30, usable as a material in bambu_map.cfg.
 PROFILE_ID = re.compile(r"QF[A-Z0-9]{2,4}")
 
@@ -425,19 +404,6 @@ class Fm17550:
             raise RfidError("short read of block %d" % (block,))
         return data
 
-    def write_block(self, block, data):
-        """MIFARE write in its two steps, then read back. Needs an authenticated sector."""
-        if block not in WRITABLE_BLOCKS or len(data) != 16:
-            raise ValueError("refused write to block %r" % (block,))
-        for frame in ([MIFARE_WRITE, block], list(data)):
-            answer = self.transceive(frame, tx_crc=True)
-            if len(answer) != 1:
-                raise RfidError("no write acknowledgement")
-            if answer[0] & 0x0F != MIFARE_ACK:
-                raise TagProblem("denied")
-        if self.read_block(block) != bytes(data):
-            raise RfidError("read back differs from what was written")
-
     def _open_tag(self, exclude=()):
         """Select a tag and authenticate sector 1 with a QIDI key; returns (uid, key name).
         A tag in `exclude` counts as no tag, so a search goes on to the next one."""
@@ -466,17 +432,6 @@ class Fm17550:
             uid, key = self._open_tag(exclude)
             blocks = {b: self.read_block(b).hex().upper() for b in TAG_BLOCKS}
             return {"uid": uid.hex().upper(), "key": key, "blocks": blocks}
-        return self._retrying(action, timeout, monotonic, check_abort)
-
-    def write_tag(self, uid, blocks, timeout, monotonic, check_abort=None):
-        """Write only to the tag `uid`: another tag may have come to the antenna since it was read."""
-        def action():
-            found, key = self._open_tag()
-            if found != uid:
-                raise TagProblem("other_tag")
-            for block, data in sorted(blocks.items()):
-                self.write_block(block, data)
-            return {"uid": found.hex().upper(), "key": key}
         return self._retrying(action, timeout, monotonic, check_abort)
 
     def _read_tray(self, uid):
@@ -665,281 +620,6 @@ def stock_record_script(variables, stepper_name):
         stepper_name, {"stock": True, "color": str(color), "filament": str(variables.get("filament_" + stepper_name, ""))})
 
 
-def spool_key(variables, slot):
-    """What the count belongs to: the spool when its tag is known, otherwise the slot."""
-    record = variables.get("bambu_tag_slot%d" % (slot,))
-    if isinstance(record, dict):
-        if record.get("tray"):
-            return "tray:" + record["tray"]
-        if record.get("uid"):
-            return "uid:" + record["uid"]
-    return "slot:%d" % (slot,)
-
-
-class SpoolLedger:
-    """Grams set by the user and grams printed since, per spool."""
-
-    def __init__(self, path):
-        self.path = path
-        self.dirty = False
-        try:
-            with open(path, encoding="utf-8") as f:
-                self.spools = json.load(f)
-            if not isinstance(self.spools, dict):
-                raise ValueError("not an object")
-        except FileNotFoundError:
-            self.spools = {}
-        except (OSError, ValueError) as e:
-            logging.warning("bambu_rfid: %s ignored: %s", path, e)
-            self.spools = {}
-
-    def _resolve(self, key):
-        """A read may miss the tray number, but a tag once seen with it stays that spool."""
-        if key.startswith("uid:"):
-            for other, entry in self.spools.items():
-                if other.startswith("tray:") and key[4:] in entry.get("uids", ()):
-                    return other
-        return key
-
-    def _link(self, key, uid):
-        """Remember the tag of a spool, taking over what was counted under the tag alone."""
-        old = self.spools.pop("uid:%s" % (uid,), None)
-        entry = self.spools.get(key)
-        if old is not None:
-            if entry is None or old.get("manual"):
-                entry = old
-            else:
-                entry["used_g"] += old["used_g"]
-            self.spools[key] = entry
-            self.dirty = True
-        if entry is not None and uid not in entry.get("uids", ()):
-            entry["uids"] = entry.get("uids", []) + [uid]
-            self.dirty = True
-
-    def add(self, key, grams):
-        entry = self.spools.setdefault(self._resolve(key), {"set_g": None, "used_g": 0.})
-        entry["used_g"] += grams
-        self.dirty = True
-
-    def set_remaining(self, key, grams):
-        key = self._resolve(key)
-        entry = {"set_g": float(grams), "used_g": 0., "manual": True}
-        if "uids" in self.spools.get(key, {}):
-            entry["uids"] = self.spools[key]["uids"]
-        self.spools[key] = entry
-        self.dirty = True
-
-    def adopt(self, variables, slots=BOX_SLOTS):
-        """A spool seen for the first time counts as full: the weight on its tag, or a usual spool."""
-        for slot in range(slots):
-            record = variables.get("bambu_tag_slot%d" % (slot,))
-            if not isinstance(record, dict) or record.get("empty"):
-                continue
-            key = spool_key(variables, slot)
-            if key.startswith("tray:") and record.get("uid"):
-                self._link(key, record["uid"])
-            key = self._resolve(key)
-            entry = self.spools.get(key)
-            if entry is None or entry["set_g"] is None:
-                weight = record.get("weight")
-                valid = isinstance(weight, (int, float)) and 0 < weight <= MAX_SPOOL_GRAMS
-                fresh = {"set_g": float(weight) if valid else USUAL_SPOOL_GRAMS,
-                         "used_g": entry["used_g"] if entry else 0.}
-                if entry and "uids" in entry:
-                    fresh["uids"] = entry["uids"]
-                self.spools[key] = fresh
-                self.dirty = True
-
-    def view(self, key):
-        key = self._resolve(key)
-        entry = self.spools.get(key) or {"set_g": None, "used_g": 0.}
-        remaining = None
-        if entry["set_g"] is not None:
-            remaining = max(0., entry["set_g"] - entry["used_g"])
-        return {"key": key, "remaining": remaining, "used": entry["used_g"]}
-
-    def save(self):
-        if not self.dirty:
-            return
-        temp = self.path + ".tmp"
-        with open(temp, "w", encoding="utf-8") as f:
-            json.dump(self.spools, f)
-        os.replace(temp, self.path)
-        self.dirty = False
-
-
-def take_spool_request(folder, slot):
-    """Grams asked for this slot, or None. The request is used up even when it is bad."""
-    path = os.path.join(folder, SPOOL_REQUEST_FILE % (slot,))
-    try:
-        with open(path, encoding="utf-8") as f:
-            text = f.read(32)
-        os.remove(path)
-    except OSError:
-        return None
-    try:
-        grams = int(text.strip())
-    except ValueError:
-        return None
-    return grams if 0 <= grams <= MAX_SPOOL_GRAMS else None
-
-
-class FilamentMeter:
-    """Turns the print's total filament into millimeters per slot. The last moment of a print
-    still counts, and the total starting again from zero is not taken for a negative use."""
-
-    def __init__(self):
-        self.last = None
-        self.slot = None
-
-    def feed(self, state, used, slot):
-        if slot is not None:
-            self.slot = slot
-        active = state in ("printing", "paused")
-        if self.last is None:
-            if active:
-                self.last = used
-            return None
-        delta = used - self.last
-        self.last = used if active else None
-        if delta <= 0 or self.slot is None:
-            return None
-        return self.slot, delta
-
-
-def active_slot(box_status):
-    match = re.fullmatch(r"slot(\d+)", str(box_status.get("loaded_slot", "")))
-    if match and int(match.group(1)) < BOX_SLOTS:
-        return int(match.group(1))
-    return None
-
-
-def slot_density(box_status, slot):
-    try:
-        kind = box_status["boxes"][0]["filament_info"][slot]["filament_type"]
-    except (KeyError, IndexError, TypeError):
-        return DEFAULT_DENSITY
-    return DENSITY.get(kind, DEFAULT_DENSITY)
-
-
-class ScreenWarnings:
-    """Raises a stock window of the printer screen. The screen watches the warning list of
-    multi_color_controller, so an entry is added there for a moment. The stock object is not changed."""
-
-    TEXT = "BOX %d temperature and humidity sensor abnormal, heating and drying functions have been turned off."
-    SHOW_SECONDS = 20.
-
-    def __init__(self, printer):
-        self.printer = printer
-        self.reactor = printer.get_reactor()
-        self.active = []
-        printer.register_event_handler("klippy:ready", self._wrap)
-        printer.lookup_object("gcode").register_command(
-            "BAMBU_SCREEN_WARNING", self.cmd_WARNING, desc="Raise a stock window on the printer screen")
-
-    def _wrap(self):
-        controller = self.printer.lookup_object("multi_color_controller", None)
-        if controller is None:
-            return
-        stock = controller.get_status
-
-        def get_status(eventtime=None):
-            status = dict(stock(eventtime))
-            if self.active:
-                status["box_warning_info"] = list(status.get("box_warning_info") or []) + self.active
-            return status
-        try:
-            controller.get_status = get_status
-        except AttributeError as e:
-            logging.warning("bambu_rfid: no screen warnings: %s", e)
-
-    def cmd_WARNING(self, gcmd):
-        text = self.TEXT % (gcmd.get_int("BOX", minval=3, maxval=4),)
-        if text not in self.active:
-            self.active.append(text)
-        self.reactor.register_callback(lambda e: self._clear(text), self.reactor.monotonic() + self.SHOW_SECONDS)
-
-    def _clear(self, text):
-        if text in self.active:
-            self.active.remove(text)
-
-
-class SpoolUsage:
-    """One per printer, whichever reader section creates it first."""
-
-    def __init__(self, printer, path):
-        self.printer = printer
-        self.reactor = printer.get_reactor()
-        self.ledger = SpoolLedger(path)
-        self.meter = FilamentMeter()
-        self.next_save = 0.
-        printer.register_event_handler("klippy:ready", self._start)
-        printer.register_event_handler("klippy:disconnect", self._flush)
-        printer.lookup_object("gcode").register_command(
-            "BAMBU_RFID_SPOOL_SET", self.cmd_SET, desc="Set the filament left on a spool")
-
-    @classmethod
-    def of(cls, printer, path):
-        usage = printer.lookup_object("bambu_spool_usage", None)
-        if usage is None:
-            usage = cls(printer, path)
-            printer.add_object("bambu_spool_usage", usage)
-            ScreenWarnings(printer)
-        return usage
-
-    def _variables(self):
-        saved = self.printer.lookup_object("save_variables", None)
-        return saved.allVariables if saved is not None else {}
-
-    def _start(self):
-        self.reactor.register_timer(self._tick, self.reactor.monotonic() + USAGE_INTERVAL)
-
-    def _flush(self):
-        try:
-            self.ledger.save()
-        except OSError:
-            logging.exception("bambu_rfid: could not save %s", self.ledger.path)
-
-    def _tick(self, eventtime):
-        # An error in a reactor timer would shut the printer down.
-        try:
-            self._count(eventtime)
-        except Exception:
-            logging.exception("bambu_rfid: filament count failed")
-        return eventtime + USAGE_INTERVAL
-
-    def _count(self, eventtime):
-        stats = self.printer.lookup_object("print_stats").get_status(eventtime)
-        box = self.printer.lookup_object("box_extras", None)
-        box_status = box.get_status(eventtime) if box is not None else {}
-        self.ledger.adopt(self._variables())
-        folder = os.path.dirname(self.ledger.path)
-        for slot in range(BOX_SLOTS):
-            grams = take_spool_request(folder, slot)
-            if grams is not None:
-                self.ledger.set_remaining(spool_key(self._variables(), slot), grams)
-                self._flush()
-        part = self.meter.feed(stats["state"], stats["filament_used"], active_slot(box_status))
-        if part is not None:
-            slot, millimeters = part
-            grams = millimeters * FILAMENT_MM2 * slot_density(box_status, slot) / 1000.
-            self.ledger.add(spool_key(self._variables(), slot), grams)
-        if self.ledger.dirty and (self.meter.last is None or eventtime >= self.next_save):
-            self._flush()
-            self.next_save = eventtime + USAGE_SAVE_INTERVAL
-
-    def get_status(self, eventtime):
-        variables = self._variables()
-        return {"slots": [self.ledger.view(spool_key(variables, slot)) for slot in range(BOX_SLOTS)]}
-
-    def cmd_SET(self, gcmd):
-        slot = gcmd.get_int("SLOT", minval=0, maxval=BOX_SLOTS - 1)
-        grams = gcmd.get_float("GRAMS", minval=0., maxval=MAX_SPOOL_GRAMS)
-        self.ledger.set_remaining(spool_key(self._variables(), slot), grams)
-        self._flush()
-        gcmd.respond_info("Slot %d: %.0f g left" % (slot, grams))
-
-
 class StockReadProxy:
     """Stands in for box_rfid's fm17550_read_card query command."""
 
@@ -1036,11 +716,11 @@ class BambuRfid:
         self.tag_result = None
         config_file = self.printer.get_start_args().get("config_file", "")
         self.map_path = os.path.join(os.path.dirname(config_file), "bambu_map.cfg")
-        if config.getboolean("spool_usage", True):
-            SpoolUsage.of(self.printer, os.path.join(os.path.dirname(config_file), USAGE_FILE))
         gcode = self.printer.lookup_object("gcode")
         self.gcode = gcode
-        self.box_takeover = box_feed.BOX_TAKEOVER and config.getboolean("box_takeover", True)
+        # box_feed.py comes with the spools package; without it the stock feed stays.
+        self.box_takeover = box_feed is not None and box_feed.BOX_TAKEOVER \
+            and config.getboolean("box_takeover", True)
         self.bambu_tags = config.getboolean("bambu_tags", True)
         self.custom_tags = config.getboolean("custom_tags", True)
         if config.getboolean("hook_stock_read", False):
@@ -1051,13 +731,9 @@ class BambuRfid:
                                    self.cmd_DIAG, desc="Read FM17550 registers")
         gcode.register_mux_command("BAMBU_RFID_READ", "READER", self.name,
                                    self.cmd_READ, desc="Read a Bambu Lab tag")
-        if self.custom_tags:
-            gcode.register_mux_command("BAMBU_RFID_TAG_READ", "READER", self.name,
-                                       self.cmd_TAG_READ, desc="Read a QIDI-format tag")
-            gcode.register_mux_command("BAMBU_RFID_TAG_WRITE", "READER", self.name,
-                                       self.cmd_TAG_WRITE, desc="Write a QIDI-format tag")
-        gcode.register_mux_command("BAMBU_BOX_MOVE", "READER", self.name,
-                                   self.cmd_BOX_MOVE, desc="Move several Box motors together")
+        if box_feed is not None:
+            gcode.register_mux_command("BAMBU_BOX_MOVE", "READER", self.name,
+                                       self.cmd_BOX_MOVE, desc="Move several Box motors together")
         gcode.register_mux_command("BAMBU_BOX_INFO", "READER", self.name,
                                    self.cmd_BOX_INFO, desc="Show the stock Box move settings")
         gcode.register_mux_command("BAMBU_RFID_SLOT_READ", "READER", self.name,
@@ -1080,7 +756,7 @@ class BambuRfid:
     def _hook_stock(self):
         for slot in range(BOX_SLOTS):
             stepper = self.printer.lookup_object("box_stepper slot%d" % (slot,), None)
-            if stepper is not None and not getattr(stepper, "_bambu_traced", False):
+            if box_feed is not None and stepper is not None and not getattr(stepper, "_bambu_traced", False):
                 try:
                     stepper._bambu_traced = True
                 except AttributeError:
@@ -1235,29 +911,6 @@ class BambuRfid:
         self.tag_result = result
         gcmd.respond_info("%s: %s" % (self.name, "UID " + result["uid"] if result["ok"] else result["error"]))
 
-    def cmd_TAG_READ(self, gcmd):
-        timeout = gcmd.get_float("TIMEOUT", TAG_READ_TIMEOUT, minval=0., maxval=60.)
-        try:
-            exclude = [bytes.fromhex(uid) for uid in gcmd.get("EXCLUDE", "").split(",") if uid]
-        except ValueError:
-            raise gcmd.error("bambu_rfid: EXCLUDE must be hex UIDs")
-        self._tag_command(gcmd, lambda: self.chip.read_tag(
-            timeout, self.reactor.monotonic, self._check_stock_idle, exclude))
-
-    def cmd_TAG_WRITE(self, gcmd):
-        timeout = gcmd.get_float("TIMEOUT", TAG_WRITE_TIMEOUT, minval=0., maxval=60.)
-        try:
-            uid = bytes.fromhex(gcmd.get("UID"))
-            blocks = {4: bytes.fromhex(gcmd.get("BLOCK4"))}
-            if gcmd.get("BLOCK5", None) is not None:
-                blocks[5] = bytes.fromhex(gcmd.get("BLOCK5"))
-        except ValueError:
-            raise gcmd.error("bambu_rfid: UID and blocks must be hex")
-        if len(uid) != 4 or any(len(data) != 16 for data in blocks.values()):
-            raise gcmd.error("bambu_rfid: UID must be 4 bytes and a block 16")
-        self._tag_command(gcmd, lambda: self.chip.write_tag(
-            uid, blocks, timeout, self.reactor.monotonic, self._check_stock_idle))
-
     def cmd_BOX_MOVE(self, gcmd):
         self._check_idle(gcmd)
         try:
@@ -1333,45 +986,6 @@ class BambuRfid:
     def _release_slot(self, slot):
         self.printer.lookup_object("toolhead").wait_moves()
         self.gcode.run_script_from_command("SET_STEPPER_ENABLE STEPPER=slot%d ENABLE=0" % (slot,))
-
-    def read_during_feed(self, skip, slots):
-        """One try at the tag at the antenna, None if there is none to use. Tags of a spool
-        that stands here and takes no part are skipped, as are those already settled."""
-        saved = self.printer.lookup_object("save_variables").allVariables
-        uids, trays = [bytes.fromhex(uid) for uid in skip], []
-        for slot in range(BOX_SLOTS):
-            record = saved.get("bambu_tag_slot%d" % (slot,))
-            if box_feed.reader_of(slot) != self.name or slot in slots or not isinstance(record, dict):
-                continue
-            if record.get("uid"):
-                uids.append(bytes.fromhex(record["uid"]))
-            if record.get("tray"):
-                trays.append(record["tray"])
-        if self.proxy is not None:
-            self.proxy.busy = True
-        try:
-            return self._read_slot_tag(0., uids, trays)
-        except RfidError:
-            return None
-        finally:
-            if self.proxy is not None:
-                self.proxy.busy = False
-
-    def read_for_pair(self):
-        """One look at the antenna for the pair logic in box_feed: ("tag", tag), ("collision",
-        None) when two tags answer, or ("none", None). Settled tags are not left out here, the
-        logic needs to see them to keep track of where they stand."""
-        if self.proxy is not None:
-            self.proxy.busy = True
-        try:
-            return "tag", self._read_slot_tag(0., [], [])
-        except SeveralTags:
-            return "collision", None
-        except RfidError:
-            return "none", None
-        finally:
-            if self.proxy is not None:
-                self.proxy.busy = False
 
     def _read_slot_tag(self, timeout, uids, trays):
         try:

@@ -5,10 +5,11 @@ import logging
 import math
 
 try:
-    from . import pair_logic
+    from . import bambu_rfid, pair_logic
     from .box_feed import EJECT_ACCEL, EJECT_VELOCITY, FEED_LENGTH, SLOT_ENABLE_DELAY, \
         legacy_filament_id, tag_save_scripts
 except ImportError:
+    import bambu_rfid
     import pair_logic
     from box_feed import EJECT_ACCEL, EJECT_VELOCITY, FEED_LENGTH, SLOT_ENABLE_DELAY, \
         legacy_filament_id, tag_save_scripts
@@ -23,6 +24,24 @@ PAIR_LEAD = 0.6
 PAIR_JOIN = 0.25
 # Backwards the filament end stays this far past the slot sensor so the gear keeps it.
 PAIR_MIN_POS = 60.
+
+
+def read_pair(reader):
+    """One look at the antenna of a bambu_rfid reader: ("tag", tag), ("collision", None) when
+    two tags answer, or ("none", None). Settled tags are not left out here, the logic needs to
+    see them to keep track of where they stand."""
+    proxy = getattr(reader, "proxy", None)
+    if proxy is not None:
+        proxy.busy = True
+    try:
+        return pair_logic.READ_TAG, reader._read_slot_tag(0., [], [])
+    except bambu_rfid.SeveralTags:
+        return pair_logic.READ_COLLISION, None
+    except bambu_rfid.RfidError:
+        return pair_logic.READ_NONE, None
+    finally:
+        if proxy is not None:
+            proxy.busy = False
 
 
 def piece(distance, start_v, speed, end_v, accel):
@@ -107,7 +126,7 @@ class PairDriver:
             for slot in self.slots:
                 self._follow(slot, estimated, eventtime)
             reader = self.mover.readers.get(self.reader)
-            kind, tag = reader.read_for_pair() if reader is not None else ("none", None)
+            kind, tag = read_pair(reader) if reader is not None else ("none", None)
             uid = tag["uid"] if tag else None
             if tag:
                 self.tags_seen[uid] = tag

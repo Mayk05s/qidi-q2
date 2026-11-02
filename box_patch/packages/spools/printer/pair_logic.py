@@ -1,5 +1,5 @@
 # Finds whose tag is whose when two spools share one reader, and feeds them to the safe point.
-# A port of feed_emulator/pair_logic.js. It knows no hardware: tick() takes what the reader
+# Tag logic of a reader pair, run as is by tools/feed_emulator. It knows no hardware: tick() takes what the reader
 # sees and sets the wanted direction of each spool; the caller moves the motors.
 TURN = 630.
 READ_NONE, READ_TAG, READ_COLLISION = "none", "tag", "collision"
