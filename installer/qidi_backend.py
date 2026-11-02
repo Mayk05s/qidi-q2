@@ -481,6 +481,7 @@ def package_info(name, packages):
         readme=readme.read_text(encoding="utf-8") if readme.exists() else "",
         needs=sorted(n for n in needs - {name} if not packages[n].get("hidden")),
         parts=sorted(packages[n]["title"] for n in needs - {name} if packages[n].get("hidden")),
+        part_ids=sorted(n for n in needs - {name} if packages[n].get("hidden")),
         klipper=any(remote_setup.touches_klipper(packages[n]) for n in needs))
     return info
 

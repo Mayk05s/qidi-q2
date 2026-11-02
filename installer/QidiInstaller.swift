@@ -16,6 +16,7 @@ struct Feature: Identifiable {
     let readme: String
     let needs: [String]
     let parts: [String]
+    let partIds: [String]
     let hidden: Bool
     let klipper: Bool
 
@@ -33,6 +34,7 @@ struct Feature: Identifiable {
         readme = item["readme"] as? String ?? ""
         needs = item["needs"] as? [String] ?? []
         parts = item["parts"] as? [String] ?? []
+        partIds = item["part_ids"] as? [String] ?? []
         hidden = item["hidden"] as? Bool ?? false
         klipper = item["klipper"] as? Bool ?? false
     }
@@ -130,7 +132,16 @@ final class Model: ObservableObject {
 
     /// Installed modules whose copy on the printer is older than here, or of unknown version.
     var outdated: Set<String> {
-        Set(modules.filter { installed.contains($0.id) && installedVersions[$0.id] != $0.version }.map(\.id))
+        Set(modules.filter { installed.contains($0.id) && (isOld($0) || $0.partIds.contains { isOld(id: $0) }) }
+            .map(\.id))
+    }
+
+    /// A package whose copy on the printer is older than here; hidden parts count for the
+    /// visible packages that bring them, since updating those copies the parts again.
+    private func isOld(_ feature: Feature) -> Bool { installedVersions[feature.id] != feature.version }
+
+    private func isOld(id: String) -> Bool {
+        allPackages.first { $0.id == id }.map(isOld) ?? false
     }
 
     var hasUpdate: Bool { !installed.isEmpty && (!outdated.isEmpty || printerPackage != packageVersion) }
