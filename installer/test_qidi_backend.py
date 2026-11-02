@@ -39,26 +39,37 @@ class EnvTests(unittest.TestCase):
         self.assertEqual(q.read_env(pathlib.Path("/nonexistent/.env")), {})
 
 
-class ModuleListTests(unittest.TestCase):
-    def test_list_matches_what_the_printer_side_accepts(self):
-        ids = [m["id"] for m in json.loads(q.MODULES_FILE.read_text(encoding="utf-8"))["modules"]]
-        self.assertEqual(sorted(ids), sorted(q.remote_setup.KNOWN_FEATURES))
-
-    def test_every_bundled_file_exists(self):
-        for path in q.BUNDLE:
-            self.assertTrue(path.exists(), path)
-
-
-class VersionTests(unittest.TestCase):
-    def test_catalog_gives_every_module_a_version(self):
+class PackageTests(unittest.TestCase):
+    def test_window_gets_every_package_from_its_folder(self):
         catalog = q.load_catalog()
         self.assertTrue(catalog["version"])
+        shown = [m for m in catalog["modules"] if not m["hidden"]]
+        self.assertEqual({m["id"] for m in shown}, q.remote_setup.visible(q.load_packages()))
         for module in catalog["modules"]:
             self.assertTrue(module["version"], module["id"])
+            self.assertTrue(module["readme"].startswith("#"), module["id"])
+        spools = next(m for m in catalog["modules"] if m["id"] == "spools")
+        self.assertIn("bambu", spools["needs"])
+        self.assertTrue(spools["klipper"])
+        guide = next(m for m in catalog["modules"] if m["id"] == "guide")
+        self.assertFalse(guide["klipper"])
 
-    def test_only_chosen_modules_are_recorded(self):
-        catalog = {"version": "2.0", "modules": [{"id": "a", "version": "1.1"}, {"id": "b", "version": "1.2"}]}
-        self.assertEqual(q.versions_for({"a"}, catalog), {"package": "2.0", "a": "1.1"})
+    def test_every_bundled_file_exists(self):
+        for relative in q.bundle_files(q.load_packages()):
+            self.assertTrue((q.ROOT / relative).exists(), relative)
+
+    def test_only_copied_packages_get_a_new_version(self):
+        packages = {"a": {"version": "1.1"}, "b": {"version": "1.2"}}
+        self.assertEqual(q.versions_for({"a"}, packages, {"version": "2.0"}), {"package": "2.0", "a": "1.1"})
+
+    def test_plan_follows_the_printer_side(self):
+        packages = q.load_packages()
+        chosen, after, copied = q.Change(add={"guide"}).plan({"mesh"}, packages)
+        self.assertEqual(chosen, {"mesh", "guide"})
+        self.assertEqual(copied, {"guide", "panel"})
+        chosen, after, copied = q.Change(remove={"bambu"}).plan({"bambu", "spools", "mesh"}, packages)
+        self.assertEqual(chosen, {"mesh"})
+        self.assertEqual(copied, set())
 
 
 class BlockedTests(unittest.TestCase):
@@ -81,8 +92,9 @@ class DiagTests(unittest.TestCase):
 class FakePrinter:
     host = "h"
 
-    def __init__(self, state="standby", ready=(True,), features=("bambu",), diag=True):
+    def __init__(self, state="standby", ready=(True,), features=("bambu",), diag=True, restarts=True):
         self.state, self.ready, self.features, self.diag = state, list(ready), set(features), diag
+        self.restarts = restarts
         self.calls, self.versions = [], []
 
     def print_state(self):
@@ -91,9 +103,10 @@ class FakePrinter:
     def installed(self):
         return set(self.features), {"package": "0.1"}
 
-    def remote(self, action, features, versions):
-        self.calls.append(set(features))
+    def remote(self, arguments, versions):
+        self.calls.append(arguments)
         self.versions.append(versions)
+        return self.restarts
 
     def restart_klipper(self):
         return self.ready.pop(0)
@@ -117,27 +130,28 @@ class ApplyTests(unittest.TestCase):
         for state in ("printing", "paused", "unavailable"):
             printer = FakePrinter(state)
             with self.assertRaises(q.Failed):
-                q.apply(printer, {"usage"})
+                q.apply(printer, q.Change(add={"usage"}))
             self.assertEqual(printer.calls, [])
 
     def test_failed_restart_returns_to_what_was_on(self):
         printer = FakePrinter(ready=(False, True), features=("bambu", "usage"))
         with self.assertRaises(q.Failed):
-            q.apply(printer, {"spools"})
-        self.assertEqual(printer.calls, [{"spools"}, {"bambu", "usage"}])
+            q.apply(printer, q.Change(add={"spools"}))
+        self.assertEqual(printer.calls, [["--add", "spools"], ["--features", "bambu,usage"]])
         self.assertEqual(printer.versions[1], {"package": "0.1"})
-        self.assertEqual(set(printer.versions[0]), {"package", "spools"})
+        self.assertTrue({"package", "spools"} <= set(printer.versions[0]))
 
     def test_removing_everything_skips_the_readers(self):
         printer = FakePrinter(diag=False)
-        self.assertIn("удалено", q.apply(printer, set()))
+        self.assertIn("удалено", q.apply(printer, q.Change(remove={"bambu"})))
 
-    def test_mesh_alone_does_not_ask_the_readers(self):
-        self.assertIn("Готово", q.apply(FakePrinter(diag=False), {"mesh"}))
+    def test_without_a_restart_the_readers_are_not_asked(self):
+        text = q.apply(FakePrinter(diag=False, restarts=False), q.Change(add={"guide"}))
+        self.assertIn("не перезапускался", text)
 
     def test_silent_readers_are_reported(self):
         with self.assertRaises(q.Failed):
-            q.apply(FakePrinter(diag=False), {"nfc"})
+            q.apply(FakePrinter(diag=False), q.Change(add={"nfc"}))
 
 
 class DemoTests(unittest.TestCase):

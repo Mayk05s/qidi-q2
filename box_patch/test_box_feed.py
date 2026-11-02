@@ -284,14 +284,34 @@ class InsertWatchTests(EjectTests):
         self.wrapper(3)()
         self.assertEqual(self.stock_calls, [])
         self.assertEqual(self.reactor.when, 10. + b.FEED_START_DELAY)
+        moved, inserted = [], []
+        self.mover.start_sequence = lambda slots, moves, finish: moved.append((slots, moves, finish)) or 13.
+        self.mover._pair_of = lambda slot: self.Pair(inserted)
+        self.mover._run_feeds(12.)
+        # Only the catch move here; the pair logic feeds on from where it ends.
+        self.assertEqual(moved[0][0], [1, 3])
+        self.assertEqual([move[0] for move in moved[0][1]], [b.FEED_CATCH_LENGTH, -b.FEED_CATCH_LENGTH])
+        self.assertFalse(moved[0][2])
+        self.assertEqual(inserted, [(1, 12., 13.), (3, 12., 13.)])
+
+    def test_without_the_spools_package_spools_go_the_safe_length(self):
+        self.present(1)
         moved, scripts = [], []
         self.printer.run_script = scripts.append
-        self.mover.start_sequence = lambda slots, moves: moved.append((slots, moves))
+        self.mover.start_sequence = lambda slots, moves, finish: moved.append((slots, moves, finish))
+        self.mover.feed_pending.add(1)
+        self.mover.feed_timer = "timer"
         self.mover._run_feeds(12.)
-        self.assertEqual(moved[0][0], [1, 3])
         self.assertEqual([move[0] for move in moved[0][1]],
                          [b.FEED_CATCH_LENGTH, -b.FEED_CATCH_LENGTH, b.FEED_LENGTH])
-        self.assertEqual(scripts, ["SAVE_VARIABLE VARIABLE=slot1 VALUE=1", "SAVE_VARIABLE VARIABLE=slot3 VALUE=1"])
+        self.assertEqual(scripts, ["SAVE_VARIABLE VARIABLE=slot1 VALUE=1"])
+
+    class Pair:
+        def __init__(self, inserted):
+            self.inserted = inserted
+
+        def insert(self, slot, now, after):
+            self.inserted.append((slot, now, after))
 
     def test_spool_pulled_out_during_the_wait_is_not_fed(self):
         self.mover.feed_pending.add(2)
@@ -353,7 +373,8 @@ class InsertWatchTests(EjectTests):
     def test_feed_of_a_busy_slot_waits(self):
         self.printer.run_script = lambda script: None
         moved = []
-        self.mover.start_sequence = lambda slots, moves: moved.append(slots)
+        self.mover.start_sequence = lambda slots, moves, finish: moved.append(slots) or 12.
+        self.mover._pair_of = lambda slot: self.Pair([])
         self.present(1, 2)
         self.mover.busy.add(1)
         self.mover.feed_pending.update({1, 2})

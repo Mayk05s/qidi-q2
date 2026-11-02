@@ -21,7 +21,11 @@ import threading
 import urllib.error
 import urllib.request
 
-import print_check
+try:
+    import print_check
+except ImportError:  # Run from the project rather than from the installed copy.
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "box_patch" / "packages" / "usage" / "printer"))
+    import print_check
 
 HERE = pathlib.Path(__file__).resolve().parent
 LOG = pathlib.Path.home() / "Library" / "Logs" / "qidi_studio_check.log"

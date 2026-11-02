@@ -1357,6 +1357,22 @@ class BambuRfid:
             if self.proxy is not None:
                 self.proxy.busy = False
 
+    def read_for_pair(self):
+        """One look at the antenna for the pair logic in box_feed: ("tag", tag), ("collision",
+        None) when two tags answer, or ("none", None). Settled tags are not left out here, the
+        logic needs to see them to keep track of where they stand."""
+        if self.proxy is not None:
+            self.proxy.busy = True
+        try:
+            return "tag", self._read_slot_tag(0., [], [])
+        except SeveralTags:
+            return "collision", None
+        except RfidError:
+            return "none", None
+        finally:
+            if self.proxy is not None:
+                self.proxy.busy = False
+
     def _read_slot_tag(self, timeout, uids, trays):
         try:
             if not self.bambu_tags:

@@ -22,7 +22,6 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BOX_PATCH = ROOT / "box_patch"
-TAG_WRITER = ROOT / "tag_writer"
 sys.path.insert(0, str(BOX_PATCH))
 import remote_setup  # noqa: E402
 import sync_ssh_alias  # noqa: E402
@@ -35,13 +34,9 @@ PANEL_PORT = 18770
 DEFAULT_USER = "mks"
 DEFAULT_PASSWORD = "makerbase"
 REMOTE_DIR = "/tmp/qidi_setup"
-# remote_setup.py names what goes on the printer, so a new file is listed in one place.
-BUNDLE = [BOX_PATCH / name for name in ("remote_setup.py", "bambu_map.cfg", "qidi_panel_link.js", "qidi-panel.service")
-          + remote_setup.MODULE_FILES + remote_setup.SETUP_FILES]
-BUNDLE += [path for path in (TAG_WRITER / name for name in remote_setup.PANEL_FILES)
-           if path.name not in remote_setup.MODULE_FILES]
-MODULES_FILE = pathlib.Path(__file__).resolve().parent / "modules.json"
-OPTIONAL_BUNDLE = [TAG_WRITER / "my_materials.json", TAG_WRITER / "my_colors.json"]
+PATCHER_FILE = pathlib.Path(__file__).resolve().parent / "patcher.json"
+# What the printer side needs besides the packages; everything a package needs it names itself.
+SETUP_BUNDLE = ("box_patch/remote_setup.py", "box_patch/qidi-panel.service", "box_patch/qidi_panel_link.js")
 
 
 LOG_FILE = pathlib.Path.home() / "Library" / "Logs" / "QIDI Q2 Patcher.log"
@@ -276,8 +271,10 @@ class Printer:
         save_firmware_cache(cache)
         return firmware
 
-    def remote(self, action, features=None, versions=None):
-        """Copy everything into one folder on the printer and run remote_setup.py there."""
+    def remote(self, change, versions=None):
+        """Copy the packages into one folder on the printer and run remote_setup.py there.
+        `change` is the list of --features, --add or --remove arguments. True when Klipper
+        was restarted because it has something new to read."""
         info = self.json("/printer/info")
         target = "%s@%s" % (self.user, self.host)
         with tempfile.TemporaryDirectory() as work:
@@ -286,34 +283,35 @@ class Printer:
                 f.write('#!/bin/sh\nprintf "%s\\n" "$PRINTER_PASSWORD"\n')
             os.chmod(askpass, 0o700)
             bundle = os.path.join(work, "bundle")
-            os.mkdir(bundle)
-            for path in BUNDLE + [KEY.with_suffix(".pub")]:
-                shutil.copy(str(path), bundle)
-            for path in OPTIONAL_BUNDLE:
-                if path.exists():
-                    shutil.copy(str(path), bundle)
+            for relative in bundle_files(load_packages()):
+                target = os.path.join(bundle, relative)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copy(str(ROOT / relative), target)
+            shutil.copy(str(KEY.with_suffix(".pub")), os.path.join(bundle, "id_ed25519.pub"))
             env = self._ssh_env(askpass)
             subprocess.run(["ssh"] + SSH_OPTS + [target, "rm -rf " + REMOTE_DIR], env=env, check=True,
                            stdin=subprocess.DEVNULL)
             subprocess.run(["scp", "-q", "-r"] + SSH_OPTS + [bundle, target + ":" + REMOTE_DIR], env=env, check=True)
-            arguments = ["python3", REMOTE_DIR + "/remote_setup.py", action,
+            arguments = ["python3", REMOTE_DIR + "/box_patch/remote_setup.py", "install", "--root", REMOTE_DIR,
                          "--klipper", info["klipper_path"], "--cfg", info["config_file"],
-                         "--module", REMOTE_DIR + "/bambu_rfid.py", "--map", REMOTE_DIR + "/bambu_map.cfg",
-                         "--pubkey", REMOTE_DIR + "/id_ed25519.pub", "--panel", REMOTE_DIR, "--user", self.user]
-            if features is not None:
-                arguments += ["--features", ",".join(sorted(features))]
+                         "--pubkey", REMOTE_DIR + "/id_ed25519.pub", "--user", self.user] + list(change)
             if versions:
                 arguments += ["--versions", ",".join("%s=%s" % item for item in sorted(versions.items()))]
-            inner = shlex.join(arguments) + " && systemctl restart klipper"
+            # Klipper restarts only when the install says it has something new to read.
+            inner = ("out=$(%s); rc=$?; printf '%%s\\n' \"$out\"; "
+                     "if [ $rc -eq 0 ] && printf '%%s' \"$out\" | grep -qF %s; then systemctl restart klipper; fi; "
+                     "exit $rc" % (shlex.join(arguments), shlex.quote(remote_setup.RESTART_MARK)))
             command = "chmod -R a+rX %s; sudo -S -p '' sh -c %s; rc=$?; rm -rf %s; exit $rc" % (
                 REMOTE_DIR, shlex.quote(inner), REMOTE_DIR)
             done = subprocess.run(["ssh"] + SSH_OPTS + [target, command], env=env,
                                   input=self.password + "\n", text=True,
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             for line in done.stdout.splitlines():
-                log(line)
+                if line != remote_setup.RESTART_MARK:
+                    log(line)
             if done.returncode != 0:
                 raise Failed("Установка на принтере не удалась (код %d)." % (done.returncode,))
+            return remote_setup.RESTART_MARK in done.stdout.splitlines()
 
     def diagnose(self):
         since = time.time()
@@ -360,40 +358,104 @@ def require_idle(printer):
         raise Failed("Принтер не отвечает, проверь адрес и сеть.")
 
 
+def load_packages():
+    return remote_setup.load_packages(str(ROOT))
+
+
+def bundle_files(packages):
+    """Project paths the printer side needs: the package folders and every file they name."""
+    files = set(SETUP_BUNDLE)
+    for package in packages.values():
+        folder = pathlib.Path(package["_dir"])
+        files.update(str(path.relative_to(ROOT)) for path in folder.rglob("*") if path.is_file())
+        files.update(entry["from"] for entry in package.get("install", ())
+                     if not entry.get("optional") or (ROOT / entry["from"]).exists())
+        if package.get("setup"):
+            files.add(package["setup"])
+    return sorted(files)
+
+
+def package_info(name, packages):
+    """What the window shows about a package; all of it comes from the package's own folder."""
+    package = packages[name]
+    readme = pathlib.Path(package["_dir"]) / "README.md"
+    needs = remote_setup.closure({name}, packages)
+    info = {key: package.get(key) for key in ("id", "version", "icon", "title", "summary", "details", "note")}
+    info.update(
+        hidden=bool(package.get("hidden")),
+        order=package.get("order", 99),
+        adds=[entry["to"] for entry in package.get("install", ())],
+        changes=package.get("changes", []),
+        readme=readme.read_text(encoding="utf-8") if readme.exists() else "",
+        needs=sorted(n for n in needs - {name} if not packages[n].get("hidden")),
+        parts=sorted(packages[n]["title"] for n in needs - {name} if packages[n].get("hidden")),
+        klipper=any(remote_setup.touches_klipper(packages[n]) for n in needs))
+    return info
+
+
 def load_catalog():
-    return json.loads(MODULES_FILE.read_text(encoding="utf-8"))
+    """The patcher's own settings and every package as the packages describe themselves."""
+    catalog = json.loads(PATCHER_FILE.read_text(encoding="utf-8"))
+    packages = load_packages()
+    catalog["modules"] = sorted((package_info(name, packages) for name in packages),
+                                key=lambda m: (m["hidden"], m["order"], m["id"]))
+    return catalog
 
 
-def versions_for(features, catalog):
-    """The versions recorded on the printer: the package and each chosen module."""
+class Change:
+    """One step asked for: the whole set (--features), or packages to add or remove."""
+
+    def __init__(self, features=None, add=(), remove=()):
+        self.features = None if features is None else ",".join(sorted(features))
+        self.add = ",".join(sorted(add)) or None
+        self.remove = ",".join(sorted(remove)) or None
+
+    def arguments(self):
+        found = []
+        for flag, value in (("--features", self.features), ("--add", self.add), ("--remove", self.remove)):
+            if value is not None:
+                found += [flag, value]
+        return found
+
+    def plan(self, installed, packages):
+        """(packages on afterwards, packages copied now), as remote_setup will see it."""
+        chosen = remote_setup.chosen_features(self, installed, packages)
+        before = remote_setup.closure(installed.intersection(packages), packages)
+        after = remote_setup.closure(chosen, packages)
+        return chosen, after, remote_setup.to_copy(self, before, after, packages)
+
+
+def versions_for(copied, packages, catalog):
+    """The versions recorded on the printer for what is copied now, with the patcher's own."""
     versions = {"package": catalog["version"]}
-    versions.update((m["id"], m["version"]) for m in catalog["modules"] if m["id"] in features)
+    versions.update((name, packages[name]["version"]) for name in copied)
     return versions
 
 
-def apply(printer, features):
+def apply(printer, change):
     require_idle(printer)
     previous, previous_versions = printer.installed()
+    packages = load_packages()
+    chosen, after, copied = change.plan(previous, packages)
     ensure_key()
     sync_alias(printer.host)
     log("Устанавливаю на %s..." % (printer.host,))
-    printer.remote("install", features, versions_for(features, load_catalog()))
-    log("Перезапускаю Klipper...")
-    if not printer.restart_klipper():
-        log("Klipper не запустился, возвращаю прежнее состояние...")
-        printer.remote("install", previous, previous_versions)
+    restarted = printer.remote(change.arguments(), versions_for(copied, packages, load_catalog()))
+    if restarted:
+        log("Перезапускаю Klipper...")
         if not printer.restart_klipper():
-            raise Failed("Klipper не поднялся и после отката, проверь Fluidd.")
-        raise Failed("Klipper не запустился с новыми настройками, прежнее состояние возвращено.")
-    if not features:
+            log("Klipper не запустился, возвращаю прежнее состояние...")
+            printer.remote(Change(features=previous).arguments(), previous_versions)
+            if not printer.restart_klipper():
+                raise Failed("Klipper не поднялся и после отката, проверь Fluidd.")
+            raise Failed("Klipper не запустился с новыми настройками, прежнее состояние возвращено.")
+    if not chosen:
         return "Всё удалено с принтера. Твои материалы и цвета остались на нём."
-    if not features.intersection(remote_setup.MODULE_FEATURES):
-        return "Готово: установлено, Klipper работает."
-    if not printer.diagnose():
+    if restarted and any(packages[n].get("klipper_section") for n in after) and not printer.diagnose():
         raise Failed("Установлено, но считыватели ответили не так, как ожидалось.")
-    if features.intersection(remote_setup.PANEL_FEATURES) and not printer.panel_answers():
-        return "Установлено, но панель пока не отвечает на порту %d." % (PANEL_PORT,)
-    return "Готово: установлено, Klipper работает, оба считывателя отвечают."
+    if any("panel" in packages[n].get("hooks", ()) for n in after) and not printer.panel_answers():
+        return "Готово, но панель пока не отвечает на порту %d." % (PANEL_PORT,)
+    return "Готово." + (" Klipper перезапущен и работает." if restarted else " Klipper не перезапускался.")
 
 
 class DemoPrinter:
@@ -415,12 +477,16 @@ class DemoPrinter:
             return set(saved["features"]), saved["versions"]
         return {"bambu", "usage"}, {"package": "0.9.0", "bambu": "0.9.0", "usage": "1.0.0"}
 
-    def apply(self, features):
-        for text in ("Устанавливаю на принтер...", "Перезапускаю Klipper...", "Version=0x92 на обоих считывателях"):
+    def apply(self, change):
+        installed, versions = self.installed()
+        packages = load_packages()
+        chosen, after, copied = change.plan(installed, packages)
+        for text in ("Устанавливаю на принтер...", "Version=0x92 на обоих считывателях"):
             log(text)
             time.sleep(0.7)
-        self.STATE.write_text(json.dumps({"features": sorted(features),
-                                          "versions": versions_for(features, load_catalog())}))
+        versions = {name: value for name, value in versions.items() if name == "package" or name in after}
+        versions.update(versions_for(copied, packages, load_catalog()))
+        self.STATE.write_text(json.dumps({"features": sorted(chosen), "versions": versions}))
         return "Готово (демо): на принтере ничего не менялось."
 
 
@@ -448,9 +514,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("command", choices=("status", "apply", "diag", "save-connection", "discover"))
-    parser.add_argument("--features", default="")
+    parser.add_argument("--features", help="the whole set of packages")
+    parser.add_argument("--add", default="", help="packages to install or update")
+    parser.add_argument("--remove", default="", help="packages to remove")
     args = parser.parse_args(argv)
-    chosen = {name for name in args.features.split(",") if name}
+    names = lambda value: {name for name in value.split(",") if name}
+    change = Change(None if args.features is None else names(args.features), names(args.add), names(args.remove))
 
     if args.command == "save-connection":
         if not args.demo:
@@ -477,9 +546,9 @@ def main(argv=None):
         if printer is None:
             raise Failed("Сначала укажи принтер.")
         if args.demo:
-            text = printer.apply(chosen) if args.command == "apply" else "Демо: считыватели не опрашивались."
+            text = printer.apply(change) if args.command == "apply" else "Демо: считыватели не опрашивались."
         elif args.command == "apply":
-            text = apply(printer, chosen)
+            text = apply(printer, change)
         else:
             require_idle(printer)
             if not printer.diagnose():

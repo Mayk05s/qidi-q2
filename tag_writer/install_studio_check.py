@@ -33,8 +33,8 @@ def account_folder():
 
 def main():
     TARGET.mkdir(exist_ok=True)
-    for name in ("print_check.py", "studio_check.py"):
-        shutil.copy(PROJECT / name, TARGET / name)
+    shutil.copy(PROJECT.parent / "box_patch" / "packages" / "usage" / "printer" / "print_check.py", TARGET / "print_check.py")
+    shutil.copy(PROJECT / "studio_check.py", TARGET / "studio_check.py")
     # Without the compiled window the check falls back to a plain system dialog.
     built = subprocess.run(["swiftc", "-swift-version", "5", "-O", "-o", str(TARGET / "studio_window"),
                             str(PROJECT / "studio_window.swift")])

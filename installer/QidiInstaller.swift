@@ -13,6 +13,11 @@ struct Feature: Identifiable {
     let note: String
     let adds: [String]
     let changes: [String]
+    let readme: String
+    let needs: [String]
+    let parts: [String]
+    let hidden: Bool
+    let klipper: Bool
 
     init?(_ item: [String: Any]) {
         guard let id = item["id"] as? String, let title = item["title"] as? String else { return nil }
@@ -25,6 +30,11 @@ struct Feature: Identifiable {
         note = item["note"] as? String ?? ""
         adds = item["adds"] as? [String] ?? []
         changes = item["changes"] as? [String] ?? []
+        readme = item["readme"] as? String ?? ""
+        needs = item["needs"] as? [String] ?? []
+        parts = item["parts"] as? [String] ?? []
+        hidden = item["hidden"] as? Bool ?? false
+        klipper = item["klipper"] as? Bool ?? false
     }
 }
 
@@ -61,7 +71,8 @@ final class LineReader: @unchecked Sendable {
 
 @MainActor
 final class Model: ObservableObject {
-    @Published var modules: [Feature] = []
+    @Published var allPackages: [Feature] = []
+    var modules: [Feature] { allPackages.filter { !$0.hidden } }
     @Published var risks: [String] = []
     @Published var packageVersion = ""
     @Published var testedFirmware: [String] = []
@@ -107,11 +118,11 @@ final class Model: ObservableObject {
 
     var actionTitle: String {
         if installed.isEmpty { return "Установить" }
-        if hasChanges { return "Переустановить" }
-        return hasUpdate ? "Обновить" : "Переустановить"
+        if hasChanges { return "Применить" }
+        return "Обновить"
     }
 
-    var canRunAction: Bool { canChange && !(installed.isEmpty && chosen.isEmpty) }
+    var canRunAction: Bool { canChange && (hasChanges || !outdated.isEmpty) }
 
     /// What the confirmation asks about, module by module.
     var changes: String {
@@ -124,8 +135,8 @@ final class Model: ObservableObject {
         if !added.isEmpty { parts.append("Установить:\n" + names(added)) }
         if !updated.isEmpty { parts.append("Обновить:\n" + names(updated)) }
         if !removed.isEmpty { parts.append("Убрать:\n" + names(removed)) }
-        if parts.isEmpty { parts.append("Модули будут поставлены заново в той же версии.") }
-        parts.append("Klipper перезапустится.")
+        if parts.isEmpty { parts.append("Изменений нет, пакеты на принтере уже этой версии.") }
+        parts.append(restartsKlipper ? "Klipper перезапустится." : "Klipper не перезапускается.")
         return parts.joined(separator: "\n\n")
     }
 
@@ -139,8 +150,34 @@ final class Model: ObservableObject {
         run(["discover"], exclusive: false)
     }
 
+    /// All the chosen changes in one run: new and outdated packages are copied, the ones switched
+    /// off are removed, and packages that stay as they are are not touched.
     func apply() {
-        startAction(["apply", "--features", chosen.sorted().joined(separator: ",")])
+        let add = chosen.subtracting(installed).union(outdated.intersection(chosen))
+        let remove = installed.subtracting(chosen)
+        startAction(["apply", "--add", add.sorted().joined(separator: ","),
+                     "--remove", remove.sorted().joined(separator: ",")])
+    }
+
+    func title(_ id: String) -> String {
+        allPackages.first { $0.id == id }?.title ?? id
+    }
+
+    /// Switching a package on brings the ones it needs; switching it off takes the ones that need it.
+    func setChosen(_ id: String, _ on: Bool) {
+        if on {
+            chosen.insert(id)
+            chosen.formUnion(modules.first { $0.id == id }?.needs ?? [])
+        } else {
+            chosen.remove(id)
+            for module in modules where module.needs.contains(id) { chosen.remove(module.id) }
+        }
+    }
+
+    /// Whether the chosen changes make Klipper restart.
+    var restartsKlipper: Bool {
+        let touched = chosen.symmetricDifference(installed).union(outdated.intersection(chosen))
+        return modules.contains { touched.contains($0.id) && $0.klipper }
     }
 
     func diagnose() {
@@ -148,7 +185,7 @@ final class Model: ObservableObject {
     }
 
     func uninstall() {
-        startAction(["apply", "--features", ""])
+        startAction(["apply", "--remove", installed.sorted().joined(separator: ",")])
     }
 
     func saveConnection(_ connection: Connection) {
@@ -273,7 +310,7 @@ final class Model: ObservableObject {
         }
         switch type {
         case "status":
-            modules = (message["modules"] as? [[String: Any]] ?? []).compactMap(Feature.init)
+            allPackages = (message["modules"] as? [[String: Any]] ?? []).compactMap(Feature.init)
             risks = message["risks"] as? [String] ?? []
             packageVersion = message["version"] as? String ?? ""
             testedFirmware = message["tested_firmware"] as? [String] ?? []
@@ -608,18 +645,27 @@ struct FilesHelp: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Что меняется на принтере").font(.title3.bold())
+                Text(only.map { model.title($0) } ?? "Справка по пакетам").font(.title3.bold())
                 Spacer()
                 Button("Готово") { dismiss() }.keyboardShortcut(.defaultAction)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    ForEach(model.modules.filter { only == nil || $0.id == only }) { module in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label(module.title, systemImage: module.icon).font(.headline)
-                            FileList(title: "Добавляет", icon: "plus.square", items: module.adds)
+                    ForEach(model.allPackages.filter { only == nil || $0.id == only }) { module in
+                        VStack(alignment: .leading, spacing: 8) {
+                            if only == nil {
+                                Label(module.title, systemImage: module.hidden ? "shippingbox" : module.icon)
+                                    .font(.headline)
+                            }
+                            ReadmeView(text: module.readme, skipTitle: true)
+                            if !module.parts.isEmpty {
+                                Text("Вместе с ним ставится: " + module.parts.joined(separator: ", "))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            FileList(title: "Добавляет на принтер", icon: "plus.square", items: module.adds)
                             FileList(title: "Меняет", icon: "pencil.line", items: module.changes)
                         }
+                        if only == nil { Divider() }
                     }
                     VStack(alignment: .leading, spacing: 6) {
                         Label("При любой установке", systemImage: "square.stack").font(.headline)
@@ -636,7 +682,41 @@ struct FilesHelp: View {
             .scrollIndicators(.never)
         }
         .padding(20)
-        .frame(width: 520, height: only == nil ? 560 : 360)
+        .frame(width: 560, height: 600)
+    }
+}
+
+/// A package README, drawn line by line: headings, list items and plain paragraphs.
+struct ReadmeView: View {
+    let text: String
+    let skipTitle: Bool
+
+    private func inline(_ line: String) -> Text {
+        Text((try? AttributedString(markdown: line)) ?? AttributedString(line))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(text.components(separatedBy: "\n").enumerated()), id: \.offset) { index, line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("# ") {
+                    if !skipTitle { Text(trimmed.dropFirst(2)).font(.title3.bold()) }
+                } else if trimmed.hasPrefix("## ") {
+                    Text(trimmed.dropFirst(3)).font(.headline).padding(.top, 4)
+                } else if trimmed.hasPrefix("- ") {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("•")
+                        inline(String(trimmed.dropFirst(2))).fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if !trimmed.isEmpty {
+                    inline(trimmed)
+                        .font(trimmed.hasPrefix("|") ? .system(.caption, design: .monospaced) : .body)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .font(.callout)
+        .textSelection(.enabled)
     }
 }
 
@@ -712,7 +792,7 @@ struct ModuleRow: View {
                     if !feature.note.isEmpty {
                         Label(feature.note, systemImage: "checklist").foregroundStyle(.secondary)
                     }
-                    Button("Что меняется на принтере") { showFiles(feature.id) }
+                    Button("Справка и что меняется на принтере") { showFiles(feature.id) }
                         .buttonStyle(.link)
                         .font(.caption)
                 }
@@ -739,7 +819,7 @@ struct ContentView: View {
     private func binding(_ id: String) -> Binding<Bool> {
         Binding(get: { model.chosen.contains(id) },
                 set: { on in
-                    if on { model.chosen.insert(id) } else { model.chosen.remove(id) }
+                    model.setChosen(id, on)
                 })
     }
 
@@ -753,7 +833,7 @@ struct ContentView: View {
                     Spacer()
                     Button { filesFor = FilesTopic(id: nil) } label: { Image(systemName: "questionmark.circle") }
                         .buttonStyle(.borderless)
-                        .help("Что меняется на принтере")
+                        .help("Справка по пакетам")
                     Button("v" + model.packageVersion) { showVersions = true }
                         .buttonStyle(.borderless)
                         .font(.callout.monospacedDigit())
@@ -837,7 +917,7 @@ struct ContentView: View {
             Button("Удалить", role: .destructive) { model.uninstall() }
             Button("Отмена", role: .cancel) {}
         } message: {
-            Text("Klipper перезапустится. Твои материалы и цвета останутся на принтере.")
+            Text("Все пакеты будут удалены. Klipper перезапустится. Твои материалы и цвета останутся на принтере.")
         }
     }
 }

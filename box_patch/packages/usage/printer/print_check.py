@@ -1,7 +1,7 @@
 """Does the plastic on the tagged spools last for a print?
 
 Kept apart from the panel and the Klipper module: it only reads what the printer already
-publishes, and the panel serves SCRIPT from here.
+publishes. The Fluidd card (fluidd_card.py) and the print watcher use it.
 """
 
 import io
@@ -248,66 +248,3 @@ class PrintWatcher:
     def start(self):
         threading.Thread(target=self.run, daemon=True).start()
 
-
-SCRIPT = r"""(function(){
-var style=document.createElement("style");
-style.textContent=".pc{margin-bottom:12px;padding:12px 14px}"
-+".pc-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}"
-+".pc-title{font-weight:600}.pc-head select{width:auto;max-width:100%;padding:5px 8px;font-size:13px}"
-+".pc-rows{display:grid;gap:6px;margin-top:10px}"
-+".pc-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:14px}"
-+".pc-dot{width:14px;height:14px;border-radius:50%;border:1px solid var(--line);flex:none}"
-+".pc-name{font-weight:600}.pc-sub{color:var(--muted);font-size:13px}"
-+".pc-verdict{margin-left:auto;font-weight:600}.pc-ok{color:var(--ok)}.pc-short{color:var(--err)}.pc-risk{color:#b26a00}.pc-unknown{color:var(--muted)}"
-+".pc-note{margin:10px 0 0;color:var(--muted);font-size:13px}"
-+"@media (prefers-color-scheme:dark){.pc-risk{color:#e8b04a}}";
-document.head.appendChild(style);
-var box=document.createElement("div");box.className="card pc";box.id="print-check";box.hidden=true;
-var target=document.getElementById("slots");target.parentNode.insertBefore(box,target);
-var chosen=null,timer=null,busy=false;
-function g(n){return (Math.round(n*10)/10).toString().replace(".",",")+" г"}
-function add(parent,tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;parent.appendChild(e);return e}
-function short(path){return path.split("/").pop()}
-function verdict(r){
-  if(r.verdict==="short")return ["pc-short","Не хватит примерно "+g(-r.spare)];
-  if(r.verdict==="risk")return ["pc-risk","На грани, запас "+g(r.spare)];
-  if(r.verdict==="ok")return ["pc-ok","Хватит, запас "+g(r.spare)];
-  return ["pc-unknown",r.label?"Остаток неизвестен":"Не знаю, какой это слот"];
-}
-function draw(d){
-  var focused=box.querySelector("select")===document.activeElement;
-  if(focused)return;
-  box.textContent="";box.hidden=false;
-  var head=add(box,"div","pc-head");
-  add(head,"span","pc-title",d.printing?"Хватит ли пластика: идёт печать":"Хватит ли пластика");
-  if(d.printing){add(head,"span","pc-sub",short(d.file||""))}
-  else if(d.files&&d.files.length){
-    var s=add(head,"select");s.setAttribute("aria-label","Файл печати");
-    d.files.forEach(function(f){var o=add(s,"option",null,short(f));o.value=f;if(f===d.file)o.selected=true});
-    s.onchange=function(){chosen=s.value;s.blur();load()};
-  }
-  if(d.message){add(box,"p","pc-note",d.message);return}
-  var rows=add(box,"div","pc-rows");
-  d.rows.forEach(function(r){
-    var row=add(rows,"div","pc-row");
-    var dot=add(row,"span","pc-dot");if(r.color)dot.style.background="#"+r.color;
-    add(row,"span","pc-name",r.label||"T"+r.tools.join(", T"));
-    if(r.material)add(row,"span","pc-sub",r.material);
-    add(row,"span","pc-sub",(d.printing?"ещё нужно "+g(r.left_to_print):"нужно "+g(r.need))+(r.remaining!=null?", осталось "+g(r.remaining):""));
-    var v=verdict(r);add(row,"span","pc-verdict "+v[0],v[1]);
-  });
-  add(box,"p","pc-note","Остаток посчитан по метке и не взвешен. Запас меньше "+d.risk_grams+" г считается риском.");
-}
-async function load(){
-  if(busy)return;busy=true;
-  try{
-    var url="/api/print_check"+(chosen?"?file="+encodeURIComponent(chosen):"");
-    var res=await fetch(url);var d=await res.json();
-    if(!res.ok)throw new Error(d.error||"");
-    draw(d);
-  }catch(e){if(!box.hidden&&!box.querySelector(".pc-rows")){box.hidden=true}}
-  finally{busy=false}
-}
-load();timer=setInterval(load,15000);
-})();
-"""

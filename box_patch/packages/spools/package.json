@@ -1,0 +1,38 @@
+{
+  "id": "spools",
+  "version": "1.2.0",
+  "icon": "square.stack.3d.up",
+  "title": "Несколько катушек сразу",
+  "summary": "Катушки подаются одновременно, метки определяются по паре",
+  "details": "Вставленные катушки подаются одновременно, без штатной очереди по одной. На каждом считывателе пара катушек: метка приписывается катушке, только если появилась, когда крутилась она одна. Выгрузка незаправленного слота идёт только мотором, без движения головы.",
+  "note": "Логика проверена в эмуляторе и в тесте с моделью моторов, на принтере подача проверена, поиск меток ещё нет",
+  "requires": [
+    "bambu"
+  ],
+  "install": [
+    {
+      "from": "box_patch/packages/spools/pair_feed.py",
+      "to": "klipper/klippy/extras/pair_feed.py"
+    },
+    {
+      "from": "box_patch/packages/spools/pair_logic.py",
+      "to": "klipper/klippy/extras/pair_logic.py"
+    }
+  ],
+  "klipper_options": {
+    "box_takeover": true
+  },
+  "saved_variables": {
+    "auto_read_rfid": 0
+  },
+  "changes": [
+    "printer_data/config/qidi_patcher.cfg: опция box_takeover в секциях считывателей",
+    "saved_variables.cfg: auto_read_rfid = 0, материал, цвет и готовность слота",
+    "В памяти Klipper: штатные slot_load и EJECT_FILAMENT_CONTROL заменяются, файлы box_*.so не меняются"
+  ],
+  "screen_patch": "Отдельно от этого пакета: маска кнопок в QIDI_Client/bin/qidiclient, байт 0x109db0, оригинал в qidiclient.orig",
+  "uninstall": [
+    "klipper/klippy/extras/pair_feed.py",
+    "klipper/klippy/extras/pair_logic.py"
+  ]
+}

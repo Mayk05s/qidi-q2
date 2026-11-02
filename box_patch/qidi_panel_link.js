@@ -8,7 +8,6 @@
     return location.protocol + "//" + location.hostname + ":18770/";
   }
 
-  var FRAME_ID = "qidi-panel-frame";
   var ACTIVE = "v-list-item--active";
 
   function placeFrame(frame) {
@@ -21,20 +20,33 @@
       "px;width:calc(100vw - " + left + "px);height:calc(100vh - " + top + "px)";
   }
 
-  function closePanel() {
-    var frame = document.getElementById(FRAME_ID);
-    if (frame) frame.style.display = "none";
-    var link = document.getElementById(ID);
-    if (link) (link.tagName === "A" ? link : link.querySelector("a")).classList.remove(ACTIVE);
+  // The guide gets its own menu button when the "guide" module is installed.
+  var GUIDE_ID = "qidi-guide-link";
+  var GUIDE_ICON = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6"/><path d="M12 17.5v.5"/></svg>';
+  var guideEnabled = false;
+
+  function linkOf(item) {
+    return item.tagName === "A" ? item : item.querySelector("a");
   }
 
-  function openPanel(link) {
-    var frame = document.getElementById(FRAME_ID);
+  function closePanel() {
+    [ID, GUIDE_ID].forEach(function (id) {
+      var frame = document.getElementById(id + "-frame");
+      if (frame) frame.style.display = "none";
+      var item = document.getElementById(id);
+      if (item) linkOf(item).classList.remove(ACTIVE);
+    });
+  }
+
+  // Each button keeps its own frame, so switching between them reloads nothing.
+  function openPanel(link, url, id) {
+    closePanel();
+    var frame = document.getElementById(id + "-frame");
     if (!frame) {
       frame = document.createElement("iframe");
-      frame.id = FRAME_ID;
-      frame.title = "QIDI Box";
-      frame.src = panelUrl();
+      frame.id = id + "-frame";
+      frame.title = link.title;
+      frame.src = url;
       document.body.appendChild(frame);
       window.addEventListener("resize", function () {
         if (frame.style.display !== "none") placeFrame(frame);
@@ -47,31 +59,42 @@
   // Any other menu item returns to Fluidd's own page.
   document.addEventListener("click", function (event) {
     var link = event.target.closest && event.target.closest("a");
-    if (link && link.closest(".nav-items") && !link.closest("#" + ID)) closePanel();
+    if (link && link.closest(".nav-items") && !link.closest("#" + ID) && !link.closest("#" + GUIDE_ID)) closePanel();
   }, true);
   window.addEventListener("hashchange", closePanel);
 
+  function menuItem(source, id, url, title, label, icon) {
+    var copy = source.cloneNode(true);
+    var link = linkOf(copy);
+    copy.id = id;
+    link.href = url;
+    link.title = title;
+    link.addEventListener("click", function (event) {
+      event.preventDefault();
+      openPanel(link, url, id);
+    });
+    link.setAttribute("aria-label", label);
+    link.classList.remove("v-list-item--active", "router-link-active", "router-link-exact-active");
+    link.removeAttribute("aria-current");
+    var svg = link.querySelector(".v-icon") || link.querySelector("svg");
+    if (svg) svg.innerHTML = icon;
+    return copy;
+  }
+
   function addLink() {
-    if (document.getElementById(ID)) return;
     var settings = document.querySelector('a[href$="/settings"]');
     if (!settings) return;
     // Copy the wrapper as well when the link is its only content, to keep the spacing.
     var source = settings.parentElement && settings.parentElement.children.length === 1 ? settings.parentElement : settings;
-    var copy = source.cloneNode(true);
-    var link = copy.tagName === "A" ? copy : copy.querySelector("a");
-    copy.id = ID;
-    link.href = panelUrl();
-    link.title = "QIDI Box";
-    link.addEventListener("click", function (event) {
-      event.preventDefault();
-      openPanel(link);
-    });
-    link.setAttribute("aria-label", "QIDI Box: слоты и материалы");
-    link.classList.remove("v-list-item--active", "router-link-active", "router-link-exact-active");
-    link.removeAttribute("aria-current");
-    var icon = link.querySelector(".v-icon") || link.querySelector("svg");
-    if (icon) icon.innerHTML = ICON;
-    source.parentElement.insertBefore(copy, source.nextSibling);
+    var panel = document.getElementById(ID);
+    if (!panel) {
+      panel = menuItem(source, ID, panelUrl(), "QIDI Box", "QIDI Box: слоты и материалы", ICON);
+      source.parentElement.insertBefore(panel, source.nextSibling);
+    }
+    if (guideEnabled && !document.getElementById(GUIDE_ID)) {
+      var guide = menuItem(source, GUIDE_ID, panelUrl() + "guide", "Справка", "Справка: сушка и пластик", GUIDE_ICON);
+      panel.parentElement.insertBefore(guide, panel.nextSibling);
+    }
   }
 
   // Fluidd's panel looks slots up in a dictionary of old numeric codes, while the firmware
@@ -163,6 +186,11 @@
   var card = document.createElement("script");
   card.src = panelUrl() + "fluidd_card.js";
   document.head.appendChild(card);
+
+  fetch(panelUrl() + "api/codes").then(function (res) { return res.json(); }).then(function (codes) {
+    guideEnabled = (codes.features || []).indexOf("guide") >= 0;
+    addLink();
+  }).catch(function () {});
 
   // Fluidd draws its menu after loading and may redraw it later.
   new MutationObserver(addLink).observe(document.documentElement, { childList: true, subtree: true });

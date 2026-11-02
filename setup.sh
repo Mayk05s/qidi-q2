@@ -18,7 +18,6 @@ if [ -f ../.env ]; then
   API="http://$PRINTER_HOST:7125"
   TARGET="$PRINTER_USER@$PRINTER_HOST"
 fi
-KEY="$HOME/.ssh/qidi/id_ed25519"
 
 ASKPASS="$(mktemp)"
 finish() {
@@ -37,10 +36,6 @@ for k in sys.argv[1:]: d=d[k]
 print(d)' "$@"
 }
 
-printer_state() {
-  curl -fsS -m 5 "$API/printer/info" 2>/dev/null | json_field result state 2>/dev/null || echo unavailable
-}
-
 require_idle() {
   local state
   state="$(curl -fsS -m 8 "$API/printer/objects/query?print_stats=state" \
@@ -52,54 +47,23 @@ require_idle() {
   esac
 }
 
-# An error state can be stale right after a restart, so it must persist to count.
-wait_ready() {
-  local errors=0
-  for _ in $(seq 1 45); do
-    case "$(printer_state)" in
-      ready) return 0 ;;
-      error|shutdown)
-        errors=$((errors + 1))
-        [ "$errors" -ge 8 ] && return 1 ;;
-    esac
-    sleep 2
-  done
-  return 1
-}
-
-# remote() restarts the klipper service, because a RESTART command keeps the
-# process and with it the previously imported module code.
-restart_klipper() {
-  sleep 5
-  wait_ready && return 0
-  curl -fsS -m 10 -X POST "$API/printer/firmware_restart" >/dev/null || true
-  sleep 8
-  wait_ready
-}
-
-remote() {
-  local info klipper cfg
-  info="$(curl -fsS -m 8 "$API/printer/info")"
-  klipper="$(json_field result klipper_path <<<"$info")"
-  cfg="$(json_field result config_file <<<"$info")"
-  # Everything goes into one folder, unpacked on the printer next to remote_setup.py.
-  local bundle
-  bundle="$(mktemp -d)"
-  cp remote_setup.py screen_popup_setup.py bambu_rfid.py box_feed.py bambu_map.cfg qidi_panel_link.js qidi-panel.service \
-     "$HOME/.ssh/qidi/id_ed25519.pub" ../tag_writer/qidi_tag_tool.py ../tag_writer/print_check.py ../tag_writer/fluidd_card.py ../tag_writer/screen_popup.py ../tag_writer/plastic_picture.py ../tag_writer/slot_font.json ../tag_writer/sample_model.py \
-     ../tag_writer/sample_font.json ../tag_writer/sample_project_settings.json \
-     ../tag_writer/qidi_materials.json "$bundle/"
-  for name in my_materials.json my_colors.json; do
-    [ -f "../tag_writer/$name" ] && cp "../tag_writer/$name" "$bundle/"
-  done
-  ssh "${SSH_OPTS[@]}" "$TARGET" "rm -rf /tmp/qidi_setup" </dev/null
-  scp -q -r "${SSH_OPTS[@]}" "$bundle" "$TARGET:/tmp/qidi_setup"
-  rm -rf "$bundle"
-  printf '%s\n' "$PRINTER_PASSWORD" | ssh "${SSH_OPTS[@]}" "$TARGET" \
-    "chmod -R a+rX /tmp/qidi_setup; sudo -S -p '' sh -c 'python3 /tmp/qidi_setup/remote_setup.py $1 --klipper \"$klipper\" --cfg \"$cfg\" \
-     --module /tmp/qidi_setup/bambu_rfid.py --map /tmp/qidi_setup/bambu_map.cfg --pubkey /tmp/qidi_setup/id_ed25519.pub \
-     --panel /tmp/qidi_setup --user \"$PRINTER_USER\" && systemctl restart klipper'; \
-     rc=\$?; rm -rf /tmp/qidi_setup; exit \$rc"
+# Installs and removes through the patcher, which reads box_patch/packages/*/package.json:
+# no file list lives here. It restarts Klipper only when needed and rolls back on failure.
+patcher() {
+  /usr/bin/python3 -B ../installer/qidi_backend.py apply "$@" | /usr/bin/python3 -c '
+import json, sys
+ok = True
+for line in sys.stdin:
+    try:
+        message = json.loads(line)
+    except ValueError:
+        print(line, end="")
+        continue
+    if message.get("type") in ("log", "done"):
+        print(message["text"])
+    if message.get("type") == "done":
+        ok = message["ok"]
+sys.exit(0 if ok else 1)'
 }
 
 run_gcode() {
@@ -133,13 +97,6 @@ diag() {
   [ "$(grep -E 'Version=0x' <<<"$output" | grep -cvE 'Version=0x(00|FF)')" -eq 2 ]
 }
 
-ensure_key() {
-  if [ ! -f "$KEY" ]; then
-    mkdir -p -m 700 "$(dirname "$KEY")"
-    ssh-keygen -q -t ed25519 -N '' -C 'mac-to-qidi-q2' -f "$KEY"
-  fi
-}
-
 run_action() {
   ACTION="$1"
   if [ "$HAVE_ENV" -eq 0 ]; then
@@ -148,35 +105,7 @@ run_action() {
   fi
   case "$ACTION" in
     install)
-      require_idle
-      ensure_key
-      echo "Устанавливаю на $PRINTER_HOST..."
-      remote install
-      echo "Перезапускаю Klipper..."
-      if ! restart_klipper; then
-        echo "Klipper не запустился: $(curl -fsS -m 5 "$API/printer/info" \
-          | json_field result state_message 2>/dev/null || echo 'нет ответа')" >&2
-        echo "Откатываю изменения..." >&2
-        remote uninstall
-        restart_klipper || echo "Klipper не поднялся и после отката, проверь Fluidd." >&2
-        exit 1
-      fi
-      if ssh -n -o BatchMode=yes -o ConnectTimeout=5 -o IdentitiesOnly=yes -i "$KEY" "$TARGET" true 2>/dev/null; then
-        echo "ssh qidi: вход по ключу работает."
-      else
-        echo "ssh qidi: вход по ключу пока не работает, на установку модуля это не влияет."
-      fi
-      if diag; then
-        if curl -fsS -m 10 -o /dev/null "http://$PRINTER_HOST:18770/"; then
-        echo "Панель: http://$PRINTER_HOST:18770 (кнопка внизу меню Fluidd)"
-      else
-        echo "Панель пока не отвечает на порту 18770." >&2
-      fi
-      echo "=== Готово: модуль установлен, Klipper работает, оба считывателя отвечают ==="
-      else
-        echo "=== Модуль установлен, но считыватели ответили не так, как ожидалось ===" >&2
-        exit 1
-      fi
+      patcher
       ;;
     diag)
       require_idle
@@ -201,11 +130,9 @@ run_action() {
       echo "=== Чтение завершено, результат выше ==="
       ;;
     uninstall)
-      require_idle
-      ensure_key
-      remote uninstall
-      restart_klipper || echo "Klipper не вернулся в ready, проверь Fluidd." >&2
-      echo "=== Готово: модуль удалён, секции убраны из printer.cfg ==="
+      INSTALLED="$(/usr/bin/python3 -B ../installer/qidi_backend.py status \
+        | /usr/bin/python3 -c 'import json,sys; print(",".join(json.load(sys.stdin)["features"]))')"
+      patcher --remove "$INSTALLED"
       ;;
   esac
 }

@@ -1,3 +1,9 @@
+import pathlib
+import sys
+
+# The tested files are those copied to the printer, in ../printer; the setup step is in ..
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "printer"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import json
 import pathlib
 import tempfile

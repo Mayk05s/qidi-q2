@@ -36,6 +36,18 @@ FEED_CATCH_VELOCITY = 15.
 INSERT_POLL = 0.1
 
 
+def load_pair_feed():
+    """pair_feed.py comes with the spools package; the core works without it."""
+    try:
+        from . import pair_feed
+    except ImportError:
+        try:
+            import pair_feed
+        except ImportError:
+            return None
+    return pair_feed
+
+
 def tag_save_scripts(slot, tag, filament):
     """G-code that writes a tag read by the module into the slot, as a stock read would."""
     scripts = []
@@ -120,6 +132,7 @@ class BoxMover:
         self.ejecting = set()
         self.feeding = set()
         self.readers = {}
+        self.pairs = {}
         self.stock_slot_load = {}
         self.verify_pending = []
         self.pair_jobs = 0
@@ -186,30 +199,50 @@ class BoxMover:
         plan, end_time, position = [], start_time, 0.
         for distance, speed, accel in moves:
             axis_r, accel_t, cruise_t, cruise_v = self.calc_move_time(distance, speed, accel)
-            plan.append((end_time, accel_t, cruise_t, position, axis_r, cruise_v, accel))
+            plan.append((end_time, accel_t, cruise_t, accel_t, position, axis_r, 0., cruise_v, accel))
             end_time += accel_t + cruise_t + accel_t
             position += distance
+        if begin is None:
+            for slot in slots:
+                enables.lookup_enable("slot%d" % (slot,)).motor_enable(estimated + SLOT_ENABLE_DELAY)
+        self._append(slots, plan, end_time)
+        if finish:
+            self._finish_after(slots, end_time)
+        return end_time
+
+    def start_piece(self, slot, begin, piece):
+        """Plan one piece of a longer run (see piece()); begin None starts the motor now."""
+        reactor = self.printer.get_reactor()
+        estimated = self.printer.lookup_object("toolhead").mcu.estimated_print_time(reactor.monotonic())
+        if begin is None:
+            begin = estimated + SLOT_START_DELAY
+            self.printer.lookup_object("stepper_enable").lookup_enable(
+                "slot%d" % (slot,)).motor_enable(estimated + SLOT_ENABLE_DELAY)
+        accel_t, cruise_t, decel_t, axis_r, start_v, cruise_v, accel = piece
+        end_time = begin + accel_t + cruise_t + decel_t
+        self._append([slot], [(begin, accel_t, cruise_t, decel_t, 0., axis_r, start_v, cruise_v, accel)],
+                     end_time)
+        return begin, end_time
+
+    def _append(self, slots, plan, end_time):
+        toolhead = self.printer.lookup_object("toolhead")
+        force_move = self.printer.lookup_object("force_move")
         for slot in slots:
             name = "slot%d" % (slot,)
             stepper = force_move.lookup_stepper(name)
-            if begin is None:
-                enables.lookup_enable(name).motor_enable(estimated + SLOT_ENABLE_DELAY)
             trapq = self._trapq(slot)
             old_kinematics = stepper.set_stepper_kinematics(self._kinematics(slot))
             old_trapq = stepper.set_trapq(trapq)
             stepper.set_position((0., 0., 0.))
-            for begin, accel_t, cruise_t, start_pos, axis_r, cruise_v, accel in plan:
-                self.ffi_lib.trapq_append(trapq, begin, accel_t, cruise_t, accel_t,
-                                          start_pos, 0., 0., axis_r, 0., 0., 0., cruise_v, accel)
+            for begin, accel_t, cruise_t, decel_t, start_pos, axis_r, start_v, cruise_v, accel in plan:
+                self.ffi_lib.trapq_append(trapq, begin, accel_t, cruise_t, decel_t,
+                                          start_pos, 0., 0., axis_r, 0., 0., start_v, cruise_v, accel)
             stepper.generate_steps(end_time)
             self.ffi_lib.trapq_finalize_moves(trapq, end_time + 99999.9, end_time + 99999.9)
             stepper.set_trapq(old_trapq)
             stepper.set_stepper_kinematics(old_kinematics)
             self.busy.add(slot)
         toolhead.note_mcu_movequeue_activity(end_time)
-        if finish:
-            self._finish_after(slots, end_time)
-        return end_time
 
     def _finish_after(self, slots, end_time):
         reactor = self.printer.get_reactor()
@@ -362,6 +395,21 @@ class BoxMover:
             reactor = self.printer.get_reactor()
             self.feed_timer = reactor.register_timer(self._run_feeds, reactor.monotonic() + FEED_START_DELAY)
 
+    def _pair_of(self, slot):
+        """The driver of the reader pair, or None when the spools package is not installed."""
+        pair_feed = load_pair_feed()
+        if pair_feed is None:
+            return None
+        reader = reader_of(slot)
+        if reader not in self.pairs:
+            self.pairs[reader] = pair_feed.PairDriver(self, reader, (slot - slot % 2, slot - slot % 2 + 1))
+        return self.pairs[reader]
+
+    def reread(self, slot):
+        """Read the tag of a fed spool again: the stock read refuses while the toolhead is loaded."""
+        pair = self._pair_of(slot)
+        return pair is not None and pair.reread(slot, self.printer.get_reactor().monotonic())
+
     def _mark_ready(self, slots):
         # 3 means waiting for the stock check, 1 means ready for printing.
         gcode = self.printer.lookup_object("gcode")
@@ -415,13 +463,20 @@ class BoxMover:
                 "box_stepper slot%d" % (slot,)).get_status(eventtime)["runout_button"] == 0]
             started = [slot for slot in present if slot not in self.busy]
             if started:
-                # A short move back and forth lets the gear catch the tip before the long feed.
+                # A short move back and forth lets the gear catch the tip before the pair logic
+                # takes the spool over.
                 self.feeding.update(started)
-                self.start_sequence(started, [
-                    (FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, EJECT_ACCEL),
-                    (-FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, EJECT_ACCEL),
-                    (FEED_LENGTH, EJECT_VELOCITY, EJECT_ACCEL)])
-                self._mark_ready(started)
+                catch = [(FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, EJECT_ACCEL),
+                         (-FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, EJECT_ACCEL)]
+                if self._pair_of(started[0]) is None:
+                    # Without the spools package every spool goes the same safe length.
+                    self.start_sequence(started, catch + [(FEED_LENGTH, EJECT_VELOCITY, EJECT_ACCEL)],
+                                        finish=True)
+                    self._mark_ready(started)
+                else:
+                    caught = self.start_sequence(started, catch, finish=False)
+                    for slot in started:
+                        self._pair_of(slot).insert(slot, eventtime, caught)
             # A slot just ejected keeps its old plan until that ends, so it starts later.
             self.feed_pending.update(set(present) - set(started))
             if self.feed_pending:

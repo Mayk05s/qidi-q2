@@ -1,0 +1,58 @@
+{
+  "id": "panel",
+  "version": "1.0.0",
+  "hidden": true,
+  "title": "Панель на принтере",
+  "summary": "Страница слотов, меток и материалов на порту 18770",
+  "install": [
+    {
+      "from": "tag_writer/qidi_tag_tool.py",
+      "to": "qidi_panel/qidi_tag_tool.py"
+    },
+    {
+      "from": "tag_writer/sample_model.py",
+      "to": "qidi_panel/sample_model.py"
+    },
+    {
+      "from": "tag_writer/sample_font.json",
+      "to": "qidi_panel/sample_font.json"
+    },
+    {
+      "from": "tag_writer/sample_project_settings.json",
+      "to": "qidi_panel/sample_project_settings.json"
+    },
+    {
+      "from": "tag_writer/qidi_materials.json",
+      "to": "qidi_panel/qidi_materials.json"
+    },
+    {
+      "from": "box_patch/bambu_rfid.py",
+      "to": "qidi_panel/bambu_rfid.py"
+    },
+    {
+      "from": "box_patch/box_feed.py",
+      "to": "qidi_panel/box_feed.py"
+    },
+    {
+      "from": "tag_writer/my_materials.json",
+      "to": "qidi_panel/my_materials.json",
+      "keep": true,
+      "optional": true
+    },
+    {
+      "from": "tag_writer/my_colors.json",
+      "to": "qidi_panel/my_colors.json",
+      "keep": true,
+      "optional": true
+    }
+  ],
+  "uninstall": [],
+  "hooks": [
+    "panel"
+  ],
+  "changes": [
+    "fluidd/index.html: одна строка, кнопки панели в меню Fluidd",
+    "fluidd/qidi_panel_link.js: добавляется",
+    "Служба qidi-panel: /etc/systemd/system/qidi-panel.service"
+  ]
+}

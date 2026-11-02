@@ -1,0 +1,30 @@
+{
+  "id": "bambu",
+  "version": "1.0.0",
+  "order": 1,
+  "icon": "tag",
+  "title": "Метки Bambu",
+  "summary": "Принтер узнаёт катушки Bambu по метке",
+  "details": "Принтер читает метки Bambu и сам подставляет в слот материал и точный цвет. Какой материал QIDI взять для каждой метки Bambu, задаётся в панели и в файле bambu_map.cfg на принтере. Метки Bambu только читаются, перезаписать их нельзя.",
+  "note": "Проверено на принтере",
+  "requires": [
+    "rfid_core",
+    "panel"
+  ],
+  "install": [
+    {
+      "from": "box_patch/bambu_map.cfg",
+      "to": "printer_data/config/bambu_map.cfg",
+      "keep": true
+    }
+  ],
+  "uninstall": [],
+  "klipper_options": {
+    "hook_stock_read": true,
+    "bambu_tags": true
+  },
+  "changes": [
+    "saved_variables.cfg: материал и цвет слота, как при штатном чтении метки",
+    "В памяти Klipper: штатное чтение метки box_rfid перехватывается, файл box_rfid.so не меняется"
+  ]
+}

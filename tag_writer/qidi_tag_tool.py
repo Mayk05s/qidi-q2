@@ -27,9 +27,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # bambu_rfid.py is next to this file on the printer and in ../box_patch on the Mac.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "box_patch"))
+# The plastic usage package lives in its own folder here and next to the panel on the printer.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "box_patch" / "packages" / "usage" / "printer"))
 from bambu_rfid import CUSTOM_COLOR_MAGIC, QIDI_COLORS, nearest_qidi_color  # noqa: E402
-import fluidd_card  # noqa: E402
-import print_check  # noqa: E402
+# Files of the plastic usage package: without it the panel runs without them.
+try:
+    import fluidd_card  # noqa: E402
+    import print_check  # noqa: E402
+    CHECK_ERRORS = (print_check.CheckError,)
+except ImportError:
+    fluidd_card = print_check = None
+    CHECK_ERRORS = ()
 import sample_model  # noqa: E402
 
 PORT = 18770
@@ -835,7 +843,7 @@ class App:
     def fluidd(self):
         try:
             check = self.print_check(None)
-        except print_check.CheckError as e:
+        except CHECK_ERRORS as e:
             check = {"rows": [], "message": str(e)}
         return fluidd_card.card_data(self.slots(), check)
 
@@ -1008,20 +1016,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/guide" and "guide" in features and GUIDE_FILE.exists():
             return self._send(200, GUIDE_FILE.read_bytes(), "text/html; charset=utf-8")
         if self.path == "/fluidd_card.js":
-            return self._send(200, fluidd_card.SCRIPT.encode(), "text/javascript; charset=utf-8")
-        if self.path == "/api/fluidd":
+            # Without the usage module Fluidd stays as it is.
+            script = fluidd_card.SCRIPT if fluidd_card and "usage" in features else ""
+            return self._send(200, script.encode(), "text/javascript; charset=utf-8")
+        if self.path == "/api/fluidd" and fluidd_card:
             try:
                 return self._send(200, self.app.fluidd())
-            except (PrinterError, print_check.CheckError) as e:
-                return self._send(502, {"error": str(e)})
-        if self.path == "/print_check.js":
-            script = print_check.SCRIPT if "usage" in features else ""
-            return self._send(200, script.encode(), "text/javascript; charset=utf-8")
-        if self.path.partition("?")[0] == "/api/print_check":
-            query = urllib.parse.parse_qs(self.path.partition("?")[2])
-            try:
-                return self._send(200, self.app.print_check((query.get("file") or [None])[0]))
-            except (PrinterError, print_check.CheckError) as e:
+            except (PrinterError,) + CHECK_ERRORS as e:
                 return self._send(502, {"error": str(e)})
         link = SAMPLE_LINK.fullmatch(self.path)
         data = self.app.sample_file_data(link.group(1)) if link else None
@@ -2381,7 +2382,7 @@ async function loadSlots(){
   state.source=onPrinter()?null:"usb";renderTag();poll();setInterval(poll,1500);
   if(hasSlots)loadSlots();else if(has("guide"))showTab("guide");else showTab("materials");
 })();
-</script><script src="/print_check.js"></script></body></html>
+</script></body></html>
 """
 
 
@@ -2480,7 +2481,8 @@ def main():
             print("Список материалов не обновлён: %s" % (e,), flush=True)
         Handler.app = App(printer=Printer("127.0.0.1"))
         if "usage" in features:
-            print_check.PrintWatcher(Handler.app.printer).start()
+            if print_check:
+                print_check.PrintWatcher(Handler.app.printer).start()
         print("QIDI Box panel on port %d" % (PORT,), flush=True)
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
         return

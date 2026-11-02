@@ -1,6 +1,6 @@
 // Renders the slot names for the low-plastic picture into slot_font.json as smooth alpha bitmaps
 // at the size they are shown, so the printer only copies them. Run once on a Mac:
-// swift make_slot_font.swift > slot_font.json
+// swift tools/make_slot_font.swift > printer/slot_font.json (from the package folder)
 import AppKit
 
 let chars = "0123456789ABCDEFGH"
