@@ -1,6 +1,7 @@
 """Feeding the two spools of one reader together (spools package): pair_logic decides how each
 spool turns and which tag is whose, this module turns the motors through box_feed and reads the
 reader of bambu_rfid."""
+import collections
 import logging
 import math
 import re
@@ -22,6 +23,10 @@ PAIR_POLL = 0.2
 PAIR_SLOW_READ = 0.3
 PAIR_PIECE = 0.4
 PAIR_LEAD = 0.6
+# A read blocks Klipper for 0.3 to 1.6 s (2 Nov), and the other reader's read comes in between:
+# the travel planned ahead outlasts the longest recent wait between two plannings, up to this.
+PAIR_LEAD_MAX = 2.5
+PAIR_GAPS = 12
 # A piece is joined to the one before only if that one ends at least this far ahead, else the
 # steps could reach the MCU too late.
 PAIR_JOIN = 0.25
@@ -126,6 +131,8 @@ class PairDriver:
         self.tags_seen = {}
         self.timer = None
         self.accel = 200.
+        self.planned_at = None
+        self.gaps = collections.deque(maxlen=PAIR_GAPS)
         # Slots this run turns; the other slot of the pair may be ejecting on its own meanwhile.
         self.active = set()
 
@@ -189,12 +196,14 @@ class PairDriver:
             estimated = self.mover.printer.lookup_object("toolhead").mcu.estimated_print_time(eventtime)
             for slot in self.slots:
                 self._follow(slot, estimated, eventtime)
+            # Klipper stands still while the reader reads: the motors get enough travel first.
+            self._plan_all(eventtime, estimated)
             reader = self.mover.readers.get(self.reader)
             started = reactor.monotonic()
             kind, tag = read_pair(reader) if reader is not None else ("none", None)
-            took = reactor.monotonic() - started
-            if took > PAIR_SLOW_READ:
-                logging.info("bambu_rfid: pair %s read took %.2f s", self.reader, took)
+            now = reactor.monotonic()
+            if now - started > PAIR_SLOW_READ:
+                logging.info("bambu_rfid: pair %s read took %.2f s", self.reader, now - started)
             # A spool is known by its tray number when the tag has one: Bambu spools and spools
             # tagged in our panel carry two tags with the same tray, and they are one spool.
             uid = (tag.get("tray") or tag["uid"]) if tag else None
@@ -207,8 +216,8 @@ class PairDriver:
             for line in self.logic.log[said:]:
                 logging.info("bambu_rfid: pair %s: %s", self.reader, line)
             self._save_tags()
-            for slot in self.slots:
-                self._plan(slot, estimated)
+            estimated = self.mover.printer.lookup_object("toolhead").mcu.estimated_print_time(now)
+            self._plan_all(now, estimated)
             if self.logic.done and not any(self.track[s].end > estimated for s in self.slots):
                 self._finish()
                 self.timer = None
@@ -224,6 +233,7 @@ class PairDriver:
     def _follow(self, slot, estimated, eventtime):
         """Tell the logic where the spool is now and whether its motor still turns."""
         spool, track = self._spool(slot), self.track[slot]
+        track.forget(estimated)
         pos = track.position(estimated)
         spool.moving = track.end > estimated
         if not spool.moving:
@@ -245,21 +255,37 @@ class PairDriver:
             self.mover.printer.lookup_object("gcode").respond_raw(
                 "!! Filament of slot %d left the sensor, insert it again" % (slot,))
 
-    def _plan(self, slot, estimated):
-        """Give the motor its next piece when what is planned runs out soon."""
+    def _plan_all(self, now, estimated):
+        """Plan both motors far enough ahead to last until the next planning, judged by how long
+        the recent waits between plannings were."""
+        if self.planned_at is not None:
+            self.gaps.append(now - self.planned_at)
+        self.planned_at = now
+        lead = PAIR_LEAD
+        if self.gaps:
+            lead = min(PAIR_LEAD_MAX, max(lead, max(self.gaps) + PAIR_JOIN + 0.1))
+        for slot in self.slots:
+            # A few pieces at most: each turns for PAIR_PIECE or ends a run.
+            for _ in range(8):
+                if not self._plan(slot, estimated, lead):
+                    break
+
+    def _plan(self, slot, estimated, lead=PAIR_LEAD):
+        """Give the motor its next piece when what is planned runs out within lead; True if one
+        was given."""
         spool, track = self._spool(slot), self.track[slot]
         left = track.end - estimated
-        if left > PAIR_LEAD or spool.out:
-            return
+        if left > lead or spool.out:
+            return False
         if track.speed and left < PAIR_JOIN:
             # Too late to join at speed: the run ends where it is planned to and starts again.
             if left > 0.:
-                return
+                return False
             logging.warning("bambu_rfid: slot%d piece came late, the motor stopped", slot)
             track.speed = 0.
         want = spool.dir * spool.speed
         if not track.speed and not want:
-            return
+            return False
         begin = track.end if left >= PAIR_JOIN else None
         if track.speed and want != track.speed:
             # Stop first; a new direction or speed starts from standstill next time.
@@ -279,7 +305,7 @@ class PairDriver:
             if room is not None and room - abs(ahead) - v * v / (2. * self.accel) < 0.:
                 # The last piece stops exactly there.
                 if room < 0.5:
-                    return
+                    return False
                 times = piece(room if want > 0 else -room, abs(track.speed), v, 0., self.accel)
             else:
                 times = piece(ahead, abs(track.speed), v, v, self.accel)
@@ -287,6 +313,7 @@ class PairDriver:
         track.add(start, end, times)
         if spool.target is not None and abs(track.planned - spool.target) < 0.01:
             track.planned = spool.target
+        return True
 
     def _save_tags(self):
         """Write a tag the logic has just settled; the details come from a reading of that tag."""
@@ -342,8 +369,10 @@ class Track:
         accel_t, cruise_t, decel_t, axis_r, start_v, cruise_v, accel = times
         end_v = cruise_v - accel * decel_t
         self.speed = axis_r * end_v if end_v > 1e-6 else 0.
-        # Pieces that ended long ago do not change the position any more.
-        while len(self.pieces) > 1 and self.pieces[1][0] < start:
+
+    def forget(self, t):
+        """Pieces followed by one that has begun by t do not change the position any more."""
+        while len(self.pieces) > 1 and self.pieces[1][0] <= t:
             self.pieces.pop(0)
 
     def position(self, t):

@@ -2,6 +2,7 @@
 """PairDriver from pair_feed against the spool model of the emulator: the motors follow the
 pieces the driver plans, the spools turn with slack, and the reader sees what is at the antenna."""
 import unittest
+from unittest import mock
 
 import pathlib
 import sys
@@ -90,8 +91,10 @@ class Bench:
             st = self.bench.world.state["AB"[self.slot]]
             return {"runout_button": 0 if self.bench.inserted[self.slot] and st["real"] > 0 else 1}
 
-    def __init__(self, a, b_angle, slack=(0., 300.), has=(True, True), seed=0):
+    def __init__(self, a, b_angle, slack=(0., 300.), has=(True, True), seed=0, read_time=0.):
         self.t = 0.
+        # Klipper stands still while the reader reads, for this long.
+        self.read_time = read_time
         self.world = T.World(a, b_angle, slack=slack, has=has, seed=seed)
         self.inserted = [False, False]
         self.pieces, self.log, self.scripts = [], [], []
@@ -126,6 +129,7 @@ class Bench:
     proxy = None
 
     def _read_slot_tag(self, timeout, uids, trays):
+        self.t += self.read_time
         seen = [name for slot, name in enumerate("AB")
                 if self.inserted[slot] and self.world._zone(self.world.state[name])]
         if len(seen) > 1:
@@ -275,6 +279,18 @@ class PairDriverTests(unittest.TestCase):
 
     def test_spool_without_a_tag(self):
         self.assertEqual(self.sweep(has=(False, True)), [])
+
+    def test_slow_reads_do_not_stop_the_motors(self):
+        # On the printer a read took 0.3 to 1.6 s, the other reader's read in between. Reads of
+        # 1.2 s every time see the tag too seldom to find it in every position, but the motors
+        # still turn without stopping.
+        for read_time in (0.35, 0.8, 1.2):
+            with mock.patch.object(b.logging, "warning") as warning:
+                bad = self.sweep(step=90, read_time=read_time)
+            if read_time < 1.:
+                self.assertEqual(bad, [], read_time)
+            late = [c for c in warning.call_args_list if "came late" in c.args[0]]
+            self.assertEqual(late, [], read_time)
 
     def test_pieces_join_at_speed_and_stop_smoothly(self):
         bench = Bench(350., 90.)
