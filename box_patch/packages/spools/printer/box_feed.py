@@ -1,6 +1,8 @@
 # Feeding and ejecting spools in the QIDI Box without the stock queue.
 # bambu_rfid only connects this package; tag reading stays there.
+import json
 import logging
+import os
 import re
 
 BOX_SLOTS = 4
@@ -16,9 +18,20 @@ BOX_MOVE_ACCEL = 200.
 EJECT_CHUNK = 200.
 EJECT_CHUNK_LEAD = 1.
 EJECT_MAX_LENGTH = 4000.
-EJECT_VELOCITY = 60.
-EJECT_ACCEL = 200.
 EJECT_BATCH_DELAY = 0.2
+# Most of an eject goes in one fast run over the length known to be fed; only the last
+# EJECT_SLOW_ZONE goes slowly, in pieces, until the sensor sees the filament leave.
+EJECT_SLOW_ZONE = 150.
+# Speeds of the multi-feed modes, mm/s and mm/s². The stock firmware moves the Box motors at
+# up to 90 mm/s. Tag search was checked in the model at 30 to 100 mm/s feed.
+MODES = {
+    "quiet": {"feed": 30., "eject": 40., "eject_slow": 20., "accel": 100.},
+    "normal": {"feed": 60., "eject": 90., "eject_slow": 40., "accel": 200.},
+    "fast": {"feed": 80., "eject": 120., "eject_slow": 50., "accel": 300.},
+}
+DEFAULT_MODE = "normal"
+# Next to printer.cfg; the panel writes it as a file, as G-code would wait behind a print.
+MODE_FILE = "box_feed.json"
 # Our moves must not meet a stock move of the same motor: on 2 Nov the stock check of an
 # inserted spool started during our feed and shut Klipper down, so that check is skipped.
 BOX_TAKEOVER = True
@@ -121,6 +134,10 @@ class BoxMover:
         self.trapq = self.ffi_main.gc(self.ffi_lib.trapq_alloc(), self.ffi_lib.trapq_free)
         self.kinematics = {}
         self.stock_eject = None
+        self.stock_reread = None
+        # How far past the slot sensor each fed spool stands, as far as we fed it.
+        self.lengths = {}
+        self.mode_path = None
         self.eject_pending = set()
         self.eject_timer = None
         self.insert_timer = None
@@ -270,21 +287,64 @@ class BoxMover:
             self.trapqs[slot] = self.ffi_main.gc(self.ffi_lib.trapq_alloc(), self.ffi_lib.trapq_free)
         return self.trapqs[slot]
 
+    def mode(self):
+        """Name and speeds of the multi-feed mode chosen in the panel (BOX_FEED_MODE)."""
+        if self.mode_path is None:
+            config_file = self.printer.get_start_args().get("config_file", "")
+            self.mode_path = os.path.join(os.path.dirname(config_file), MODE_FILE)
+        try:
+            with open(self.mode_path, encoding="utf-8") as f:
+                name = json.load(f).get("mode", DEFAULT_MODE)
+        except (OSError, ValueError, AttributeError):
+            name = DEFAULT_MODE
+        if name not in MODES:
+            name = DEFAULT_MODE
+        return name, MODES[name]
+
+    def cmd_mode(self, gcmd):
+        name = gcmd.get("MODE", None)
+        if name is None:
+            current, speeds = self.mode()
+            gcmd.respond_info("bambu_rfid: multi-feed mode %s %s" % (current, sorted(speeds.items())))
+            return
+        name = name.lower()
+        if name not in MODES:
+            raise gcmd.error("bambu_rfid: MODE must be one of %s" % (", ".join(MODES),))
+        self.mode()
+        with open(self.mode_path, "w", encoding="utf-8") as f:
+            json.dump({"mode": name}, f)
+        gcmd.respond_info("bambu_rfid: multi-feed mode %s" % (name,))
+
     def _start_batch(self, slots, distance):
         """Start the slots that are free; a slot still moving is left out with a warning."""
         free = [slot for slot in slots if slot not in self.busy]
         if free:
-            self.start_move(free, distance, EJECT_VELOCITY, EJECT_ACCEL)
+            name, speeds = self.mode()
+            self.start_move(free, distance, speeds["eject_slow"], speeds["accel"])
         return free
 
-    def _eject_chunk(self, slots, begin, moved):
+    def _eject_start(self, slots):
+        """One fast run over what is known to be fed, less EJECT_SLOW_ZONE, then slow pieces."""
+        name, speeds = self.mode()
+        groups = {}
+        for slot in slots:
+            fast = self.lengths.pop(slot, FEED_LENGTH) - EJECT_SLOW_ZONE
+            groups.setdefault(max(0., fast), []).append(slot)
+        for fast, group in sorted(groups.items()):
+            if fast > 0.:
+                self._eject_chunk(group, None, 0., fast, speeds["eject"])
+            else:
+                self._eject_chunk(group, None, 0.)
+
+    def _eject_chunk(self, slots, begin, moved, distance=EJECT_CHUNK, speed=None):
         """Eject in short pieces until the slot sensor sees the filament leave, whatever the
         length turns out to be. A short piece also frees the slot soon after that."""
-        end_time = self.start_sequence(slots, [(-EJECT_CHUNK, EJECT_VELOCITY, EJECT_ACCEL)],
+        name, speeds = self.mode()
+        end_time = self.start_sequence(slots, [(-distance, speed or speeds["eject_slow"], speeds["accel"])],
                                        begin=begin, finish=False)
         reactor = self.printer.get_reactor()
         estimated = self.printer.lookup_object("toolhead").mcu.estimated_print_time(reactor.monotonic())
-        reactor.register_timer(lambda eventtime: self._eject_next(slots, end_time, moved + EJECT_CHUNK, eventtime),
+        reactor.register_timer(lambda eventtime: self._eject_next(slots, end_time, moved + distance, eventtime),
                                reactor.monotonic() + (end_time - estimated) - EJECT_CHUNK_LEAD)
 
     def _eject_next(self, slots, end_time, moved, eventtime):
@@ -323,6 +383,36 @@ class BoxMover:
             return
         gcode.register_command("EJECT_FILAMENT_CONTROL", self.cmd_eject,
                                desc="Eject filament, slots not in the toolhead without the toolhead")
+        self.hook_reread()
+
+    def hook_reread(self):
+        """Take over the screen's Reread of a slot not in the toolhead: the stock one runs the
+        filament up to the splitter and back, half a minute with the queue and the screen held."""
+        if self.stock_reread is not None:
+            return
+        gcode = self.printer.lookup_object("gcode")
+        self.stock_reread = gcode.register_command("READ_RFID", None)
+        if self.stock_reread is None:
+            logging.warning("bambu_rfid: stock READ_RFID not found, hook not set")
+            self.stock_reread = False
+            return
+        gcode.register_command("READ_RFID", self.cmd_reread,
+                               desc="Read a spool tag again, slots not in the toolhead by turning the spool")
+        gcode.register_command("BOX_FEED_MODE", self.cmd_mode,
+                               desc="Multi-feed speed: MODE=quiet, normal or fast")
+
+    def cmd_reread(self, gcmd):
+        slot = gcmd.get_int("SLOT")
+        now = self.printer.get_reactor().monotonic()
+        if not self._eject_ourselves(slot) or self.printer.lookup_object(
+                "box_stepper slot%d" % (slot,)).get_status(now)["runout_button"] != 0:
+            self.stock_reread(gcmd)
+            return
+        if slot in self.busy or slot in self.ejecting or not self.reread(slot):
+            gcmd.respond_info("bambu_rfid: slot %d is moving, read it again when it stops" % (slot,))
+            return
+        self.feeding.add(slot)
+        gcmd.respond_info("bambu_rfid: reading slot %d again" % (slot,))
 
     def _eject_ourselves(self, slot):
         now = self.printer.get_reactor().monotonic()
@@ -357,7 +447,7 @@ class BoxMover:
             free = [slot for slot in slots if slot not in self.busy]
             if free:
                 self.ejecting.update(free)
-                self._eject_chunk(free, None, 0.)
+                self._eject_start(free)
         except Exception:
             # An error here runs in a reactor timer and would shut the printer down.
             logging.exception("bambu_rfid: eject of %s failed", slots)
@@ -460,9 +550,10 @@ class BoxMover:
                 # A short move back and forth lets the gear catch the tip before the pair logic
                 # takes the spool over.
                 self.feeding.update(started)
+                accel = self.mode()[1]["accel"]
                 caught = self.start_sequence(started, [
-                    (FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, EJECT_ACCEL),
-                    (-FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, EJECT_ACCEL)], finish=False)
+                    (FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, accel),
+                    (-FEED_CATCH_LENGTH, FEED_CATCH_VELOCITY, accel)], finish=False)
                 for slot in started:
                     self._pair_of(slot).insert(slot, eventtime, caught)
             # A slot just ejected keeps its old plan until that ends, so it starts later.

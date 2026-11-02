@@ -1,6 +1,6 @@
 {
   "id": "spools",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "icon": "square.stack.3d.up",
   "title": "Несколько катушек сразу",
   "summary": "Катушки подаются одновременно, метки определяются по паре",
@@ -31,8 +31,9 @@
   },
   "changes": [
     "printer_data/config/qidi_patcher.cfg: опция box_takeover в секциях считывателей",
+    "printer_data/config/box_feed.json: режим скорости, пишет панель или BOX_FEED_MODE",
     "saved_variables.cfg: auto_read_rfid = 0, материал, цвет и готовность слота",
-    "В памяти Klipper: штатные slot_load и EJECT_FILAMENT_CONTROL заменяются, файлы box_*.so не меняются"
+    "В памяти Klipper: штатные slot_load, EJECT_FILAMENT_CONTROL и READ_RFID для незаправленных слотов заменяются, файлы box_*.so не меняются"
   ],
   "screen_patch": "Отдельно от этого пакета: маска кнопок в QIDI_Client/bin/qidiclient, байт 0x109db0, оригинал в qidiclient.orig",
   "uninstall": [

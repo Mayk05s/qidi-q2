@@ -16,6 +16,7 @@ class Spool:
         self.rot = 0.
         self.dir = 0
         self.moving = False  # the caller says whether the motor has really stopped
+        self.target = None  # where the run should end, for a caller that can stop exactly there
         self.speed = 0.
         self.tag = None
         self.no_tag = False
@@ -67,11 +68,11 @@ class PairLogic:
     def _say(self, text):
         self.log.append("%.1f %s" % (self.now, text))
 
-    def _run(self, spool, direction, speed=None):
-        spool.dir, spool.speed = direction, speed or self.speed
+    def _run(self, spool, direction, speed=None, target=None):
+        spool.dir, spool.speed, spool.target = direction, speed or self.speed, target
 
     def _halt(self, spool):
-        spool.dir, spool.speed = 0, 0.
+        spool.dir, spool.speed, spool.target = 0, 0., None
 
     def insert(self, name, now):
         spool = self.spool(name)
@@ -150,7 +151,7 @@ class PairLogic:
             self._run(spool, 1)
         elif spool.reread == 4 and spool.pos >= base + half:
             spool.reread = 5
-            self._run(spool, -1)
+            self._run(spool, -1, target=base)
         elif spool.reread == 5 and spool.pos <= base:
             self._halt(spool)
             spool.reread = 0
@@ -160,9 +161,9 @@ class PairLogic:
             self.done = not self.reread_queue
         elif spool.reread == 3:
             if spool.pos > base and spool.dir >= 0:
-                self._run(spool, -1)
+                self._run(spool, -1, target=base)
             elif spool.pos < base and spool.dir <= 0:
-                self._run(spool, 1)
+                self._run(spool, 1, target=base)
             if abs(spool.pos - base) < 15.:
                 self._halt(spool)
                 spool.reread = 0

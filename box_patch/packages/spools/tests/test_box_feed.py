@@ -7,6 +7,9 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "rfid_core" / "printer"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "printer"))
+import json
+import os
+import tempfile
 import unittest
 
 import box_feed as b
@@ -150,8 +153,13 @@ class EjectTests(unittest.TestCase):
         self.printer = FakeBoxPrinter()
         self.reactor = self.Reactor()
         self.state, self.loaded, self.head = "standby", "slot1", True
+        self.saved = {}
 
         def lookup(name, default=None):
+            if name == "save_variables":
+                class Saved:
+                    allVariables = self.saved
+                return Saved
             if name == "print_stats":
                 return self.Status({"state": self.state})
             if name == "box_extras":
@@ -162,6 +170,13 @@ class EjectTests(unittest.TestCase):
         self.printer.lookup_object = lookup
         self.printer.get_reactor = lambda: self.reactor
         self.mover = b.BoxMover(self.printer, (FakeFfi(), FakeLib()))
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.mover.mode_path = os.path.join(folder.name, b.MODE_FILE)
+
+    def set_mode(self, name):
+        with open(self.mover.mode_path, "w") as f:
+            f.write(json.dumps({"mode": name}))
 
     def test_only_a_free_slot_is_ours(self):
         self.assertTrue(self.mover._eject_ourselves(0))
@@ -177,9 +192,10 @@ class EjectTests(unittest.TestCase):
         self.mover.request_eject(0)
         self.assertEqual(self.reactor.when, 10. + b.EJECT_BATCH_DELAY)
         moved = []
-        self.mover._eject_chunk = lambda slots, begin, done: moved.append((slots, begin, done))
+        self.mover._eject_chunk = lambda slots, begin, done, *fast: moved.append((slots, begin, done) + fast)
         self.reactor.callback(10.)
-        self.assertEqual(moved, [([0, 2], None, 0.)])
+        # Nothing known about these spools: the usual fed length goes fast.
+        self.assertEqual(moved, [([0, 2], None, 0., b.FEED_LENGTH - b.EJECT_SLOW_ZONE, b.MODES["normal"]["eject"])])
         self.assertEqual(self.mover.ejecting, {0, 2})
         self.assertIsNone(self.mover.eject_timer)
 
@@ -216,6 +232,26 @@ class EjectTests(unittest.TestCase):
         self.assertEqual(end, 123.)
         self.assertEqual(self.printer.enable_of["slot0"].calls, [])
         self.assertEqual(self.mover.ffi_lib.appends[0][1], 120.)
+
+    def test_eject_runs_fast_over_the_known_length(self):
+        self.set_mode("quiet")
+        self.mover.lengths = {0: 1040., 2: 100.}
+        moved = []
+        self.mover._eject_chunk = lambda slots, begin, done, *fast: moved.append((slots,) + fast)
+        self.mover._eject_start([0, 2])
+        # A spool fed less than the slow zone goes slowly all the way.
+        self.assertEqual(moved, [([2],), ([0], 1040. - b.EJECT_SLOW_ZONE, b.MODES["quiet"]["eject"])])
+        self.assertEqual(self.mover.lengths, {})
+
+    def test_mode_falls_back_to_normal(self):
+        self.assertEqual(self.mover.mode()[0], "normal")
+        self.set_mode("loud")
+        self.assertEqual(self.mover.mode()[0], "normal")
+        with open(self.mover.mode_path, "w") as f:
+            f.write("{broken")
+        self.assertEqual(self.mover.mode()[0], "normal")
+        self.set_mode("fast")
+        self.assertEqual(self.mover.mode(), ("fast", b.MODES["fast"]))
 
     def test_slot_still_moving_is_left_out(self):
         self.mover.busy.add(0)
@@ -381,6 +417,45 @@ class InsertWatchTests(EjectTests):
         self.mover.busy.clear()
         self.mover._run_feeds(11.5)
         self.assertEqual(moved, [[2], [1]])
+
+    def test_reread_of_a_free_slot_turns_only_its_spool(self):
+        calls, said = [], []
+        self.mover.stock_reread = lambda gcmd: calls.append("stock")
+        self.mover.reread = lambda slot: calls.append(slot) or True
+        gcmd = self.Gcmd({"SLOT": 2}, said)
+        self.present(2)
+        self.mover.cmd_reread(gcmd)
+        self.assertEqual(calls, [2])
+        self.assertIn(2, self.mover.feeding)
+        self.assertEqual(said, ["bambu_rfid: reading slot 2 again"])
+
+    def test_reread_of_the_loaded_slot_or_an_empty_one_is_stock(self):
+        calls = []
+        self.mover.stock_reread = lambda gcmd: calls.append("stock")
+        self.mover.reread = lambda slot: self.fail("not ours")
+        self.present(1, 2)
+        self.mover.cmd_reread(self.Gcmd({"SLOT": 1}, []))
+        self.mover.cmd_reread(self.Gcmd({"SLOT": 3}, []))
+        self.assertEqual(calls, ["stock", "stock"])
+
+    def test_reread_of_a_moving_slot_waits(self):
+        said = []
+        self.mover.stock_reread = lambda gcmd: self.fail("not stock")
+        self.mover.reread = lambda slot: self.fail("not now")
+        self.present(2)
+        self.mover.busy.add(2)
+        self.mover.cmd_reread(self.Gcmd({"SLOT": 2}, said))
+        self.assertEqual(said, ["bambu_rfid: slot 2 is moving, read it again when it stops"])
+
+    class Gcmd:
+        def __init__(self, params, said):
+            self.params, self.said = params, said
+
+        def get_int(self, name):
+            return self.params[name]
+
+        def respond_info(self, text):
+            self.said.append(text)
 
     def test_stock_read_on_means_no_feed(self):
         self.saved["auto_read_rfid"] = 1

@@ -216,6 +216,23 @@ class Printer:
         # A file rather than G-code: G-code waits behind a running print.
         self.upload("spool_set_%d.txt" % (index,), "%d\n" % (grams,))
 
+    FEED_MODES = ("quiet", "normal", "fast")
+    FEED_MODE_FILE = "box_feed.json"
+
+    def feed_mode(self):
+        """Speed mode of the multi-feed (spools package); its box_feed.py reads the same file."""
+        try:
+            mode = self.fetch("/server/files/config/" + self.FEED_MODE_FILE).get("mode")
+        except (PrinterError, AttributeError):
+            mode = None
+        return {"mode": mode if mode in self.FEED_MODES else "normal"}
+
+    def set_feed_mode(self, mode):
+        if mode not in self.FEED_MODES:
+            raise PrinterError("Нет такого режима")
+        # A file rather than G-code: G-code waits behind a running print.
+        self.upload(self.FEED_MODE_FILE, json.dumps({"mode": mode}) + "\n")
+
     def loaded_slot(self):
         """Label of the slot whose filament is in the toolhead. The stock read refuses to run then
         (QDE_004_011) and only says so in the console, so this is checked before it."""
@@ -858,6 +875,13 @@ class App:
         self._require_printer().set_spool(body.get("index"), body.get("grams"))
         return {"ok": True}
 
+    def feed_mode(self):
+        return self._require_printer().feed_mode()
+
+    def set_feed_mode(self, body):
+        self._require_printer().set_feed_mode(body.get("mode"))
+        return {"ok": True, "mode": body.get("mode")}
+
     def read_slot(self, body):
         self._require_printer().read_slot(body.get("index"), body.get("skip_neighbour") is True)
         return {"ok": True}
@@ -1015,6 +1039,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.app.slots())
             except PrinterError as e:
                 return self._send(502, {"error": str(e)})
+        if self.path == "/api/feed_mode" and "spools" in features:
+            try:
+                return self._send(200, self.app.feed_mode())
+            except PrinterError as e:
+                return self._send(502, {"error": str(e)})
         if self.path == "/guide" and "guide" in features and GUIDE_FILE.exists():
             return self._send(200, GUIDE_FILE.read_bytes(), "text/html; charset=utf-8")
         if self.path == "/fluidd_card.js":
@@ -1067,6 +1096,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.app.set_spool(body))
             if self.path == "/api/slot_read":
                 return self._send(200, self.app.read_slot(body))
+            if self.path == "/api/feed_mode" and "spools" in features:
+                return self._send(200, self.app.set_feed_mode(body))
             if self.path == "/api/slot_forget":
                 return self._send(200, self.app.forget_tag(body))
             self._send(404, {"error": "not found"})
@@ -1311,6 +1342,11 @@ dialog .actions{justify-content:flex-end;margin:0}
 .stepper button{width:32px;height:32px;font:inherit;font-size:18px;line-height:1;color:var(--accent);background:transparent;border:1px solid var(--line);border-radius:8px;cursor:pointer;padding:0}
 .stepper button:disabled{opacity:.4;cursor:not-allowed}
 .stepper output{width:26px;text-align:center;font-weight:600}
+.feed-modes{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0}
+.feed-mode{text-align:left;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);cursor:pointer;font:inherit}
+.feed-mode[aria-checked=true]{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.feed-mode b{display:block;margin-bottom:4px}
+.feed-mode span{font-size:13px;color:var(--muted)}
 </style></head><body><main>
 <header>
 <h1>QIDI Box</h1>
@@ -1318,6 +1354,7 @@ dialog .actions{justify-content:flex-end;margin:0}
 <button class="tab" role="tab" id="tab-slots" aria-selected="true">Слоты принтера</button>
 <button class="tab" role="tab" id="tab-tags" aria-selected="false">NFC-метки</button>
 <button class="tab" role="tab" id="tab-materials" aria-selected="false">Материалы</button>
+<button class="tab" role="tab" id="tab-feed" aria-selected="false" hidden>Мультиподача</button>
 <button class="tab" role="tab" id="tab-guide" aria-selected="false">Справка</button>
 </div>
 </header>
@@ -1351,6 +1388,13 @@ dialog .actions{justify-content:flex-end;margin:0}
 </div>
 </div>
 <div id="panel-guide" hidden><iframe id="guide-frame" title="Справка по пластику" style="width:100%;height:80vh;border:0;border-radius:12px"></iframe></div>
+<div id="panel-feed" hidden>
+<div class="card">
+<p class="hint">Скорость, с которой Box подаёт, перечитывает и выгружает катушки. Новый режим действует со следующей подачи или выгрузки.</p>
+<div class="feed-modes" id="feed-modes" role="radiogroup" aria-label="Режим мультиподачи"></div>
+<p class="hint" id="feed-hint"></p>
+</div>
+</div>
 <div id="panel-materials" hidden>
 <div class="card enabled" id="enabled"></div>
 <div class="type-list" id="type-list"></div>
@@ -1983,15 +2027,39 @@ $("write").onclick=async()=>{
 /* Slots tab */
 function showTab(name){
   if(name==="guide"&&!$("guide-frame").src)$("guide-frame").src="/guide";
-  ["slots","tags","materials","guide"].forEach(n=>{$("tab-"+n).setAttribute("aria-selected",String(n===name));$("panel-"+n).hidden=n!==name});
+  ["slots","tags","materials","guide","feed"].forEach(n=>{$("tab-"+n).setAttribute("aria-selected",String(n===name));$("panel-"+n).hidden=n!==name});
   if(name==="slots")loadSlots();
   if(name==="materials")renderMaterials();
+  if(name==="feed")loadFeedMode();
   if(name==="tags"){const id=tagMaterial.get();buildTagMaterial(id,tagMaterial.name());loadFindSlots()}
 }
 $("tab-slots").onclick=()=>showTab("slots");
 $("tab-tags").onclick=()=>showTab("tags");
 $("tab-materials").onclick=()=>showTab("materials");
 $("tab-guide").onclick=()=>showTab("guide");
+$("tab-feed").onclick=()=>showTab("feed");
+
+/* Multi-feed tab (spools package) */
+const FEED_MODES=[
+  ["quiet","Тихий","Медленно и тихо, например ночью. Подача 30 мм/с, выгрузка 40 мм/с."],
+  ["normal","Обычный","Подача 60 мм/с, выгрузка 90 мм/с, у датчика медленнее."],
+  ["fast","Быстрый","Подача 80 мм/с, выгрузка 120 мм/с. Громче, на моторах Box ещё не проверен."]];
+function renderFeedModes(current){
+  const box=$("feed-modes");box.textContent="";
+  FEED_MODES.forEach(([id,name,text])=>{
+    const b=document.createElement("button");b.type="button";b.className="feed-mode";
+    b.setAttribute("role","radio");b.setAttribute("aria-checked",String(id===current));
+    const t=document.createElement("b");t.textContent=name;const d=document.createElement("span");d.textContent=text;
+    b.append(t,d);b.onclick=()=>setFeedMode(id);box.append(b)});
+}
+async function loadFeedMode(){
+  try{const r=await api("/api/feed_mode");renderFeedModes(r.mode);$("feed-hint").textContent=""}
+  catch(e){renderFeedModes(null);$("feed-hint").textContent=e.message}
+}
+async function setFeedMode(id){
+  try{await api("/api/feed_mode",{mode:id});renderFeedModes(id);$("feed-hint").textContent="Сохранено."}
+  catch(e){$("feed-hint").textContent=e.message}
+}
 const rows={};
 let slotData=[];let editing=null;
 const materialName=id=>{if(/^L\d+$/.test(id||""))return legacyName(+id.slice(1));const m=state.codes.slot_materials.find(x=>x.id===id);return m?m.name:(id||"Не задан")};
@@ -2377,6 +2445,7 @@ async function loadSlots(){
   const has=name=>state.codes.features.includes(name);
   $("tab-tags").hidden=!has("nfc");
   $("tab-guide").hidden=!has("guide");
+  $("tab-feed").hidden=!has("spools");
   const hasSlots=["bambu","nfc","spools","usage"].some(has);
   $("tab-slots").hidden=!hasSlots;
   buildTagMaterial();

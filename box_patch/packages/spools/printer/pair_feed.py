@@ -6,12 +6,12 @@ import math
 
 try:
     from . import bambu_rfid, pair_logic
-    from .box_feed import EJECT_ACCEL, EJECT_VELOCITY, FEED_LENGTH, SLOT_ENABLE_DELAY, \
+    from .box_feed import FEED_LENGTH, SLOT_ENABLE_DELAY, \
         legacy_filament_id, tag_save_scripts
 except ImportError:
     import bambu_rfid
     import pair_logic
-    from box_feed import EJECT_ACCEL, EJECT_VELOCITY, FEED_LENGTH, SLOT_ENABLE_DELAY, \
+    from box_feed import FEED_LENGTH, SLOT_ENABLE_DELAY, \
         legacy_filament_id, tag_save_scripts
 
 # The pair logic is asked every PAIR_POLL seconds; a motor is given PAIR_PIECE seconds of travel
@@ -85,10 +85,13 @@ class PairDriver:
         self.saved = {slot: None for slot in slots}
         self.tags_seen = {}
         self.timer = None
+        self.accel = 200.
+        # Slots this run turns; the other slot of the pair may be ejecting on its own meanwhile.
+        self.active = set()
 
     @staticmethod
     def _new_logic():
-        return pair_logic.PairLogic(("A", "B"), limit=FEED_LENGTH, speed=EJECT_VELOCITY,
+        return pair_logic.PairLogic(("A", "B"), limit=FEED_LENGTH,
                                     start_delay=0., min_pos=PAIR_MIN_POS)
 
     def _spool(self, slot):
@@ -105,17 +108,38 @@ class PairDriver:
         self.logic.insert(self.names[slot], now)
         self.track[slot] = Track(after)
         self.saved[slot] = None
+        self.active.add(slot)
         self._start(now)
 
     def reread(self, slot, now):
+        """Read the tag of a spool that is already fed: 52% of a turn back, 104% forward and
+        back to where it was, only this spool turning. Not while the pair is still feeding."""
+        spool = self._spool(slot)
+        if spool.inserted and not spool.out and not self.logic.done:
+            return False
+        if not spool.inserted or spool.out:
+            # Fed before Klipper started, or by the stock feed: it stands at the safe point.
+            if self.logic.done and not any(s.inserted and not s.out for s in self.logic.spools):
+                self.logic = self._new_logic()
+                spool = self._spool(slot)
+            spool.__init__(spool.name)
+            spool.inserted = spool.started = True
+            spool.inserted_at = now
+            spool.pos = spool.rot = FEED_LENGTH
+            self.track[slot] = Track(planned=FEED_LENGTH)
         if not self.logic.start_reread(self.names[slot], now):
             return False
         self.saved[slot] = None
+        self.active.add(slot)
         self._start(now)
         return True
 
     def _start(self, now):
+        # The speed mode is taken at the start of a run and holds until it ends.
         if self.timer is None:
+            speeds = self.mover.mode()[1]
+            self.accel = speeds["accel"]
+            self.logic.speed, self.logic.rock_speed = speeds["feed"], speeds["feed"] / 2.
             reactor = self.mover.printer.get_reactor()
             self.timer = reactor.register_timer(self._tick, now + PAIR_POLL)
 
@@ -184,23 +208,29 @@ class PairDriver:
         if track.speed and want != track.speed:
             # Stop first; a new direction or speed starts from standstill next time.
             v = abs(track.speed)
-            times = piece(track.speed * v / (2. * EJECT_ACCEL), v, v, 0., EJECT_ACCEL)
+            times = piece(track.speed * v / (2. * self.accel), v, v, 0., self.accel)
         else:
             v = abs(want)
             ahead = want * PAIR_PIECE
             if not track.speed:
-                ahead += want * v / (2. * EJECT_ACCEL)
-            room = track.planned - PAIR_MIN_POS
-            if want < 0 and room - abs(ahead) - v * v / (2. * EJECT_ACCEL) < 0.:
-                # Backwards the filament must not come closer to the slot sensor than
-                # PAIR_MIN_POS: the last piece stops exactly there.
+                ahead += want * v / (2. * self.accel)
+            # Where this run has to end, if anywhere: backwards the filament must not come
+            # closer to the slot sensor than PAIR_MIN_POS, and the logic may name a target.
+            stops = [PAIR_MIN_POS] if want < 0 else []
+            if spool.target is not None:
+                stops.append(spool.target)
+            room = min((track.planned - stop) * (-1. if want > 0 else 1.) for stop in stops) if stops else None
+            if room is not None and room - abs(ahead) - v * v / (2. * self.accel) < 0.:
+                # The last piece stops exactly there.
                 if room < 0.5:
                     return
-                times = piece(-room, abs(track.speed), v, 0., EJECT_ACCEL)
+                times = piece(room if want > 0 else -room, abs(track.speed), v, 0., self.accel)
             else:
-                times = piece(ahead, abs(track.speed), v, v, EJECT_ACCEL)
+                times = piece(ahead, abs(track.speed), v, v, self.accel)
         start, end = self.mover.start_piece(slot, begin, times)
         track.add(start, end, times)
+        if spool.target is not None and abs(track.planned - spool.target) < 0.01:
+            track.planned = spool.target
 
     def _save_tags(self):
         """Write a tag the logic has just settled; the details come from a reading of that tag."""
@@ -218,24 +248,29 @@ class PairDriver:
                          pair_logic.SURE_NAMES.get(spool.sure, ""))
 
     def _finish(self):
-        ready = [slot for slot in self.slots if self._spool(slot).inserted and not self._spool(slot).out]
+        active, self.active = sorted(self.active), set()
+        ready = [slot for slot in active if not self._spool(slot).out]
+        for slot in ready:
+            # An eject can then run fast over this length.
+            self.mover.lengths[slot] = self.track[slot].planned
         if ready:
             self.mover._mark_ready(ready)
         gcode = self.mover.printer.lookup_object("gcode")
-        for slot in self.slots:
+        for slot in active:
             if self._spool(slot).out:
                 gcode.respond_raw("!! Filament of slot %d left the sensor, insert it again" % (slot,))
-        self.mover._finish_after(list(self.slots), max(track.end for track in self.track.values()))
+        if active:
+            self.mover._finish_after(active, max(self.track[slot].end for slot in active))
 
 
 class Track:
     """What is planned for one motor: the pieces, where they lead and how fast it goes at the end.
     Positions are counted from where the spool was put in."""
 
-    def __init__(self, end=0.):
+    def __init__(self, end=0., planned=0.):
         self.pieces = []
         self.end = end
-        self.planned = 0.
+        self.planned = planned
         self.speed = 0.
 
     def add(self, start, end, times):

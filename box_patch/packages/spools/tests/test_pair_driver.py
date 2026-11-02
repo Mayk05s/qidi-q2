@@ -59,6 +59,10 @@ class Mover:
         self.printer = Printer(bench)
         self.readers = {"rfid": bench}
         self.ready, self.finished = [], []
+        self.lengths = {}
+
+    def mode(self):
+        return "normal", box_feed.MODES["normal"]
 
     def start_piece(self, slot, begin, times):
         if begin is None:
@@ -248,6 +252,32 @@ class PairDriverTests(unittest.TestCase):
                     track.add(begin, begin + sum(times[:3]), times)
                     if times[3] < 0:
                         self.assertGreaterEqual(track.planned, b.PAIR_MIN_POS - 1e-6)
+
+    def test_reread_of_a_spool_fed_before_a_restart(self):
+        # 1A stands at the safe point with its tag 30 degrees past the antenna; the logic has
+        # never seen it. 1B is not in the pair run at all, as if it were ejecting meanwhile.
+        bench = Bench(30., 90.)
+        bench.inserted[0] = True
+        self.assertTrue(bench.driver.reread(0, bench.t))
+        bench.next = bench.t + b.PAIR_POLL
+        while bench.t < 100. and bench.next is not None:
+            bench.t += STEP
+            bench._move_world()
+            if bench.t >= bench.next:
+                when = bench.driver._tick(bench.t)
+                bench.next = None if when == bench.NEVER else when
+        self.assertIsNone(bench.next)
+        self.assertEqual(tags(bench), ("A", None))
+        self.assertEqual(bench.driver._spool(0).sure, p.SURE_REREAD)
+        self.assertAlmostEqual(bench.driver.track[0].planned, box_feed.FEED_LENGTH, delta=1.)
+        self.assertEqual({slot for slot, begin, times in bench.pieces}, {0})
+        self.assertEqual([slots for slots, end in bench.mover.finished], [[0]])
+        self.assertEqual(bench.mover.ready, [0])
+
+    def test_no_reread_while_the_pair_is_still_feeding(self):
+        bench = Bench(350., 90.)
+        bench.insert(0)
+        self.assertFalse(bench.driver.reread(0, bench.t))
 
     def test_filament_pulled_out_switches_the_motor_off(self):
         bench = Bench(350., 90.)

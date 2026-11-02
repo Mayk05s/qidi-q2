@@ -783,6 +783,24 @@ class PrinterTests(unittest.TestCase):
                                           "print_stats": {"state": state}}}}
         return q.Printer("192.0.2.1", fetch)
 
+    def test_feed_mode_is_a_file_next_to_printer_cfg(self):
+        printer = q.Printer("192.0.2.1", lambda path, post=False: {"mode": "quiet"})
+        self.assertEqual(printer.feed_mode(), {"mode": "quiet"})
+        files = {}
+        printer.upload = files.__setitem__
+        printer.set_feed_mode("fast")
+        self.assertEqual(q.json.loads(files["box_feed.json"]), {"mode": "fast"})
+        with self.assertRaises(q.PrinterError):
+            printer.set_feed_mode("loud")
+
+    def test_feed_mode_missing_or_odd_is_normal(self):
+        def missing(path, post=False):
+            raise q.PrinterError("404")
+        self.assertEqual(q.Printer("192.0.2.1", missing).feed_mode(), {"mode": "normal"})
+        self.assertEqual(q.Printer("192.0.2.1", lambda path, post=False: {"mode": "x"}).feed_mode(),
+                         {"mode": "normal"})
+        self.assertEqual(q.Printer("192.0.2.1", lambda path, post=False: []).feed_mode(), {"mode": "normal"})
+
     def test_slots_lists_values(self):
         data = self.make().slots()
         first = data["slots"][0]
