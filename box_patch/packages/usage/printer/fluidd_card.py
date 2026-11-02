@@ -13,9 +13,9 @@ hands the choice to bambu_spool_usage as spool_pick_<slot>.json next to printer.
 def card_data(slots, check):
     """What the Fluidd script needs, from Printer.slots() and PrintCheck.check()."""
     spools = []
-    # The Box slots, then the rack spool when the usage module counts it.
+    # The rack spool first, as in Fluidd's own Box card, when the usage module counts it; then the Box.
     rack = slots.get("rack")
-    for slot in slots["slots"] + ([rack] if rack and rack.get("spool") else []):
+    for slot in ([rack] if rack and rack.get("spool") else []) + slots["slots"]:
         spool = slot.get("spool") or {}
         tag = slot.get("tag") or {}
         # A spool without a tag gets its plastic from the user's list, see SCRIPT.
@@ -44,7 +44,8 @@ style.textContent=[
 "#qidi-plastic-card .qh svg{width:20px;height:20px;opacity:.85}",
 "#qidi-plastic-card .qf{margin-left:auto;font-size:12px;font-weight:400;padding:2px 10px;border-radius:12px;background:rgba(127,127,127,.16);max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
 "#qidi-plastic-card .qb{padding:14px 16px 16px}",
-"#qidi-plastic-card .qg{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}",
+"#qidi-plastic-card .qg{display:grid;grid-template-columns:repeat(var(--n,4),minmax(0,1fr));gap:10px}",
+"@media (max-width:900px){#qidi-plastic-card .qg{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}",
 "#qidi-plastic-card .qt{position:relative;display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px;border:1px solid rgba(127,127,127,.22);background:rgba(127,127,127,.06);min-width:0}",
 "#qidi-plastic-card .qt.short{border-color:#ff5252;background:rgba(255,82,82,.08)}#qidi-plastic-card .qt.risk{border-color:#ffb74d;background:rgba(255,183,77,.08)}",
 "#qidi-plastic-card .qt svg{flex:none;width:38px;height:38px}",
@@ -158,7 +159,8 @@ function drawCard(card){
   if(data.file)head.appendChild(el("span","qf",(data.printing?"Печатается: ":"Последний файл: ")+data.file.split("/").pop()));
   box.appendChild(head);
   var body=el("div","qb");box.appendChild(body);
-  var grid=el("div","qg");body.appendChild(grid);
+  // All spools in one row, whether the rack is counted or not.
+  var grid=el("div","qg");grid.style.setProperty("--n",data.spools.length);body.appendChild(grid);
   data.spools.forEach(function(s){
     var p=problemOf(s.label);
     var t=el("div","qt"+(p?" "+p.verdict:"")+(s.remaining!=null&&s.remaining<50?" low":""));

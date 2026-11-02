@@ -31,10 +31,10 @@ class CardData(unittest.TestCase):
         spool = f.card_data(slots, {})["spools"][0]
         self.assertEqual((spool["material"], spool["weight"], spool["tagless"]), ("eSun PLA+", 750, True))
 
-    def test_rack_spool_comes_last_when_counted(self):
+    def test_rack_spool_comes_first_when_counted(self):
         rack = {"index": 16, "label": "Rack", "color": "B87F2B", "tag": None, "spool": {"remaining": 300, "full": 1000}}
         spools = f.card_data(dict(SLOTS, rack=rack), {})["spools"]
-        self.assertEqual((spools[-1]["label"], spools[-1]["remaining"], spools[-1]["tagless"]), ("Rack", 300, True))
+        self.assertEqual((spools[0]["label"], spools[0]["remaining"], spools[0]["tagless"]), ("Rack", 300, True))
         # An older usage module counts no rack: no tile.
         self.assertEqual(len(f.card_data(dict(SLOTS, rack=dict(rack, spool=None)), {})["spools"]), 2)
 
