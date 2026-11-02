@@ -13,17 +13,22 @@
 #       behind a running print, for most of a minute at its start, while the file is seen at once.
 #   BAMBU_SCREEN_WARNING BOX=3|4
 #       raise the stock Box 3 or 4 window of the printer screen for a moment; the panel turns
-#       those windows into the low-plastic window.
+#       those windows into the low-plastic window. At a print start the panel leaves
+#       screen_warning.txt next to printer.cfg instead ("3 print"): G-code would wait behind the
+#       start and pop up after a cancel. With "print" the window shows only while still printing.
 import json
 import logging
 import os
 import re
+import time
 
 BOX_SLOTS = 4
 USAGE_FILE = "spool_usage.json"
 USAGE_INTERVAL = 1.
 USAGE_SAVE_INTERVAL = 30.
 SPOOL_REQUEST_FILE = "spool_set_%d.txt"
+SCREEN_REQUEST_FILE = "screen_warning.txt"
+SCREEN_REQUEST_AGE = 600.
 MAX_SPOOL_GRAMS = 5000
 USUAL_SPOOL_GRAMS = 1000.
 FILAMENT_MM2 = 2.405  # Cross-section of 1.75 mm filament.
@@ -151,6 +156,22 @@ def take_spool_request(folder, slot):
     return grams if 0 <= grams <= MAX_SPOOL_GRAMS else None
 
 
+def take_screen_request(folder, now):
+    """(box, only while printing) from the panel's file, which is removed; None without one.
+    A file older than SCREEN_REQUEST_AGE is stale and dropped."""
+    path = os.path.join(folder, SCREEN_REQUEST_FILE)
+    try:
+        with open(path) as f:
+            words = f.read().split()
+        old = now - os.path.getmtime(path) > SCREEN_REQUEST_AGE
+        os.remove(path)
+    except OSError:
+        return None
+    if old or not words or words[0] not in ("3", "4"):
+        return None
+    return int(words[0]), "print" in words[1:]
+
+
 class FilamentMeter:
     """Turns the print's total filament into millimeters per slot. The last moment of a print
     still counts, and the total starting again from zero is not taken for a negative use."""
@@ -221,7 +242,10 @@ class ScreenWarnings:
             logging.warning("bambu_rfid: no screen warnings: %s", e)
 
     def cmd_WARNING(self, gcmd):
-        text = self.TEXT % (gcmd.get_int("BOX", minval=3, maxval=4),)
+        self.show(gcmd.get_int("BOX", minval=3, maxval=4))
+
+    def show(self, box):
+        text = self.TEXT % (box,)
         if text not in self.active:
             self.active.append(text)
         self.reactor.register_callback(lambda e: self._clear(text), self.reactor.monotonic() + self.SHOW_SECONDS)
@@ -234,9 +258,10 @@ class ScreenWarnings:
 class SpoolUsage:
     """The [bambu_spool_usage] section: one per printer."""
 
-    def __init__(self, printer, path):
+    def __init__(self, printer, path, warnings=None):
         self.printer = printer
         self.reactor = printer.get_reactor()
+        self.warnings = warnings
         self.ledger = SpoolLedger(path)
         self.meter = FilamentMeter()
         self.next_save = 0.
@@ -277,6 +302,9 @@ class SpoolUsage:
             if grams is not None:
                 self.ledger.set_remaining(spool_key(self._variables(), slot), grams)
                 self._flush()
+        request = take_screen_request(folder, time.time()) if self.warnings is not None else None
+        if request is not None and (not request[1] or stats["state"] in ("printing", "paused")):
+            self.warnings.show(request[0])
         part = self.meter.feed(stats["state"], stats["filament_used"], active_slot(box_status))
         if part is not None:
             slot, millimeters = part
@@ -301,5 +329,4 @@ class SpoolUsage:
 def load_config(config):
     printer = config.get_printer()
     config_file = printer.get_start_args().get("config_file", "")
-    ScreenWarnings(printer)
-    return SpoolUsage(printer, os.path.join(os.path.dirname(config_file), USAGE_FILE))
+    return SpoolUsage(printer, os.path.join(os.path.dirname(config_file), USAGE_FILE), ScreenWarnings(printer))

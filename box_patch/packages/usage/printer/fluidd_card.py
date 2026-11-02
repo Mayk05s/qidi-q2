@@ -76,15 +76,26 @@ function boxCard(){
   return best;
 }
 function spoolColumns(card){
-  var found={};
+  // A spool's block is the largest one around its label that holds no other spool label:
+  // Fluidd's grid columns differ with the window width, so its classes are not relied on.
+  var spans=[];
   card.querySelectorAll("button span").forEach(function(span){
-    var label=span.textContent.trim();
-    if(/^[1-4][A-D]$/.test(label)){var col=span.closest(".col");if(col)found[label]=col}
+    if(/^[1-4][A-D]$/.test(span.textContent.trim()))spans.push(span);
+  });
+  // The label text sits in two nested spans of the button, so labels are counted, not spans.
+  function labelsIn(node){var seen={};spans.forEach(function(s){if(node.contains(s))seen[s.textContent.trim()]=1});return Object.keys(seen).length}
+  var found={};
+  spans.forEach(function(span){
+    var button=span.closest("button")||span,block=button;
+    while(block.parentElement&&block.parentElement!==card&&labelsIn(block.parentElement)===1)block=block.parentElement;
+    if(block!==button)found[span.textContent.trim()]=block;
   });
   return found;
 }
 function patchSpools(card){
-  var cols=spoolColumns(card);
+  var cols=spoolColumns(card),blocks=Object.keys(cols).map(function(k){return cols[k]});
+  // A line left in a block that is no longer a spool's, e.g. after the window was resized.
+  card.querySelectorAll(".qidi-left").forEach(function(line){if(blocks.indexOf(line.parentElement)<0)line.remove()});
   data.spools.forEach(function(s){
     var col=cols[s.label];if(!col)return;
     var line=col.querySelector(".qidi-left");

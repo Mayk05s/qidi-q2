@@ -69,6 +69,32 @@ class ScreenWarningsTests(unittest.TestCase):
         self.assertEqual(self.controller.get_status()["box_warning_info"], ["stock"])
 
 
+class ScreenRequestTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = folder.name
+        self.path = os.path.join(self.folder, b.SCREEN_REQUEST_FILE)
+
+    def write(self, text):
+        with open(self.path, "w") as f:
+            f.write(text)
+        return os.path.getmtime(self.path)
+
+    def test_request_is_taken_once(self):
+        now = self.write("3 print\n")
+        self.assertEqual(b.take_screen_request(self.folder, now), (3, True))
+        self.assertFalse(os.path.exists(self.path))
+        self.assertIsNone(b.take_screen_request(self.folder, now))
+
+    def test_plain_request_and_bad_ones(self):
+        self.assertEqual(b.take_screen_request(self.folder, self.write("4")), (4, False))
+        self.assertIsNone(b.take_screen_request(self.folder, self.write("1 print")))
+        now = self.write("3 print")
+        self.assertIsNone(b.take_screen_request(self.folder, now + b.SCREEN_REQUEST_AGE + 1))
+        self.assertFalse(os.path.exists(self.path))
+
+
 class SpoolLedgerTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()

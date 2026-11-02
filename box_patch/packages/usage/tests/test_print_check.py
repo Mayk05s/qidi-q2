@@ -54,6 +54,16 @@ class Parsing(unittest.TestCase):
         self.assertEqual(p.gcode_text(out.getvalue()), GCODE)
 
 
+class SparseTools(unittest.TestCase):
+    def test_weights_of_used_tools_only_go_to_those_tools(self):
+        plan = p.parse_plan("; total filament weight [g] : 5.60,5.67\nM83\nT0\nG1 E10\nT2\nG1 E10\n")
+        self.assertEqual(plan["grams"], [5.6, 0., 5.67])
+
+    def test_full_list_stays_as_it_is(self):
+        plan = p.parse_plan("; total filament weight [g] : 1.00,0.00,2.00\nM83\nT0\nG1 E10\nT2\nG1 E10\n")
+        self.assertEqual(plan["grams"], [1., 0., 2.])
+
+
 class Evaluating(unittest.TestCase):
     def setUp(self):
         self.plan = p.parse_plan(GCODE)
@@ -171,17 +181,17 @@ class Watching(unittest.TestCase):
             def check(self):
                 outer.checks += 1
                 return {"rows": rows}
-        return p.PrintWatcher(Fake(), Check(), lambda printer, rows: False)
+        self.shown = []
+        return p.PrintWatcher(Fake(), Check(), lambda printer, rows: self.shown.append(rows) or True)
 
     LOW = [{"label": "1D", "verdict": "short", "left_to_print": 300.4, "remaining": 247.2, "spare": -53.2},
            {"label": "1A", "verdict": "ok", "left_to_print": 3, "remaining": 900}]
 
-    def test_low_spool_gives_one_message_per_start(self):
+    def test_low_spool_gives_one_window_per_start(self):
         watcher = self.make(self.LOW, ["standby", "printing", "printing", "paused", "printing"])
         for _ in range(5):
             watcher.step()
-        self.assertEqual(self.sent, ['RESPOND TYPE=error MSG="Code:QDE_004_900 Message:Не хватит пластика. '
-                                     '1D: нужно 300 г, осталось 247 г, не хватит 53 г"'])
+        self.assertEqual((self.shown, self.sent), ([self.LOW], []))
 
     def test_enough_plastic_stays_silent(self):
         watcher = self.make(self.LOW[1:], ["standby", "printing"])
@@ -199,28 +209,9 @@ class Watching(unittest.TestCase):
         watcher = self.make(self.LOW, ["standby", "printing", "complete", "printing"])
         for _ in range(4):
             watcher.step()
-        self.assertEqual(len(self.sent), 2)
+        self.assertEqual(len(self.shown), 2)
 
-    def test_thin_spare_has_its_own_message(self):
-        rows = [{"label": "1B", "verdict": "risk", "left_to_print": 240, "remaining": 247, "spare": 7}]
-        self.assertEqual(p.low_message(rows),
-                         (p.LOW_CODE, "Пластика впритык. 1B: нужно 240 г, осталось 247 г, запас 7 г"))
-
-    def test_short_message_also_names_thin_spools(self):
-        rows = self.LOW + [{"label": "1B", "verdict": "risk", "left_to_print": 240, "remaining": 247, "spare": 7}]
-        code, text = p.low_message(rows)
-        self.assertEqual(code, p.SHORT_CODE)
-        self.assertIn("1B", text)
-
-    def test_screen_window_replaces_the_plain_message(self):
-        watcher = self.make(self.LOW, ["standby", "printing"])
-        shown = []
-        watcher.popup = lambda printer, rows: shown.append(rows) or True
-        watcher.step()
-        watcher.step()
-        self.assertEqual((len(shown), self.sent), (1, []))
-
-    def test_broken_window_falls_back_to_the_message(self):
+    def test_broken_window_sends_nothing_else(self):
         watcher = self.make(self.LOW, ["standby", "printing"])
 
         def broken(printer, rows):
@@ -228,13 +219,7 @@ class Watching(unittest.TestCase):
         watcher.popup = broken
         watcher.step()
         watcher.step()
-        self.assertEqual(len(self.sent), 1)
-
-    def test_message_is_one_safe_gcode_line(self):
-        code, text = p.low_message(self.LOW)
-        self.assertEqual(code, p.SHORT_CODE)
-        self.assertFalse(set(text) & set(';"\n'))
-        self.assertIsNone(p.low_message(self.LOW[1:]))
+        self.assertEqual(self.sent, [])
 
 
 if __name__ == "__main__":

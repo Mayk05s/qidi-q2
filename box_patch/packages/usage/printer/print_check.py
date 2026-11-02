@@ -17,7 +17,6 @@ import zipfile
 RISK_GRAMS = 15
 FILE_LIMIT = 20
 # Not stock codes: the screen shows any code in an error window, with our text.
-SHORT_CODE, LOW_CODE = "QDE_004_900", "QDE_004_901"
 
 SLOT_NAME = re.compile(r"slot(\d+)")
 GRAMS = re.compile(r"^; *(?:total filament weight \[g\] *:|filament used \[g\] *=)(.+)$", re.M)
@@ -70,6 +69,14 @@ def parse_plan(text):
                 timeline[-1][1] += step
             else:
                 timeline.append([tool, step])
+    # QIDI Studio lists the weight only for the filaments a plate uses, in tool order: with T0 and
+    # T2 in use the list has two numbers, the second for T2. Spread it over the tools used.
+    used = sorted({tool for tool, _ in timeline})
+    if used and len(grams) == len(used) and len(grams) <= max(used):
+        spread = [0.] * (max(used) + 1)
+        for tool, weight in zip(used, grams):
+            spread[tool] = weight
+        grams = spread
     return {"grams": grams, "timeline": [tuple(part) for part in timeline]}
 
 
@@ -183,21 +190,6 @@ class PrintCheck:
         return result
 
 
-def low_message(rows):
-    """(code, text) for the printer screen, or None when all is fine. One G-code line: no ; or quotes."""
-    short = ["%s: нужно %d г, осталось %d г, не хватит %d г" % (
-        row["label"], round(row["left_to_print"]), round(row["remaining"]), round(-row["spare"]))
-        for row in rows if row["verdict"] == "short"]
-    thin = ["%s: нужно %d г, осталось %d г, запас %d г" % (
-        row["label"], round(row["left_to_print"]), round(row["remaining"]), round(row["spare"]))
-        for row in rows if row["verdict"] == "risk"]
-    if short:
-        return SHORT_CODE, "Не хватит пластика. %s" % (". ".join(short + thin),)
-    if thin:
-        return LOW_CODE, "Пластика впритык. %s" % (". ".join(thin),)
-    return None
-
-
 def show_popup(printer, rows):
     try:
         import screen_popup
@@ -207,8 +199,10 @@ def show_popup(printer, rows):
 
 
 class PrintWatcher:
-    """On the printer: when a print starts, however it was started, shows a hint on the screen.
-    It only sends a message, the stock runout sensor still pauses when a spool really ends."""
+    """On the printer: when a print starts, however it was started, shows one window on the
+    screen. Nothing else is sent: a G-code message would wait behind the print start and show up
+    on the computer and the screen after a cancel. The stock runout sensor still pauses when a
+    spool really ends."""
 
     INTERVAL = 5
 
@@ -228,14 +222,9 @@ class PrintWatcher:
             return
         rows = self.check.check().get("rows") or []
         try:
-            if self.popup(self.printer, rows):
-                return
-        except Exception as e:  # A broken window must not cost the hint: the plain message follows.
+            self.popup(self.printer, rows)
+        except Exception as e:  # The Fluidd card still tells; the watcher goes on.
             print("Окно о пластике не показано: %s" % (e,), flush=True)
-        message = low_message(rows)
-        if message:
-            script = 'RESPOND TYPE=error MSG="Code:%s Message:%s"' % message
-            self.printer.fetch("/printer/gcode/script?" + urllib.parse.urlencode({"script": script}), post=True)
 
     def run(self):
         while True:
