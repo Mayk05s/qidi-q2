@@ -25,7 +25,7 @@ def main():
             "CFBundleExecutable": "QidiQ2Patcher",
             "CFBundlePackageType": "APPL",
             "CFBundleShortVersionString": json.loads(
-                (ROOT / "installer" / "modules.json").read_text(encoding="utf-8"))["version"],
+                (ROOT / "installer" / "patcher.json").read_text(encoding="utf-8"))["version"],
             "LSMinimumSystemVersion": "13.0",
             "NSHighResolutionCapable": True,
             "NSLocalNetworkUsageDescription": "Программа подключается к принтеру в локальной сети.",
