@@ -1,4 +1,5 @@
-// Draws the app icon: a spool of filament on a rounded orange tile, with a check badge.
+// Draws the app icon in the style of QIDI's own apps: white line art of a filament spool
+// on a flat blue tile.
 // Usage: swift make_icon.swift <out.iconset folder>
 import AppKit
 
@@ -12,52 +13,37 @@ func draw(_ size: CGFloat) -> NSBitmapImageRep {
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     let s = size / 1024
-    // macOS icons keep a margin around the tile.
+    func p(_ x: CGFloat, _ y: CGFloat) -> NSPoint { NSPoint(x: x * s, y: y * s) }
+    // The flat blue tile and white rounded line art of QIDI's own apps.
     let tile = NSRect(x: 100 * s, y: 100 * s, width: 824 * s, height: 824 * s)
-    let shape = NSBezierPath(roundedRect: tile, xRadius: 185 * s, yRadius: 185 * s)
-    NSGradient(starting: NSColor(red: 1.0, green: 0.62, blue: 0.20, alpha: 1),
-               ending: NSColor(red: 0.90, green: 0.33, blue: 0.08, alpha: 1))!.draw(in: shape, angle: -90)
+    NSColor(srgbRed: 62 / 255, green: 81 / 255, blue: 191 / 255, alpha: 1).setFill()
+    NSBezierPath(roundedRect: tile, xRadius: 185 * s, yRadius: 185 * s).fill()
 
-    let center = NSPoint(x: 512 * s, y: 530 * s)
-    func circle(_ r: CGFloat, _ color: NSColor) {
-        color.setFill()
-        NSBezierPath(ovalIn: NSRect(x: center.x - r * s, y: center.y - r * s, width: 2 * r * s, height: 2 * r * s)).fill()
-    }
-    // Spool: white flange, wound filament in rings, dark hub.
-    circle(300, .white)
-    circle(255, NSColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 1))
-    for (i, r) in stride(from: 245, to: 120, by: -26).enumerated() {
-        circle(CGFloat(r), i % 2 == 0 ? NSColor(red: 0.20, green: 0.55, blue: 0.95, alpha: 1)
-                                       : NSColor(red: 0.13, green: 0.43, blue: 0.82, alpha: 1))
-    }
-    circle(110, .white)
-    circle(52, NSColor(red: 0.95, green: 0.50, blue: 0.14, alpha: 1))
-
-    // Filament leaving the spool towards the printer.
-    let strand = NSBezierPath()
-    strand.lineWidth = 26 * s
-    strand.lineCapStyle = .round
-    strand.move(to: NSPoint(x: 740 * s, y: 560 * s))
-    strand.curve(to: NSPoint(x: 820 * s, y: 250 * s), controlPoint1: NSPoint(x: 820 * s, y: 520 * s),
-                 controlPoint2: NSPoint(x: 760 * s, y: 330 * s))
-    NSColor(red: 0.20, green: 0.55, blue: 0.95, alpha: 1).setStroke()
-    strand.stroke()
-
-    // Check badge: the patch is on.
-    let badge = NSRect(x: 600 * s, y: 160 * s, width: 250 * s, height: 250 * s)
-    NSColor.white.setFill()
-    NSBezierPath(ovalIn: badge).fill()
-    NSColor(red: 0.18, green: 0.70, blue: 0.35, alpha: 1).setFill()
-    NSBezierPath(ovalIn: badge.insetBy(dx: 18 * s, dy: 18 * s)).fill()
-    let check = NSBezierPath()
-    check.lineWidth = 30 * s
-    check.lineCapStyle = .round
-    check.lineJoinStyle = .round
-    check.move(to: NSPoint(x: 668 * s, y: 287 * s))
-    check.line(to: NSPoint(x: 712 * s, y: 243 * s))
-    check.line(to: NSPoint(x: 790 * s, y: 330 * s))
     NSColor.white.setStroke()
-    check.stroke()
+    func stroke(_ path: NSBezierPath, _ width: CGFloat) {
+        path.lineWidth = width * s
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        path.stroke()
+    }
+    // A spool seen from the side of the Box: two flanges and the wound filament between them.
+    let center = p(452, 540)
+    for radius in [250.0, 92.0] as [CGFloat] {
+        stroke(NSBezierPath(ovalIn: NSRect(x: center.x - radius * s, y: center.y - radius * s,
+                                           width: 2 * radius * s, height: 2 * radius * s)), 46)
+    }
+    for radius in [190.0, 145.0] as [CGFloat] {
+        let ring = NSBezierPath()
+        ring.appendArc(withCenter: center, radius: radius * s, startAngle: 110, endAngle: 340)
+        stroke(ring, 30)
+    }
+    // The filament leaves the spool and runs out to the right, as into the feeder.
+    let strand = NSBezierPath()
+    strand.move(to: p(452, 290))
+    strand.line(to: p(700, 290))
+    strand.curve(to: p(800, 390), controlPoint1: p(760, 290), controlPoint2: p(800, 330))
+    strand.line(to: p(800, 560))
+    stroke(strand, 46)
     NSGraphicsContext.restoreGraphicsState()
     return rep
 }
