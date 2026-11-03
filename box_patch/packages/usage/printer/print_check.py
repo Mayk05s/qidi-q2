@@ -4,18 +4,29 @@ Kept apart from the panel and the Klipper module: it only reads what the printer
 publishes. The Fluidd card (fluidd_card.py) and the print watcher use it.
 """
 
+import codecs
 import io
 import json
+import os
 import re
+import shutil
+import sys
+import tempfile
 import threading
 import time
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 
 # Remaining grams are counted, not weighed, so a thin spare is a risk and not a promise.
 RISK_GRAMS = 15
 FILE_LIMIT = 20
+# The printer has under 500 MB of memory and Klipper shares it. A 22 MB .gcode.3mf holds 64 MB
+# of G-code: read whole at print start, while the stock firmware unpacks the same file, Klipper
+# stalled for 3 s and the MCU shut down. So the file is read from disk in pieces of this size.
+CHUNK = 1 << 20
+GCODE_FOLDERS = ("/home/qidi/printer_data/gcodes", "/home/mks/printer_data/gcodes")
 # Not stock codes: the screen shows any code in an error window, with our text.
 
 SLOT_NAME = re.compile(r"slot(\d+)")
@@ -29,48 +40,73 @@ class CheckError(Exception):
     pass
 
 
-def gcode_text(data):
-    """The G-code of a plain file or of the first plate of a .gcode.3mf."""
-    if data[:2] != b"PK":
-        return data.decode("utf8", "ignore")
+def gcode_chunks(source):
+    """The G-code of a plain file or of the first plate of a .gcode.3mf, in pieces that end on a
+    line break. source is a seekable binary file or bytes."""
+    if isinstance(source, (bytes, bytearray)):
+        source = io.BytesIO(source)
     try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-        names = sorted(n for n in archive.namelist() if re.fullmatch(r"Metadata/plate_\d+\.gcode", n))
-        if not names:
-            raise CheckError("В файле нет G-кода")
-        return archive.read(names[0]).decode("utf8", "ignore")
-    except zipfile.BadZipFile:
+        stream = source
+        if source.read(2) == b"PK":
+            archive = zipfile.ZipFile(source)
+            names = sorted(n for n in archive.namelist() if re.fullmatch(r"Metadata/plate_\d+\.gcode", n))
+            if not names:
+                raise CheckError("В файле нет G-кода")
+            stream = archive.open(names[0])
+        else:
+            source.seek(0)
+        decoder = codecs.getincrementaldecoder("utf8")("ignore")
+        rest = ""
+        while True:
+            block = stream.read(CHUNK)
+            text = rest + decoder.decode(block, final=not block)
+            if not block:
+                if text:
+                    yield text
+                return
+            cut = text.rfind("\n") + 1
+            if cut:
+                yield text[:cut]
+            rest = text[cut:]
+    except (zipfile.BadZipFile, zlib.error, EOFError):
         raise CheckError("Файл печати повреждён")
 
 
+def gcode_text(data):
+    return "".join(gcode_chunks(data))
+
+
 def parse_plan(text):
-    """Grams per tool from the slicer, plus the extrusion in print order: [(tool, mm), ...]."""
-    found = GRAMS.search(text)
+    """Grams per tool from the slicer, plus the extrusion in print order: [(tool, mm), ...].
+    text is the G-code or its pieces from gcode_chunks."""
+    found = None
+    timeline = []
+    tool, relative, position = None, False, 0.0
+    for chunk in [text] if isinstance(text, str) else text:
+        found = found or GRAMS.search(chunk)
+        for match in MOVES.finditer(chunk):
+            if match.group(1) is not None:
+                tool = int(match.group(1))
+            elif match.group(2):
+                relative = match.group(2) == "M83"
+            elif match.group(3) is not None:
+                position = float(match.group(3))
+            elif match.group(4) is not None:
+                value = float(match.group(4))
+                step = value if relative else value - position
+                position = position + step
+                if tool is None:
+                    continue
+                if timeline and timeline[-1][0] == tool:
+                    timeline[-1][1] += step
+                else:
+                    timeline.append([tool, step])
     if not found:
         raise CheckError("В файле нет расхода по катушкам. Нарежь его в QIDI Studio")
     try:
         grams = [float(part) for part in found.group(1).split(",")]
     except ValueError:
         raise CheckError("В файле нет расхода по катушкам. Нарежь его в QIDI Studio")
-    timeline = []
-    tool, relative, position = None, False, 0.0
-    for match in MOVES.finditer(text):
-        if match.group(1) is not None:
-            tool = int(match.group(1))
-        elif match.group(2):
-            relative = match.group(2) == "M83"
-        elif match.group(3) is not None:
-            position = float(match.group(3))
-        elif match.group(4) is not None:
-            value = float(match.group(4))
-            step = value if relative else value - position
-            position = position + step
-            if tool is None:
-                continue
-            if timeline and timeline[-1][0] == tool:
-                timeline[-1][1] += step
-            else:
-                timeline.append([tool, step])
     # QIDI Studio lists the weight only for the filaments a plate uses, in tool order: with T0 and
     # T2 in use the list has two numbers, the second for T2. Spread it over the tools used.
     used = sorted({tool for tool, _ in timeline})
@@ -138,12 +174,22 @@ class PrintCheck:
         self.cached = None
 
     def _download(self, name):
+        """The print file, open for reading: from disk on the printer, otherwise downloaded into
+        a temporary file. Never whole in memory, see CHUNK."""
+        for folder in GCODE_FOLDERS:
+            path = os.path.realpath(os.path.join(folder, name))
+            if path.startswith(os.path.realpath(folder) + os.sep) and os.path.isfile(path):
+                return open(path, "rb")
         url = "http://%s:7125/server/files/gcodes/%s" % (self.printer.host, urllib.parse.quote(name, safe="/"))
+        spool = tempfile.TemporaryFile()
         try:
             with urllib.request.urlopen(url, timeout=60) as res:
-                return res.read()
+                shutil.copyfileobj(res, spool, CHUNK)
         except (OSError, ValueError) as e:
+            spool.close()
             raise CheckError("Не удалось скачать файл печати: %s" % (e,))
+        spool.seek(0)
+        return spool
 
     def files(self):
         data = self.printer.fetch("/server/files/list?root=gcodes")
@@ -155,7 +201,19 @@ class PrintCheck:
         key = (item["path"], item.get("modified"))
         with self.lock:
             if not self.cached or self.cached[0] != key:
-                self.cached = (key, parse_plan(gcode_text(self.download(item["path"]))))
+                # Klipper runs on the same cores: reading a big file must not take its time.
+                # On Linux a thread id is a valid target and only this thread slows down.
+                if sys.platform.startswith("linux"):
+                    try:
+                        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
+                    except (AttributeError, OSError):
+                        pass
+                source = self.download(item["path"])
+                try:
+                    self.cached = (key, parse_plan(gcode_chunks(source)))
+                finally:
+                    if hasattr(source, "close"):
+                        source.close()
             return self.cached[1]
 
     def check(self, name=None):

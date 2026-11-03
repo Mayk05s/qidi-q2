@@ -53,6 +53,26 @@ class Parsing(unittest.TestCase):
             z.writestr("Metadata/plate_1.json", "{}")
         self.assertEqual(p.gcode_text(out.getvalue()), GCODE)
 
+    def test_big_file_is_read_in_pieces(self):
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("Metadata/plate_1.gcode", GCODE * 50)
+        out.seek(0)
+        old, p.CHUNK = p.CHUNK, 7
+        try:
+            chunks = list(p.gcode_chunks(out))
+            plan = p.parse_plan(p.gcode_chunks(io.BytesIO(out.getvalue())))
+        finally:
+            p.CHUNK = old
+        self.assertGreater(len(chunks), 50)
+        self.assertTrue(all(c.endswith("\n") for c in chunks))
+        self.assertEqual("".join(chunks), GCODE * 50)
+        self.assertEqual(plan, p.parse_plan(GCODE * 50))
+
+    def test_broken_3mf_is_reported(self):
+        with self.assertRaises(p.CheckError):
+            p.gcode_text(b"PK\x03\x04 broken")
+
 
 class SparseTools(unittest.TestCase):
     def test_weights_of_used_tools_only_go_to_those_tools(self):
