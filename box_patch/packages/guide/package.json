@@ -1,6 +1,6 @@
 {
   "id": "guide",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "order": 6,
   "icon": "book",
   "title": "Справка по пластику",
@@ -12,7 +12,7 @@
   ],
   "install": [
     {
-      "from": "tag_writer/drying_guide.html",
+      "from": "box_patch/packages/guide/printer/drying_guide.html",
       "to": "qidi_panel/drying_guide.html"
     }
   ],

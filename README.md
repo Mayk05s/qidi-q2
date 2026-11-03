@@ -2,18 +2,26 @@
 
 Набор пакетов, которые добавляют QIDI Q2 с QIDI Box новые возможности, и программа **QIDI Q2 Patcher**, которая их ставит, обновляет и удаляет.
 
+> **Неофициальный проект.** Он не связан с QIDI Tech и Bambu Lab и ими не поддерживается. Пакеты меняют настройки Klipper и поведение Box на твоём принтере. Всё делается на твой страх и риск, без каких-либо гарантий (см. [LICENSE](LICENSE)). Проверено только на прошивке `QD_Q2_01.01.03.02`.
+
+## Что нужно
+
+- Mac на Apple Silicon с macOS 13 или новее и Xcode Command Line Tools (`xcode-select --install`): из них берутся `swiftc` для сборки программы и Python 3. Или Windows, тогда см. [Windows](#windows).
+- QIDI Q2 с QIDI Box в той же сети, что и Mac.
+- Для записи меток на компьютере: ридер ACR122U (не обязательно).
+
 ## QIDI Q2 Patcher
 
-Двойной клик по `QIDI Q2 Patcher.app` в этой папке или из терминала:
-
-```bash
-open "QIDI Q2 Patcher.app"
-```
-
-Если программы нет или её код менялся, собери её:
+Программа собирается из исходников, в репозитории готовой нет. Собери её один раз и после каждого обновления кода:
 
 ```bash
 python3 -B installer/build_app.py
+```
+
+Появится `QIDI Q2 Patcher.app` в корне проекта. Открой её двойным кликом или из терминала:
+
+```bash
+open "QIDI Q2 Patcher.app"
 ```
 
 Слева выбирается принтер: из найденных в сети или кнопкой «Добавить принтер» по адресу. Для входа используются стандартные логин и пароль QIDI, свои задаются карандашом у выбранного принтера. Адрес и свой вход хранятся в `.env` открытым текстом, не выкладывай этот файл.
@@ -23,6 +31,24 @@ python3 -B installer/build_app.py
 Перед каждой установкой программа сама сохраняет резервную копию принтера на этом компьютере, в `~/Library/Application Support/QIDI Q2 Patcher/backups/<адрес принтера>`: настройки Klipper, файлы пакетов, панель, кнопку в Fluidd и окна экрана. Что копировать, берётся из описаний пакетов (их файлы и поле `backup`). Кнопка «Восстановить» справа сверху показывает копии, делает новую, загружает копию из файла (сделанную раньше и перенесённую куда-то ещё) и возвращает принтер к выбранной: сохранённые файлы встают на место, а то, что патч добавил после копии, удаляется. Хранится 15 последних копий и самая первая.
 
 Справка по каждому пакету открывается в «Подробнее», по всем сразу кнопкой «?» справа сверху: что пакет делает, какие файлы добавляет на принтер и какие штатные меняет.
+
+### Windows
+
+Для Windows есть та же программа одним файлом: `QIDI Q2 Patcher.exe`. Окно то же, только сделано на tkinter (`installer/qidi_window.py`), а работу выполняет тот же `installer/qidi_backend.py`. Пакеты зашиты внутрь exe, поэтому папка проекта для работы не нужна. Python и ssh ставить не надо: к принтеру программа подключается сама, через paramiko.
+
+Exe собирает GitHub: вкладка Actions → «Windows exe» → «Run workflow», готовый файл появится в Artifacts этого запуска. Сборка запускается и сама при теге `v*`. Собрать на своём компьютере с Windows (Python 3.9 или новее):
+
+```bash
+git config --global core.autocrlf false
+pip install pyinstaller paramiko
+python -B installer/build_exe.py
+```
+
+Первую строку нужно выполнить до клонирования: файлы для принтера должны остаться с переводами строк Unix, иначе сборка остановится. Готовый файл появится в `dist\`.
+
+Программа не подписана, поэтому при первом запуске Windows покажет «Система Windows защитила ваш компьютер». Нажми «Подробнее» → «Выполнить в любом случае». Адрес принтера, вход, резервные копии и журнал лежат в `%APPDATA%\QIDI Q2 Patcher`. Без принтера окно открывается так: `"QIDI Q2 Patcher.exe" --demo`.
+
+На настоящем Windows exe ещё не запускался. Окно проверено на Mac в демо-режиме, а подключение через paramiko проверено на принтере.
 
 ## Пакеты
 
@@ -61,12 +87,23 @@ python3 -B installer/build_app.py
 
 ## Что где лежит
 
-- `installer/`: QIDI Q2 Patcher. `patcher.json` хранит общую версию, проверенные прошивки и риски, остальное приходит из пакетов.
+- `installer/`: QIDI Q2 Patcher. `patcher.json` хранит общую версию, проверенные прошивки и риски, остальное приходит из пакетов. Окно для Mac: `QidiInstaller.swift`, для Windows: `qidi_window.py`. Обе программы запускают `qidi_backend.py`, а `ssh_link.py` подключает его к принтеру.
 - `box_patch/packages/<id>/`: пакеты. В корне пакета `README.md`, `package.json` и, если нужен, шаг установки; в `printer/` файлы для принтера, в `tests/` тесты, в `tools/` инструменты для Mac.
 - `box_patch/remote_setup.py`: выполняется на принтере при установке, читает описания пакетов.
 - Модули Klipper: `rfid_core/printer/bambu_rfid.py` (считыватели и метки Bambu), `nfc/printer/bambu_nfc.py` (запись своих меток), `usage/printer/bambu_spool_usage.py` (учёт остатка и окно экрана).
 - Панель: `box_patch/packages/panel/printer/qidi_tag_tool.py`.
-- `tag_writer/`: проверка пластика в QIDI Studio (`studio_check.py`, ставится `python3 -B tag_writer/install_studio_check.py`, сейчас не используется) и черновик справки по сушке.
+- `tag_writer/`: проверка пластика в QIDI Studio (`studio_check.py`, ставится `python3 -B tag_writer/install_studio_check.py`, сейчас не используется).
 - `NEXT_STEPS.md`: текущее состояние и планы.
+- `CLAUDE.md`: правила проекта для тех, кто делает пакеты, в том числе для ИИ-помощника.
 
 Тесты: `python3 -B -m unittest` в `box_patch`, `tag_writer`, `installer` и в `tests/` каждого пакета.
+
+## Лицензия и благодарности
+
+Код распространяется по [GNU GPL v3](LICENSE), как и Klipper, в который ставятся модули.
+
+Чтение меток Bambu Lab опирается на открытое исследование формата меток [Bambu Research Group, RFID-Tag-Guide](https://github.com/Bambu-Research-Group/RFID-Tag-Guide).
+
+## In English
+
+Unofficial tools for the QIDI Q2 printer with the QIDI Box: reading Bambu Lab RFID tags, writing your own NFC tags, parallel spool feeding, filament usage tracking and an adaptive bed mesh. They are installed by **QIDI Q2 Patcher**, a macOS app built from this repository with `python3 -B installer/build_app.py`, or a Windows .exe built by the "Windows exe" GitHub Actions workflow (`installer/build_exe.py`). The interface and documentation are in Russian. Not affiliated with QIDI Tech or Bambu Lab. Tested only on firmware `QD_Q2_01.01.03.02`. Use at your own risk. License: GPL-3.0.
