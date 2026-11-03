@@ -13,7 +13,10 @@ import glob
 import importlib.util
 import json
 import os
-import pwd
+try:
+    import pwd
+except ImportError:  # Windows: the patcher only reads package descriptions from here
+    pwd = None
 import re
 import shutil
 import subprocess
