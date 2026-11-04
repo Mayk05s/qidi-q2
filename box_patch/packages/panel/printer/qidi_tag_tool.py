@@ -587,6 +587,8 @@ MY_MATERIALS_FILE = pathlib.Path(__file__).resolve().parent / "my_materials.json
 MY_NAMES_FILE = pathlib.Path(__file__).resolve().parent / "my_names.json"
 MY_NAMES_LIMIT = 100
 MY_PLASTICS_FILE = pathlib.Path(__file__).resolve().parent / "my_plastics.json"
+# Usage per spool of the print files already read, kept by usage's print_check.py on the printer.
+PRINT_PLANS_FILE = pathlib.Path(__file__).resolve().parent / "print_plans.json"
 MY_PLASTICS_LIMIT = 100
 # Print order of sample groups, coolest plastic first, by the start of the plastic type:
 # the first prefix that matches wins, so PETG comes before PET and PCTG before PC.
@@ -1261,16 +1263,28 @@ class App:
         return self._require_printer().slots()
 
     def fluidd(self):
+        # The card never waits for a big print file: the spools now, the usage when it is read.
         try:
-            check = self.print_check(None)
+            check = self.print_check(None, wait=False)
         except CHECK_ERRORS as e:
             check = {"rows": [], "message": str(e)}
         return fluidd_card.card_data(self.slots(), check, {m["id"]: m["name"] for m in load_materials()})
 
-    def print_check(self, name):
+    def plastic(self):
+        """The one PrintCheck of the panel, shared with the print watcher: a file is read once."""
         if getattr(self, "plastic_check", None) is None:
-            self.plastic_check = print_check.PrintCheck(self._require_printer())
-        return self.plastic_check.check(name)
+            try:
+                self.plastic_check = print_check.PrintCheck(
+                    self._require_printer(), cache_path=str(PRINT_PLANS_FILE) if printer_mode else None)
+            except TypeError:  # usage before 1.5.3: no file kept, every call waits
+                self.plastic_check = print_check.PrintCheck(self._require_printer())
+        return self.plastic_check
+
+    def print_check(self, name, wait=True):
+        try:
+            return self.plastic().check(name, wait)
+        except TypeError:  # usage before 1.5.3
+            return self.plastic().check(name)
 
     def set_spool(self, body):
         self._require_printer().set_spool(body.get("index"), body.get("grams"))
@@ -3745,7 +3759,7 @@ def main():
         Handler.app = App(printer=Printer("127.0.0.1"))
         if "usage" in features:
             if print_check:
-                print_check.PrintWatcher(Handler.app.printer).start()
+                print_check.PrintWatcher(Handler.app.printer, Handler.app.plastic()).start()
         print("QIDI Box panel on port %d" % (PORT,), flush=True)
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
         return

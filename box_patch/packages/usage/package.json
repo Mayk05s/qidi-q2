@@ -1,6 +1,6 @@
 {
   "id": "usage",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "order": 4,
   "icon": "scalemass",
   "title": "Расход пластика",
@@ -42,7 +42,8 @@
     "qidi_panel/fluidd_card.py",
     "qidi_panel/screen_popup.py",
     "qidi_panel/plastic_picture.py",
-    "qidi_panel/slot_font.json"
+    "qidi_panel/slot_font.json",
+    "qidi_panel/print_plans.json"
   ],
   "changes": [
     "printer_data/config/spool_usage.json: остаток по катушкам, ведёт модуль bambu_rfid",
@@ -51,6 +52,7 @@
     "/etc/systemd/system/qidi-screen-reload.path и .service: перезапуск программы экрана qidi-client, чтобы она прочитала текст окна",
     "Программа экрана перезапускается на несколько секунд при показе окна",
     "Fluidd: граммы под катушками и карточка добавляются скриптом панели fluidd_card.js через уже вставленный qidi_panel_link.js, файлы Fluidd не меняются",
+    "qidi_panel/print_plans.json: расход по уже прочитанным файлам печати, чтобы не читать их заново, удаляется вместе с пакетом",
     "printer_data/config/spool_pick_N.json: выбор пластика для слота без метки, пишет панель, модуль забирает и удаляет",
     "saved_variables.cfg: при выборе пластика материал и цвет слота, запись метки слота становится пустой, как при «Забыть метку» в панели"
   ],

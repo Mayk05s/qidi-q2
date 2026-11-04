@@ -60,6 +60,12 @@ class CardData(unittest.TestCase):
         self.assertEqual(spools[0]["need"], 30.0)
         self.assertNotIn("need", spools[1])
 
+    def test_file_still_read_is_pending(self):
+        data = f.card_data(SLOTS, {"file": "big.gcode.3mf", "rows": [], "pending": True})
+        self.assertTrue(data["pending"])
+        self.assertEqual(data["spools"][0]["remaining"], 996.4)
+        self.assertFalse(f.card_data(SLOTS, {})["pending"])
+
     def test_counted_full_spool_wins_over_the_tag_weight(self):
         slots = {"slots": [{"index": 0, "label": "1A", "tag": {"detail": "PLA", "weight": 1000},
                             "spool": {"remaining": 243, "full": 250}}]}

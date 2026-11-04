@@ -63,7 +63,7 @@ def card_data(slots, check, names=None):
              "remaining": row["remaining"], "verdict": row["verdict"]}
             for row in check.get("rows") or [] if row["verdict"] != "ok"]
     return {"spools": spools, "file": check.get("file"), "printing": printing,
-            "problems": rows, "message": check.get("message")}
+            "problems": rows, "message": check.get("message"), "pending": bool(check.get("pending"))}
 
 
 SCRIPT = r"""(function(){
@@ -107,6 +107,7 @@ style.textContent=[
 "#qidi-plastic-card .qw.short{background:rgba(255,82,82,.12);color:#ff7b7b}",
 "#qidi-plastic-card .qw.risk,#qidi-plastic-card .qw.unknown{background:rgba(255,183,77,.12);color:#ffc370}",
 "#qidi-plastic-card .qw.ok{background:rgba(76,175,80,.12);color:#6fcf73}",
+"#qidi-plastic-card .qw.wait{background:rgba(127,168,245,.1);color:#9fbaf5}",
 "#qidi-plastic-card .qt.pick{cursor:pointer}#qidi-plastic-card .qt.pick:hover{border-color:rgba(127,127,127,.55)}",
 "#qidi-plastic-card .qpk{font-size:12px;font-weight:600;color:#7fa8f5;margin-top:3px}",
 "#qidi-pick{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55)}",
@@ -251,6 +252,10 @@ function drawCard(card){
       return p.verdict==="unknown"?p.label+": остаток неизвестен, выбери пластик на катушке":p.label+": нужно "+g(p.need)+", осталось "+g(p.remaining);
     }).join(" · ")+(short.length?". Подготовьте новую катушку.":"")+(file?" ("+file+")":"")));
     w.appendChild(tx);body.appendChild(w);
+  }else if(data.pending){
+    // A big file is read in the background, about half a minute: the card asks again every 10 s.
+    w=el("div","qw wait");w.innerHTML=ICON_SPOOL;var wt=el("div");wt.appendChild(el("div","t","Считаю расход"));
+    wt.appendChild(el("div","d",(data.printing?"Печать ":"Последний файл ")+file+": большой файл читается до минуты"));w.appendChild(wt);body.appendChild(w);
   }else if(data.file&&!data.message){
     w=el("div","qw ok");w.innerHTML=ICON_OK;var ok=el("div");ok.appendChild(el("div","t","Пластика хватает"));
     ok.appendChild(el("div","d",(data.printing?"До конца печати ":"На последний файл ")+file));w.appendChild(ok);body.appendChild(w);

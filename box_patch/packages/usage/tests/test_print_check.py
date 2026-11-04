@@ -193,6 +193,51 @@ class Checking(unittest.TestCase):
         check.check()
         self.assertEqual(self.downloads, ["new.gcode"])
 
+    def test_card_does_not_wait_for_the_file(self):
+        import threading
+        gate = threading.Event()
+
+        def slow(name):
+            gate.wait(5)
+            return GCODE.encode()
+        check = p.PrintCheck(FakePrinter(), slow)
+        first = check.check(wait=False)
+        self.assertEqual((first["pending"], first["rows"]), (True, []))
+        gate.set()
+        self.assertTrue(check.check()["rows"])
+        self.assertNotIn("pending", check.check(wait=False))
+
+    def test_watcher_and_card_read_the_file_once(self):
+        import threading
+        gate = threading.Event()
+        calls = []
+
+        def slow(name):
+            calls.append(name)
+            gate.wait(5)
+            return GCODE.encode()
+        check = p.PrintCheck(FakePrinter(), slow)
+        check.check(wait=False)
+        waiter = threading.Thread(target=check.check)
+        waiter.start()
+        gate.set()
+        waiter.join(5)
+        check.check(wait=False)
+        self.assertEqual(calls, ["new.gcode"])
+
+    def test_read_files_survive_a_restart(self):
+        import os
+        import tempfile
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "print_plans.json")
+        self.make(FakePrinter())  # resets self.downloads
+        first = p.PrintCheck(FakePrinter(), lambda name: GCODE.encode(), cache_path=path)
+        rows = first.check()["rows"]
+
+        def never(name):
+            raise AssertionError("read again")
+        self.assertEqual(p.PrintCheck(FakePrinter(), never, cache_path=path).check()["rows"], rows)
+
     def test_unknown_file_is_refused(self):
         with self.assertRaises(p.CheckError):
             self.make(FakePrinter()).check("../../etc/passwd")

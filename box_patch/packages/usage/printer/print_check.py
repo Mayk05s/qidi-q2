@@ -167,11 +167,42 @@ def evaluate(plan, variables, spools, labels, used_mm=0.0):
 
 
 class PrintCheck:
-    def __init__(self, printer, download=None):
+    """One per panel: the Fluidd card and the print watcher share it, so a file is read once.
+    A big file takes half a minute (see CHUNK): it is read in the background, the card shows the
+    spools at once (wait=False) and the usage when it is ready. Counted files are kept in
+    cache_path, so a panel restart does not read them again."""
+
+    PLANS_KEPT = 20
+
+    def __init__(self, printer, download=None, cache_path=None):
         self.printer = printer
         self.download = download or self._download
+        self.cache_path = cache_path
         self.lock = threading.Lock()
-        self.cached = None
+        self.plans = self._load_plans()
+        self.errors = {}
+        self.jobs = {}
+
+    def _load_plans(self):
+        if not self.cache_path:
+            return {}
+        try:
+            with open(self.cache_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return {entry["key"]: entry["plan"] for entry in data if isinstance(entry, dict)}
+        except (OSError, ValueError, KeyError, TypeError):
+            return {}
+
+    def _save_plans(self):
+        if not self.cache_path:
+            return
+        data = [{"key": key, "plan": plan} for key, plan in self.plans.items()]
+        try:
+            with open(self.cache_path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(self.cache_path + ".tmp", self.cache_path)
+        except OSError as e:
+            print("Расход по файлу не сохранён: %s" % (e,), flush=True)
 
     def _download(self, name):
         """The print file, open for reading: from disk on the printer, otherwise downloaded into
@@ -197,27 +228,59 @@ class PrintCheck:
         items.sort(key=lambda f: f.get("modified") or 0, reverse=True)
         return items
 
-    def _plan(self, item):
-        key = (item["path"], item.get("modified"))
+    def _plan(self, item, wait=True):
+        """The file's plan, or None while it is still being read and wait is False."""
+        key = json.dumps([item["path"], item.get("modified"), item.get("size")])
         with self.lock:
-            if not self.cached or self.cached[0] != key:
-                # Klipper runs on the same cores: reading a big file must not take its time.
-                # On Linux a thread id is a valid target and only this thread slows down.
-                if sys.platform.startswith("linux"):
-                    try:
-                        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
-                    except (AttributeError, OSError):
-                        pass
-                source = self.download(item["path"])
-                try:
-                    self.cached = (key, parse_plan(gcode_chunks(source)))
-                finally:
-                    if hasattr(source, "close"):
-                        source.close()
-            return self.cached[1]
+            if key in self.plans:
+                return self.plans[key]
+            if key in self.errors:
+                raise self.errors[key]
+            job = self.jobs.get(key)
+            if job is None:
+                job = self.jobs[key] = threading.Thread(target=self._read, args=(key, item["path"]), daemon=True)
+                job.start()
+        if not wait:
+            return None
+        job.join()
+        with self.lock:
+            if key in self.errors:
+                raise self.errors[key]
+            return self.plans[key]
 
-    def check(self, name=None):
-        """The running print if there is one, otherwise the named or the newest file."""
+    def _read(self, key, path):
+        # Klipper runs on the same cores: reading a big file must not take its time.
+        # On Linux a thread id is a valid target and only this thread slows down.
+        if sys.platform.startswith("linux"):
+            try:
+                os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
+            except (AttributeError, OSError):
+                pass
+        plan = error = None
+        try:
+            source = self.download(path)
+            try:
+                plan = parse_plan(gcode_chunks(source))
+            finally:
+                if hasattr(source, "close"):
+                    source.close()
+        except CheckError as e:
+            error = e
+        except Exception as e:  # Whatever goes wrong, a waiting caller must hear of it.
+            error = CheckError("Не удалось прочитать файл печати: %s" % (e,))
+        with self.lock:
+            self.jobs.pop(key, None)
+            if error is not None:
+                self.errors[key] = error
+                return
+            self.plans[key] = plan
+            while len(self.plans) > self.PLANS_KEPT:
+                self.plans.pop(next(iter(self.plans)))
+            self._save_plans()
+
+    def check(self, name=None, wait=True):
+        """The running print if there is one, otherwise the named or the newest file. With wait
+        False a file not read yet gives no rows and pending True; it is read in the background."""
         status = self.printer.fetch("/printer/objects/query?save_variables&print_stats&bambu_spool_usage")
         try:
             status = status["result"]["status"]
@@ -246,9 +309,12 @@ class PrintCheck:
         if usage.get("rack"):
             spools[RACK_SLOT] = usage["rack"]
         try:
-            plan = self._plan(item)
+            plan = self._plan(item, wait)
         except CheckError as e:
             result.update({"rows": [], "message": str(e)})
+            return result
+        if plan is None:
+            result.update({"rows": [], "pending": True})
             return result
         labels = dict(self.printer.SLOTS)
         labels[RACK_SLOT] = "Rack"
