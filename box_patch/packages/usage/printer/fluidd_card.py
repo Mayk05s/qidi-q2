@@ -38,6 +38,11 @@ def card_data(slots, check, names=None):
     """What the Fluidd script needs, from Printer.slots() and PrintCheck.check(); names: material
     code to profile name."""
     names = names or {}
+    printing = bool(check.get("printing"))
+    # What the print takes from each spool: all of it before the print, the rest during it. The
+    # bar shows it in its own colour, see SCRIPT.
+    needs = {row["label"]: row["left_to_print"] if printing else row["need"]
+             for row in check.get("rows") or [] if row.get("label")}
     spools = []
     # The rack spool first, as in Fluidd's own Box card, when the usage module counts it; then the Box.
     rack = slots.get("rack")
@@ -46,14 +51,18 @@ def card_data(slots, check, names=None):
         tag = slot.get("tag") or {}
         # A spool without a tag gets its plastic from the user's list, see SCRIPT.
         tagless = not tag or bool(tag.get("empty"))
-        spools.append({"index": slot.get("index"), "label": slot["label"], "color": slot.get("color"),
-                       "material": plastic_name(tag, spool, slot.get("filament"), names),
-                       "remaining": spool.get("remaining"),
-                       "weight": tag.get("weight") or spool.get("full") or 1000, "tagless": tagless})
-    rows = [{"label": row["label"], "need": row["left_to_print"] if check.get("printing") else row["need"],
+        entry = {"index": slot.get("index"), "label": slot["label"], "color": slot.get("color"),
+                 "material": plastic_name(tag, spool, slot.get("filament"), names),
+                 "remaining": spool.get("remaining"),
+                 # The counted full spool first: a tag says 1000 g even when the spool was set to 250 g.
+                 "weight": spool.get("full") or tag.get("weight") or 1000, "tagless": tagless}
+        if needs.get(slot["label"]):
+            entry["need"] = round(needs[slot["label"]], 1)
+        spools.append(entry)
+    rows = [{"label": row["label"], "need": row["left_to_print"] if printing else row["need"],
              "remaining": row["remaining"], "verdict": row["verdict"]}
             for row in check.get("rows") or [] if row["verdict"] != "ok"]
-    return {"spools": spools, "file": check.get("file"), "printing": bool(check.get("printing")),
+    return {"spools": spools, "file": check.get("file"), "printing": printing,
             "problems": rows, "message": check.get("message")}
 
 
@@ -63,9 +72,10 @@ var data=null,busy=false;
 var style=document.createElement("style");
 style.textContent=[
 ".qidi-left{display:flex;width:max-content;flex-direction:column;align-items:center;gap:3px;margin:6px auto 0;padding:3px 8px;border-radius:10px;background:rgba(127,127,127,.14);font-size:12px;font-weight:500;font-variant-numeric:tabular-nums}",
-".qidi-left i{display:block;width:40px;height:3px;border-radius:2px;background:rgba(127,127,127,.3);overflow:hidden}",
-".qidi-left i b{display:block;height:100%;border-radius:2px;background:#4caf50}",
+".qidi-left i{display:flex;width:40px;height:3px;border-radius:2px;background:rgba(127,127,127,.3);overflow:hidden}",
+".qidi-left i b{display:block;height:100%;background:#4caf50}",
 ".qidi-left.low{color:#ff6e6e;background:rgba(255,82,82,.14)}.qidi-left.low i b{background:#ff5252}",
+".qidi-left i b.use{background:#7fa8f5}",
 "#qidi-plastic-card{margin-bottom:12px;border-radius:4px;overflow:hidden}",
 "#qidi-plastic-card .qh{display:flex;align-items:center;gap:10px;padding:12px 16px;font-size:16px;font-weight:500;border-bottom:1px solid rgba(127,127,127,.18)}",
 "#qidi-plastic-card .qh svg{width:20px;height:20px;opacity:.85}",
@@ -84,9 +94,13 @@ style.textContent=[
 "#qidi-plastic-card .qtop{display:flex;align-items:baseline;gap:8px}#qidi-plastic-card .qtop .qv{margin:0 0 0 auto}",
 "#qidi-plastic-card .qm{font-size:12px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
 "#qidi-plastic-card .qv{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:2px}",
-"#qidi-plastic-card .qbar{height:4px;border-radius:2px;background:rgba(127,127,127,.25);overflow:hidden;margin-top:5px}",
-"#qidi-plastic-card .qbar b{display:block;height:100%;border-radius:2px;background:#4caf50}",
+"#qidi-plastic-card .qbar{display:flex;height:4px;border-radius:2px;background:rgba(127,127,127,.25);overflow:hidden;margin-top:5px}",
+"#qidi-plastic-card .qbar.plan{height:6px;border-radius:3px}",
+"#qidi-plastic-card .qbar b{display:block;height:100%;background:#4caf50}",
 "#qidi-plastic-card .qt.short .qbar b,#qidi-plastic-card .low .qbar b{background:#ff5252}#qidi-plastic-card .qt.risk .qbar b{background:#ffb74d}",
+"#qidi-plastic-card .qt .qbar b.use{background:#7fa8f5}#qidi-plastic-card .qt.short .qbar b.use{background:repeating-linear-gradient(135deg,#ff5252 0 4px,#b33a3a 4px 8px)}",
+"#qidi-plastic-card .qu{display:flex;gap:6px;font-size:11px;margin-top:4px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}",
+"#qidi-plastic-card .qu .use{color:#9fbaf5}#qidi-plastic-card .qu .bad{color:#ff7b7b;font-weight:600}",
 "#qidi-plastic-card .qw{display:flex;gap:12px;align-items:flex-start;margin-top:14px;padding:12px 14px;border-radius:8px}",
 "#qidi-plastic-card .qw svg{flex:none;width:22px;height:22px;margin-top:1px}",
 "#qidi-plastic-card .qw .t{font-weight:600;font-size:14px}#qidi-plastic-card .qw .d{font-size:13px;opacity:.9;margin-top:2px}",
@@ -111,6 +125,15 @@ function spoolSvg(color){
     +'<circle cx="20" cy="20" r="7" fill="#9a9a95"/><circle cx="20" cy="20" r="2.6" fill="#2a2a28"/></svg>';
 }
 function g(n){return Math.round(n)+" г"}
+// The bar: what stays after the print in green, what the print takes in its own colour, the rest
+// of a full spool empty. Short of plastic: the whole remainder goes, striped red.
+function barParts(s){
+  var w=s.weight||1000,rem=Math.max(0,s.remaining||0),use=Math.min(s.need||0,rem);
+  function pct(v){return (Math.max(0,Math.min(1,v/w))*100).toFixed(1)+"%"}
+  var html='<b style="width:'+pct(rem-use)+'"></b>';
+  if(use>0)html+='<b class="use" style="width:'+pct(use)+';min-width:2px"></b>';
+  return html;
+}
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
 // A spool without a tag gets its plastic in the panel's own form (maker and name with the lists,
 // material by type, the palette), opened in a frame; the panel says when it is done.
@@ -171,8 +194,7 @@ function patchSpools(card){
     var line=col.querySelector(".qidi-left");
     if(s.remaining==null){if(line)line.remove();return}
     if(!line){line=el("div","qidi-left");col.appendChild(line)}
-    var width=Math.max(0,Math.min(1,s.remaining/s.weight))*100;
-    var html=g(s.remaining)+'<i><b style="width:'+width.toFixed(0)+'%"></b></i>';
+    var html=g(s.remaining)+'<i>'+barParts(s)+'</i>';
     if(line.dataset.html!==html){line.innerHTML=html;line.dataset.html=html}
     line.className="qidi-left"+(s.remaining<50?" low":"");
   });
@@ -206,7 +228,15 @@ function drawCard(card){
     if(s.remaining!=null)top.appendChild(el("span","qv",g(s.remaining)));
     n.appendChild(top);n.appendChild(el("div","qm",s.material||"Без метки"));
     if(s.tagless&&s.remaining==null)n.appendChild(el("div","qpk","Выбрать пластик"));
-    else{var bar=el("div","qbar");var fill=el("b");fill.style.width=(s.remaining==null?0:Math.max(0,Math.min(1,s.remaining/s.weight))*100).toFixed(0)+"%";bar.appendChild(fill);n.appendChild(bar)}
+    else{
+      var bar=el("div","qbar"+(s.need?" plan":""));bar.innerHTML=s.remaining==null?"":barParts(s);n.appendChild(bar);
+      if(s.need&&s.remaining!=null){
+        var u=el("div","qu"),left=s.remaining-s.need;
+        if(left<0)u.appendChild(el("span","bad","Не хватит "+g(-left)));
+        else{u.appendChild(el("span","use","уйдёт "+g(s.need)));u.appendChild(el("span",null,"· останется "+g(left)))}
+        n.appendChild(u);
+      }
+    }
     if(s.tagless){t.classList.add("pick");t.title="Катушка без метки: выбрать пластик из своего списка";t.onclick=function(){openPick(s)}}
     t.appendChild(n);(s===rack?side:grid).appendChild(t);
   });

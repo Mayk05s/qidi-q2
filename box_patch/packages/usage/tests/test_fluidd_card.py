@@ -20,7 +20,7 @@ class CardData(unittest.TestCase):
             {"label": "1D", "need": 300, "left_to_print": 300, "remaining": 247, "verdict": "short"}]}
         data = f.card_data(SLOTS, check)
         self.assertEqual(data["spools"][0], {"index": 0, "label": "1A", "color": "EFE255", "material": "PLA Lite",
-                                             "remaining": 996.4, "weight": 1000, "tagless": False})
+                                             "remaining": 996.4, "weight": 1000, "tagless": False, "need": 3})
         self.assertEqual(data["spools"][1]["remaining"], None)
         self.assertTrue(data["spools"][1]["tagless"])
         self.assertEqual(data["problems"], [{"label": "1D", "need": 300, "remaining": 247, "verdict": "short"}])
@@ -52,6 +52,18 @@ class CardData(unittest.TestCase):
         check = {"file": "a.gcode", "printing": True, "rows": [
             {"label": "1D", "need": 300, "left_to_print": 120, "remaining": 100, "verdict": "short"}]}
         self.assertEqual(f.card_data(SLOTS, check)["problems"][0]["need"], 120)
+
+    def test_each_spool_carries_what_the_print_takes(self):
+        check = {"file": "a.gcode", "printing": True, "rows": [
+            {"label": "1A", "need": 80, "left_to_print": 30.04, "remaining": 996, "verdict": "ok"}]}
+        spools = f.card_data(SLOTS, check)["spools"]
+        self.assertEqual(spools[0]["need"], 30.0)
+        self.assertNotIn("need", spools[1])
+
+    def test_counted_full_spool_wins_over_the_tag_weight(self):
+        slots = {"slots": [{"index": 0, "label": "1A", "tag": {"detail": "PLA", "weight": 1000},
+                            "spool": {"remaining": 243, "full": 250}}]}
+        self.assertEqual(f.card_data(slots, {})["spools"][0]["weight"], 250)
 
 
 if __name__ == "__main__":
