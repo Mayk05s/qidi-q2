@@ -1718,7 +1718,7 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .hero .ring .arc{fill:none;stroke:var(--ok);stroke-width:10;stroke-linecap:round;transition:stroke-dashoffset .25s ease,stroke .25s}
 .hero .ring.low .arc{stroke:var(--err)}
 .hero .ring .pic{position:absolute;inset:19px}.hero .ring .pic svg{width:100%;height:100%}
-.hero .txt{min-width:0;flex:1;padding-right:96px}
+.hero .txt{min-width:0;flex:1}
 @media (max-width:460px){.hero .txt{padding-right:0}}
 .hero .tags{display:flex;flex-wrap:wrap;gap:6px}
 .hero .chip-tag{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;background:color-mix(in srgb,var(--ink) 8%,transparent)}
@@ -1762,6 +1762,19 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .hero .ring .reread{position:absolute;left:50%;top:50%;width:40px;height:40px;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;padding:0;border:0;border-radius:50%;background:rgba(20,20,20,.72);color:#fff;cursor:pointer;opacity:.85;transition:opacity .15s,transform .15s;box-shadow:0 0 0 2px rgba(255,255,255,.25)}
 .hero .ring .reread:hover{opacity:1;transform:translate(-50%,-50%) scale(1.08)}.hero .ring .reread svg{width:20px;height:20px}
 .hero .ring .reread:disabled{cursor:default}.hero .ring .reread.spin svg{animation:spin 1s linear infinite}
+.hero .side{flex:none;display:flex;flex-direction:column;align-items:center;width:150px}
+.hero .side .num{justify-content:center;margin-top:10px}
+.hero .side .num b{font-size:34px}
+.hero .side .of{margin-top:0;text-align:center}
+.hero .side .unset{text-align:center;font-size:13px}
+.hero .txt h3{margin:0;padding:2px 104px 0 0}
+.hero .status{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:8px}
+.hero .relink{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;font:inherit;font-size:12px;font-weight:600;color:var(--accent);background:none;border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);border-radius:999px;cursor:pointer}
+.hero .relink:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}.hero .relink svg{width:13px;height:13px}
+.hero .relink:disabled{opacity:.5;cursor:default}.hero .relink.spin svg{animation:spin 1s linear infinite}
+.hero .info{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;margin-top:12px;font-size:13px}
+.hero .info dt{color:var(--muted)}.hero .info dd{margin:0;display:flex;align-items:center;gap:6px;font-weight:600}
+.hero .info dd i{width:10px;height:10px;border-radius:50%;flex:none;box-shadow:0 0 0 1px color-mix(in srgb,var(--ink) 25%,transparent)}
 .ed-section{margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
 .ed-section h5{margin:0 0 2px;font-size:14px}
 .hero .map{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;margin-top:6px;font-size:13px;color:var(--muted)}
@@ -1811,7 +1824,7 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .facts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
 .facts-grid div{padding:8px 10px;border-radius:10px;background:var(--bg)}
 .facts-grid small{display:block;font-size:11px;color:var(--muted)}.facts-grid b{display:block;font-size:14px;font-weight:600;margin-top:2px;overflow-wrap:anywhere}
-@media (max-width:460px){.hero{flex-direction:column;text-align:center}.hero .tags{justify-content:center}.hero .num{justify-content:center}}
+@media (max-width:460px){.hero{flex-direction:column}.hero .txt{width:100%}}
 #pick-left{margin:12px 0 4px}#pick-left[hidden]{display:none}
 .spool-line .pick-tool{align-self:center}
 .spool-left{flex:none;width:110px;text-align:right}.spool-left b{font-size:16px;font-variant-numeric:tabular-nums}
@@ -3836,24 +3849,41 @@ function spoolWindow(s,onDone){
   const full0=Math.round(sp.full||(tag&&tag.weight)||1000);
   const box=el("div","hero-wrap");if(color)box.style.setProperty("--tint","#"+color);
   const hero=el("div","hero");
-  const ring=el("div","ring");
+  // Left: the spool and what is left on it. Right: what the spool is.
+  const side=el("div","side"),ring=el("div","ring");
   const C=2*Math.PI*58;
   ring.innerHTML=`<svg class="gauge" viewBox="0 0 136 136"><circle class="track" cx="68" cy="68" r="58"/><circle class="arc" cx="68" cy="68" r="58" stroke-dasharray="${C}" stroke-dashoffset="${C}"/></svg>`;
-  const pic=el("div","pic");pic.innerHTML=spool(color);ring.append(pic);
-  const txt=el("div","txt"),tags=el("div","tags");
-  const chip=(text,cls,hex)=>{const c=el("span","chip-tag"+(cls?" "+cls:""));if(hex){const i=el("i");i.style.background="#"+hex;c.append(i)}c.append(text);tags.append(c);return c};
-  chip(s.label,"slot");
+  const pic=el("div","pic");pic.innerHTML=spool(color);ring.append(pic);side.append(ring);
+  const num=el("div","num"),numB=el("b"),of=el("div","of");
+  num.append(numB,el("span","","г"));
+  function draw(v,full){
+    const k=full?Math.max(0,Math.min(1,v/full)):0;
+    ring.querySelector(".arc").style.strokeDashoffset=C*(1-k);
+    ring.classList.toggle("low",v<LOW_SPOOL_GRAMS);
+    numB.textContent=Math.round(v);
+    of.textContent=`осталось из ${Math.round(full)} г`;
+  }
+  if(known||tag){
+    side.append(num,of);
+    if(known)draw(sp.remaining,full0);else{numB.textContent="—";of.textContent="остаток не задан"}
+  }else side.append(el("div","unset","Остаток не задан: выбери пластик ниже"));
+  const txt=el("div","txt");
+  const title=tag?(tag.unread?"Метка не прочитана":slotName(s)):(sp.name||materialName(s.filament)||"Катушка без метки");
+  txt.append(el("h3","",title));
   // The tag shown is the one of the spool in the slot now: a record left by an earlier spool, or
   // of a slot the printer sees empty, never reaches this window (Printer.slots).
-  const kind=tag?(tag.stock?"метка QIDI":tag.unread?"метка не прочитана":tag.brand==="Bambu Lab"?"метка Bambu Lab":"своя метка"):null;
-  const live=chip(s.reading?"Читаю метку…":tag?`В слоте сейчас: ${kind}`:"Без метки",s.reading?"reading":tag?"live":"");
-  live.title=tag?`Метка прочитана с катушки, которая стоит в ${s.label}`:"Метка в этом слоте не прочитана";
+  const status=el("div","status"),tags=status;
+  const chip=(text,cls)=>{const c=el("span","chip-tag"+(cls?" "+cls:""),text);status.append(c);return c};
+  chip(s.label,"slot");
+  const kind=tag?(tag.stock?"Метка QIDI":tag.unread?"Метка не прочитана":tag.brand==="Bambu Lab"?"Метка Bambu Lab":"Своя метка"):null;
+  const live=chip(s.reading?"Читаю метку…":tag?`${kind} в слоте`:"Без метки",s.reading?"reading":tag?"live":"");
+  live.title=tag?`Метка прочитана с катушки, которая стоит в ${s.label} сейчас`:"Метка в этом слоте не прочитана";
   const ask=el("div","hero-ask");ask.hidden=true;
   const note=el("div","hero-note");note.setAttribute("role","status");
   if(s.index!==16){
     // Reading turns the spool with the Box motor: asked right in the card, no second window.
-    const read=el("button","reread");read.type="button";read.innerHTML=REREAD_ICON;
-    read.title=read.ariaLabel=tag?"Перечитать метку":"Прочитать метку";read.disabled=!!s.reading;
+    const read=el("button","relink");read.type="button";read.innerHTML=REREAD_ICON;
+    read.append(tag?"Перечитать":"Прочитать метку");read.disabled=!!s.reading;
     if(s.reading)read.classList.add("spin");
     read.onclick=()=>{
       ask.replaceChildren(el("span","",`${tag?"Перечитать":"Прочитать"} метку? Мотор Box протянет филамент ${s.label} и вернёт на место.`));
@@ -3874,43 +3904,27 @@ function spoolWindow(s,onDone){
       };
       ask.append(yes,no);ask.hidden=false;
     };
-    ring.append(read);
+    status.append(read);
   }
-  if(color)chip("#"+color,"",color);
-  const title=tag?(tag.unread?"Метка не прочитана":slotName(s)):(sp.name||materialName(s.filament)||"Катушка без метки");
-  txt.append(tags,el("h3","",title));
-  // What the printer uses for this tag: a tag with data is mapped by its plastic and color for
-  // every such spool, an unread one by its number, as in the slot editor of the panel.
+  txt.append(status);
+  // What the printer uses for the slot; for a tag it is mapped by its plastic and color for every
+  // such spool, an unread one by its number, as in the slot editor of the panel.
   const mappable=!!(tag&&tag.detail&&!tag.stock);
-  if(mappable){
-    const map=el("div","map",tag.unread?"Данные не прочитаны. В принтере:":"В принтере:"),what=el("b");
-    if(isHex(s.color)){const i=el("i");i.style.background="#"+s.color;what.append(i)}
-    what.append(materialName(s.filament)||"не задан");map.append(what);txt.append(map);
-  }else if(materialName(s.filament)&&materialName(s.filament)!==title)txt.append(el("div","mat",materialName(s.filament)));
-  const num=el("div","num"),numB=el("b"),of=el("small");
-  num.append(numB,el("span","","г"),of);
-  function draw(v,full){
-    const k=full?Math.max(0,Math.min(1,v/full)):0;
-    ring.querySelector(".arc").style.strokeDashoffset=C*(1-k);
-    ring.classList.toggle("low",v<LOW_SPOOL_GRAMS);
-    numB.textContent=Math.round(v);
-    of.textContent=`из ${Math.round(full)} г`;
-  }
+  const info=el("dl","info");
+  const row=(k,v,hex)=>{if(!v)return;const dd=el("dd");if(hex){const i=el("i");i.style.background="#"+hex;dd.append(i)}dd.append(v);info.append(el("dt","",k),dd)};
+  if(tag&&tag.tag_color&&isHex(tag.tag_color)&&!tag.unread)row("Цвет метки","#"+tag.tag_color,tag.tag_color);
+  // The printer's color is named only when it is not the tag's own.
+  const own=tag&&tag.tag_color&&!tag.unread&&tag.tag_color===s.color;
+  row("В принтере",(materialName(s.filament)||"не задан")+(isHex(s.color)&&!own?" · #"+s.color:""),isHex(s.color)?s.color:null);
+  txt.append(info);
   // The one edit button: the remainder, the full spool and, for a tag, its material and color.
   const edit=el("button","corner");edit.type="button";edit.innerHTML=PENCIL;edit.append("Изменить");
-  if(known||tag){
-    hero.append(edit);txt.append(el("div","lbl","Остаток"),num);
-    if(known)draw(sp.remaining,full0);else{numB.textContent="—";of.textContent="ещё не задан"}
-  }else txt.append(el("div","unset","Остаток не задан: выбери пластик ниже"));
+  if(known||tag)hero.append(edit);
   // What matters when printing, from the tag, right on the card; the rest opens below.
   const facts=tag&&!tag.stock?tagFacts(tag).filter(([k])=>k!=="Цвет"&&(k!=="Материал"||!title.includes(tag.detail))):[];
   const keyFacts=facts.filter(([k])=>k==="Сопло"||k==="Сушка");
-  if(keyFacts.length){
-    const key=el("div","key");
-    keyFacts.forEach(([k,v])=>{const i=el("span","",k);i.append(el("b","",v));key.append(i)});
-    txt.append(key);
-  }
-  hero.append(ring,txt);
+  keyFacts.forEach(([k,v])=>row(k,v));
+  hero.append(side,txt);
   // The edit mode opens inside the card, under the remainder it changes.
   const editing=el("div","hero-editing");editing.hidden=true;
   box.append(hero,ask,note,editing);
