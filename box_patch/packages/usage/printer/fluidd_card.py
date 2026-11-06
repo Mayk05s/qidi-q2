@@ -116,8 +116,14 @@ style.textContent=[
 "#qidi-plastic-card .qw.wait{background:rgba(127,168,245,.1);color:#9fbaf5}",
 "#qidi-plastic-card .qrow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,4.3fr);gap:10px;align-items:stretch}",
 "#qidi-plastic-card .qrow.norack{grid-template-columns:minmax(0,1fr)}",
-"#qidi-plastic-card .qbox{position:relative;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:18px 6px 6px;border-radius:12px;border:1px solid rgba(127,127,127,.35);background:rgba(127,127,127,.04)}",
-"#qidi-plastic-card .qbox>.qcap{position:absolute;top:3px;left:10px;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;opacity:.6}",
+"#qidi-plastic-card .qboxw{display:flex;flex-direction:column;min-width:0}",
+"#qidi-plastic-card .qcap{height:18px;padding-left:4px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#7fa8f5}",
+"#qidi-plastic-card .qbox{flex:1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-radius:12px;border:1px solid rgba(127,168,245,.5);background:rgba(127,168,245,.08);overflow:hidden}",
+"#qidi-plastic-card .qbox .qc{border:0;border-radius:0;background:transparent}",
+"#qidi-plastic-card .qbox .qc+.qc{box-shadow:inset 1px 0 0 rgba(127,168,245,.25)}",
+"#qidi-plastic-card .qbox .qc.pick:hover{background:rgba(127,168,245,.1)}",
+"#qidi-plastic-card .qbox .qc.short{background:rgba(255,82,82,.12)}#qidi-plastic-card .qbox .qc.risk{background:rgba(255,183,77,.12)}",
+"#qidi-plastic-card .qbox .qc.empty{opacity:.45}",
 "#qidi-plastic-card .qrack{display:flex;padding-top:18px}#qidi-plastic-card .qrack .qc{flex:1}",
 "#qidi-plastic-card .qc{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;padding:10px 8px 10px;border-radius:10px;border:1px solid rgba(127,127,127,.22);background:rgba(127,127,127,.06);min-width:0;text-align:center}",
 "#qidi-plastic-card .qc .ql{position:absolute;top:7px;left:8px;font-size:12px;font-weight:700;padding:1px 6px;border-radius:6px;background:rgba(127,127,127,.18)}",
@@ -269,8 +275,9 @@ function drawCard(card){
   // The rack on its own, the Box spools in a frame of their own; always one line.
   var rack=data.spools.filter(function(s){return s.label==="Rack"})[0];
   var row=el("div","qrow"+(rack?"":" norack"));body.appendChild(row);
-  var rackCol=el("div","qrack"),boxCol=el("div","qbox");boxCol.appendChild(el("span","qcap","Box"));
-  if(rack)row.appendChild(rackCol);row.appendChild(boxCol);
+  var rackCol=el("div","qrack"),boxWrap=el("div","qboxw"),boxCol=el("div","qbox");
+  boxWrap.appendChild(el("div","qcap","Box"));boxWrap.appendChild(boxCol);
+  if(rack)row.appendChild(rackCol);row.appendChild(boxWrap);
   data.spools.forEach(function(s){
     var p=problemOf(s.label);
     var t=el("div","qc"+(p?" "+p.verdict:"")+(s.empty?" empty":""));
