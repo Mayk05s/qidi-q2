@@ -1679,6 +1679,7 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .spool-amount{display:flex;align-items:center;gap:8px;font-size:14px}
 .spool-amount input{width:110px;padding:8px 9px;font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px}
 .pick-mode header{display:none}
+html:has(body.pick-mode),body.pick-mode{overscroll-behavior:contain}
 .pick-mode main{max-width:none;padding:16px 16px 24px}
 .pick-head{font-size:18px;margin:0 0 4px}
 .pick-list{display:flex;flex-direction:column;gap:8px;margin-top:10px}

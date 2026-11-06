@@ -10,7 +10,8 @@ plastic from the user's own list with the panel's own form. The panel keeps the 
 choice to bambu_spool_usage as spool_pick_<slot>.json next to printer.cfg. The Остатки button opens
 /?spools: every counted spool with its remainder, the standing ones correctable, and the plastics.
 A slot the printer sees empty shows so, without a count and without a click.
-The rack is a narrow column on the left, the Box two by two: the card stays low on a narrow page.
+Each spool is a compact tile in one row, the rack first: the spool with a ring of what is left, the
+grams, «осталось из 1000 г» and the plastic. While the window is open the Fluidd page does not scroll.
 """
 
 
@@ -113,9 +114,21 @@ style.textContent=[
 "#qidi-plastic-card .qw.risk,#qidi-plastic-card .qw.unknown{background:rgba(255,183,77,.12);color:#ffc370}",
 "#qidi-plastic-card .qw.ok{background:rgba(76,175,80,.12);color:#6fcf73}",
 "#qidi-plastic-card .qw.wait{background:rgba(127,168,245,.1);color:#9fbaf5}",
+"#qidi-plastic-card .qrow{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px}",
+"#qidi-plastic-card .qc{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;padding:10px 8px 10px;border-radius:10px;border:1px solid rgba(127,127,127,.22);background:rgba(127,127,127,.06);min-width:0;text-align:center}",
+"#qidi-plastic-card .qc .ql{position:absolute;top:7px;left:8px;font-size:12px;font-weight:700;padding:1px 6px;border-radius:6px;background:rgba(127,127,127,.18)}",
+"#qidi-plastic-card .qc svg.qring{width:84px;height:84px;margin:4px 0 2px}",
+"#qidi-plastic-card .qc .qv{font-size:22px;font-weight:700;margin:0;line-height:1.1;font-variant-numeric:tabular-nums}#qidi-plastic-card .qc .qv span{font-size:13px;font-weight:600;margin-left:2px}",
+"#qidi-plastic-card .qc .qof{font-size:11px;opacity:.65;font-variant-numeric:tabular-nums}",
+"#qidi-plastic-card .qc .qm{max-width:100%;margin-top:3px;font-size:12px;line-height:1.3;opacity:.85;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}",
+"#qidi-plastic-card .qc .qu{justify-content:center;margin-top:2px}",
+"#qidi-plastic-card .qc.short{border-color:#ff5252;background:rgba(255,82,82,.08)}#qidi-plastic-card .qc.risk{border-color:#ffb74d;background:rgba(255,183,77,.08)}",
+"#qidi-plastic-card .qc.empty{opacity:.55;border-style:dashed}",
+"#qidi-plastic-card .qc.pick{cursor:pointer}#qidi-plastic-card .qc.pick:hover{border-color:rgba(127,127,127,.55)}",
 "#qidi-plastic-card .qt.pick{cursor:pointer}#qidi-plastic-card .qt.pick:hover{border-color:rgba(127,127,127,.55)}",
 "#qidi-plastic-card .qpk{font-size:12px;font-weight:600;color:#7fa8f5;margin-top:3px}",
-"#qidi-pick{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55)}",
+"#qidi-pick{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55);overscroll-behavior:contain;touch-action:none}",
+"html.qidi-locked,html.qidi-locked body{overflow:hidden!important}",
 "#qidi-pick .qp{position:relative;width:100%;max-width:560px;height:min(760px,calc(100vh - 32px));border-radius:12px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.5);background:#21211f}",
 "#qidi-pick iframe{width:100%;height:100%;border:0;display:block}",
 "#qidi-pick .qx{position:absolute;top:8px;right:10px;z-index:1;width:32px;height:32px;border:0;border-radius:50%;background:rgba(127,127,127,.25);color:#fff;font-size:20px;line-height:1;cursor:pointer}"
@@ -129,6 +142,26 @@ function spoolSvg(color){
   return '<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="19" fill="#3a3a38" stroke="#585853"/><circle cx="20" cy="20" r="15.5" fill="'+c+'"/>'
     +'<circle cx="20" cy="20" r="12.5" fill="none" stroke="#000" stroke-opacity=".12"/><circle cx="20" cy="20" r="9.5" fill="none" stroke="#000" stroke-opacity=".12"/>'
     +'<circle cx="20" cy="20" r="7" fill="#9a9a95"/><circle cx="20" cy="20" r="2.6" fill="#2a2a28"/></svg>';
+}
+// The spool with a ring of what is left: green what stays after the print, blue what the print
+// takes, red when short or under 50 g; the panel's spool window shows the same.
+function ringSvg(s){
+  var R=44,C=2*Math.PI*R,w=s.weight||1000,rem=Math.max(0,s.remaining||0),use=Math.min(s.need||0,rem);
+  var c=s.color?"#"+s.color:"#555",short=s.need&&s.need>rem,low=rem<50;
+  function part(v){return Math.max(0,Math.min(1,v/w))*C}
+  var stay=part(rem-use),take=part(use),html='<svg class="qring" viewBox="0 0 100 100"><circle cx="50" cy="50" r="'+R+'" fill="none" stroke="rgba(127,127,127,.25)" stroke-width="7"/>';
+  if(s.remaining!=null){
+    html+='<g transform="rotate(-90 50 50)" fill="none" stroke-width="7" stroke-linecap="round">';
+    if(short)html+='<circle cx="50" cy="50" r="'+R+'" stroke="#ff5252" stroke-dasharray="'+part(rem)+' '+C+'"/>';
+    else{
+      if(stay>0)html+='<circle cx="50" cy="50" r="'+R+'" stroke="'+(low?"#ff5252":"#4caf50")+'" stroke-dasharray="'+stay+' '+C+'"/>';
+      if(take>0)html+='<circle cx="50" cy="50" r="'+R+'" stroke="#7fa8f5" stroke-dasharray="'+take+' '+C+'" stroke-dashoffset="'+(-stay)+'"/>';
+    }
+    html+='</g>';
+  }
+  return html+'<circle cx="50" cy="50" r="33" fill="#3a3a38" stroke="#585853"/><circle cx="50" cy="50" r="27" fill="'+c+'"/>'
+    +'<circle cx="50" cy="50" r="21.5" fill="none" stroke="#000" stroke-opacity=".12"/><circle cx="50" cy="50" r="16.5" fill="none" stroke="#000" stroke-opacity=".12"/>'
+    +'<circle cx="50" cy="50" r="12" fill="#9a9a95"/><circle cx="50" cy="50" r="4.5" fill="#2a2a28"/></svg>';
 }
 function g(n){return Math.round(n)+" г"}
 // The bar: what stays after the print in green, what the print takes in its own colour, the rest
@@ -151,10 +184,16 @@ function openFrame(path,title){
   var close=el("button","qx","×");close.title="Закрыть";box.appendChild(close);
   var frame=document.createElement("iframe");frame.title=title;
   frame.src=PANEL+path;box.appendChild(frame);
-  function done(){bg.remove();window.removeEventListener("message",onMessage);document.removeEventListener("keydown",onKey);setTimeout(load,300)}
+  // The Fluidd page under the window stays put: its scroll is off while the window is open.
+  var y=window.scrollY;document.documentElement.classList.add("qidi-locked");
+  function done(){bg.remove();document.documentElement.classList.remove("qidi-locked");window.scrollTo(0,y);
+    window.removeEventListener("message",onMessage);document.removeEventListener("keydown",onKey);setTimeout(load,300)}
   function onMessage(e){if(e.source===frame.contentWindow&&e.data&&e.data.qidiPick==="done"){done();setTimeout(load,1500)}}
   function onKey(e){if(e.key==="Escape")done()}
   close.onclick=done;bg.onclick=function(e){if(e.target===bg)done()};
+  // A wheel or a swipe on the dark backdrop scrolls nothing; inside the frame the panel scrolls itself.
+  function still(e){if(e.target===bg||e.target===box)e.preventDefault()}
+  bg.addEventListener("wheel",still,{passive:false});bg.addEventListener("touchmove",still,{passive:false});
   window.addEventListener("message",onMessage);document.addEventListener("keydown",onKey);
   document.body.appendChild(bg);
 }
@@ -221,32 +260,27 @@ function drawCard(card){
   all.onclick=function(){openFrame("/?spools","Остатки пластика")};head.appendChild(all);
   box.appendChild(head);
   var body=el("div","qb");box.appendChild(body);
-  // The rack a narrow column on the left, the Box two by two: low enough for a narrow page.
-  var rack=data.spools.filter(function(s){return s.label==="Rack"})[0];
-  var lay=el("div","qlay"+(rack?"":" norack"));body.appendChild(lay);
-  var side=el("div","qrack");if(rack)lay.appendChild(side);
-  var grid=el("div","qg");lay.appendChild(grid);
+  // One row of compact tiles, the rack first: the spool with its ring, the grams, the plastic.
+  var row=el("div","qrow");body.appendChild(row);
   data.spools.forEach(function(s){
     var p=problemOf(s.label);
-    var t=el("div","qt"+(p?" "+p.verdict:"")+(s.remaining!=null&&s.remaining<50?" low":"")+(s.empty?" empty":""));
-    t.innerHTML=spoolSvg(s.color);
-    var n=el("div","qn"),top=el("div","qtop");top.appendChild(el("span","ql",s.label));
-    if(s.remaining!=null)top.appendChild(el("span","qv",g(s.remaining)));
-    n.appendChild(top);n.appendChild(el("div","qm",s.material||"Без метки"));
-    if(s.empty){}
-    else if(s.tagless&&s.remaining==null)n.appendChild(el("div","qpk","Выбрать пластик"));
-    else{
-      var bar=el("div","qbar"+(s.need?" plan":""));bar.innerHTML=s.remaining==null?"":barParts(s);n.appendChild(bar);
-      if(s.need&&s.remaining!=null){
-        var u=el("div","qu"),left=s.remaining-s.need;
-        if(left<0)u.appendChild(el("span","bad","Не хватит "+g(-left)));
-        else{u.appendChild(el("span","use","уйдёт "+g(s.need)));u.appendChild(el("span",null,"· останется "+g(left)))}
-        n.appendChild(u);
-      }
+    var t=el("div","qc"+(p?" "+p.verdict:"")+(s.empty?" empty":""));
+    t.appendChild(el("span","ql",s.label));
+    var pic=el("div");pic.innerHTML=ringSvg(s);t.appendChild(pic.firstChild);
+    if(s.remaining!=null){
+      var v=el("div","qv",String(Math.round(s.remaining)));v.appendChild(el("span",null,"г"));t.appendChild(v);
+      t.appendChild(el("div","qof","осталось из "+g(s.weight)));
+    }else if(!s.empty&&s.tagless)t.appendChild(el("div","qpk","Выбрать пластик"));
+    t.appendChild(el("div","qm",s.material||"Без метки"));
+    if(s.need&&s.remaining!=null){
+      var u=el("div","qu"),left=s.remaining-s.need;
+      if(left<0)u.appendChild(el("span","bad","Не хватит "+g(-left)));
+      else u.appendChild(el("span","use","уйдёт "+g(s.need)));
+      t.appendChild(u);
     }
     // Every spool in place opens the panel's window: the remainder corrected, a plastic picked.
     if(!s.empty&&s.index!=null){t.classList.add("pick");t.title=s.tagless?"Катушка без метки: остаток и пластик из своего списка":"Поправить остаток";t.onclick=function(){openPick(s)}}
-    t.appendChild(n);(s===rack?side:grid).appendChild(t);
+    row.appendChild(t);
   });
   var file=data.file?data.file.split("/").pop():"";
   var w;
