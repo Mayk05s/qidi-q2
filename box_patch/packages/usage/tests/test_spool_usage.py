@@ -211,7 +211,7 @@ class SpoolLedgerTests(unittest.TestCase):
         folder = os.path.dirname(self.path)
         with open(os.path.join(folder, b.SPOOL_REQUEST_FILE % 2), "w") as f:
             f.write("750\n")
-        self.assertEqual(b.take_spool_request(folder, 2), 750)
+        self.assertEqual(b.take_spool_request(folder, 2), (750, None))
         self.assertIsNone(b.take_spool_request(folder, 2))
 
     def test_bad_request_is_dropped(self):
@@ -573,6 +573,28 @@ class SlotChangeTests(unittest.TestCase):
         self.assertEqual(self.view(usage, 1)["remaining"], 700)
         with open(os.path.join(self.folder, b.USAGE_FILE)) as f:
             self.assertEqual(json.load(f)["tray:T"]["set_g"], 700)
+        # The full spool stays what it was: the bar is still drawn against it.
+        self.assertEqual(self.view(usage, 1)["full"], 2000)
+        # The wrong full weight itself corrected, with the remainder.
+        with open(os.path.join(self.folder, b.SPOOL_REQUEST_FILE % (1,)), "w") as f:
+            f.write("650 1000\n")
+        self.run_for(usage, 1)
+        self.assertEqual((self.view(usage, 1)["remaining"], self.view(usage, 1)["full"]), (650, 1000))
+
+    def test_full_weight_requests(self):
+        for text, wanted in (("700 1000", (700, 1000)), ("700", (700, None)), ("700 0", None),
+                             ("700 9000", None), ("1 2 3", None), ("x 1000", None)):
+            with open(os.path.join(self.folder, b.SPOOL_REQUEST_FILE % (0,)), "w") as f:
+                f.write(text)
+            self.assertEqual(b.take_spool_request(self.folder, 0), wanted, text)
+
+    def test_full_is_never_below_what_is_left(self):
+        ledger = b.SpoolLedger(os.path.join(self.folder, b.USAGE_FILE))
+        ledger.set_remaining("tray:T", 300)
+        ledger.set_remaining("tray:T", 800)
+        self.assertEqual(ledger.view("tray:T")["full"], 800)
+        ledger.set_remaining("tray:T", 200)
+        self.assertEqual(ledger.view("tray:T")["full"], 800)
 
     def test_sensors_unknown_change_nothing(self):
         usage = self.usage(slot("QFA01", "000000", dict(BLACK_TAG)))

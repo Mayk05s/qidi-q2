@@ -233,9 +233,10 @@ class Printer:
                 "tag": None, "spool": (status.get("bambu_spool_usage") or {}).get("rack")}
         return {"slots": result, "rack": rack, "state": status["print_stats"]["state"]}
 
-    def set_spool(self, index, grams, clear=False):
-        """Grams left on the spool in a slot or on the rack; clear forgets its count instead: a spool
-        without a tag waits for a plastic again, a tagged one starts over from its tag."""
+    def set_spool(self, index, grams, clear=False, full=None):
+        """Grams left on the spool in a slot or on the rack, and the weight of the full spool when
+        given; clear forgets its count instead: a spool without a tag waits for a plastic again, a
+        tagged one starts over from its tag."""
         if index not in [i for i, _ in self.SLOTS] + [self.RACK]:
             raise PrinterError("Нет такого слота")
         if clear:
@@ -243,8 +244,12 @@ class Printer:
             return
         if isinstance(grams, bool) or not isinstance(grams, int) or not 0 <= grams <= 5000:
             raise PrinterError("Остаток должен быть от 0 до 5000 г")
+        if full is not None and (isinstance(full, bool) or not isinstance(full, int) or not 0 < full <= 5000):
+            raise PrinterError("Полная катушка должна быть от 1 до 5000 г")
+        if full is not None and grams > full:
+            raise PrinterError("Осталось больше, чем на полной катушке")
         # A file rather than G-code: G-code waits behind a running print.
-        self.upload("spool_set_%d.txt" % (index,), "%d\n" % (grams,))
+        self.upload("spool_set_%d.txt" % (index,), "%d\n" % (grams,) if full is None else "%d %d\n" % (grams, full))
 
     USAGE_FILE = "spool_usage.json"
 
@@ -279,7 +284,8 @@ class Printer:
                            "name": entry.get("name") or names.get(entry.get("filament"))
                            or "Метка " + (entry.get("uids") or [uid])[0][-8:],
                            "color": entry.get("color"), "material": names.get(entry.get("filament"), entry.get("filament")),
-                           "remaining": max(0., entry["set_g"] - entry.get("used_g", 0.)), "full": entry["set_g"]})
+                           "remaining": max(0., entry["set_g"] - entry.get("used_g", 0.)),
+                           "full": entry.get("full_g") or entry["set_g"]})
         order = [label for _, label in [(self.RACK, "Rack")] + self.SLOTS]
         result.sort(key=lambda s: (s["where"] is None, order.index(s["where"]) if s["where"] in order else 0,
                                    -s["remaining"]))
@@ -1300,7 +1306,8 @@ class App:
             return self.plastic().check(name)
 
     def set_spool(self, body):
-        self._require_printer().set_spool(body.get("index"), body.get("grams"), body.get("clear") is True)
+        self._require_printer().set_spool(body.get("index"), body.get("grams"), body.get("clear") is True,
+                                          body.get("full"))
         return {"ok": True}
 
     def feed_mode(self):
@@ -1689,9 +1696,30 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .spool-line{display:flex;align-items:center;gap:12px;padding:6px 10px;background:var(--card);border:1px solid var(--line);border-radius:10px}
 .spool-line .pick-text{flex:1}
 .spool-item{display:flex;flex-direction:column}
-.left-edit{margin-top:6px;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:10px}
-.left-edit .left-now{font-size:13px;color:var(--muted);margin-bottom:8px}
+.left-edit{margin-top:6px;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
+.left-big{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.left-big b{font-size:32px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1}
+.left-big .unit{font-size:16px;font-weight:600}.left-big small{color:var(--muted);font-size:13px}
+.left-was{font-size:12px;color:var(--muted);margin-top:4px}
+.left-range{--p:50%;-webkit-appearance:none;appearance:none;width:100%;height:28px;margin:12px 0 2px;background:transparent;cursor:pointer}
+.left-range::-webkit-slider-runnable-track{height:10px;border-radius:5px;background:linear-gradient(90deg,var(--ok) var(--p),var(--line) var(--p))}
+.left-range::-moz-range-track{height:10px;border-radius:5px;background:linear-gradient(90deg,var(--ok) var(--p),var(--line) var(--p))}
+.left-range::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;margin-top:-7px;border-radius:50%;background:var(--card);border:3px solid var(--ok);box-shadow:0 1px 4px rgba(0,0,0,.35)}
+.left-range::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:var(--card);border:3px solid var(--ok)}
+.left-range.low{--ok-low:var(--err)}.left-range.low::-webkit-slider-runnable-track{background:linear-gradient(90deg,var(--err) var(--p),var(--line) var(--p))}
+.left-range.low::-webkit-slider-thumb{border-color:var(--err)}
+.left-scale{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.left-fields{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px}
 .left-edit .spool-quick{margin:10px 0 0}
+.spool-card{display:flex;gap:14px;align-items:flex-start;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px;margin:10px 0}
+.spool-card .pic{flex:none;width:76px;height:76px}.spool-card .pic svg{width:100%;height:100%}
+.spool-card .about{min-width:0;flex:1}
+.spool-card h3{margin:0;font-size:18px;line-height:1.25}
+.spool-card .sub{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.spool-card .chip-tag{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 8px;border-radius:10px;background:var(--bg);border:1px solid var(--line)}
+.spool-card .chip-tag i{width:10px;height:10px;border-radius:50%;border:1px solid var(--line)}
+.spool-card dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:10px 0 0;font-size:13px}
+.spool-card dt{color:var(--muted)}.spool-card dd{margin:0;overflow-wrap:anywhere}
 #pick-left{margin:12px 0 4px}#pick-left[hidden]{display:none}
 .spool-line .pick-tool{align-self:center}
 .spool-left{flex:none;width:110px;text-align:right}.spool-left b{font-size:16px;font-variant-numeric:tabular-nums}
@@ -3627,33 +3655,54 @@ $("pick-apply").onclick=async()=>{
   }catch(e){pickSay(e.message,"err");$("pick-apply").disabled=false}
 };
 /* The remainder of a spool in a slot, corrected by hand: a wrong full weight set at the start,
-   a spool weighed. Clear forgets the count: a spool without a tag waits for a plastic again. */
+   a spool weighed. The slider runs from empty to the full spool; the full weight is edited too.
+   Clear forgets the count: a spool without a tag waits for a plastic again. */
 function leftEditor(slot,onDone){
-  const box=el("div","left-edit"),full=slot.full||1000;
-  const now=el("div","left-now",typeof slot.remaining==="number"?`Сейчас ≈ ${Math.round(slot.remaining)} г из ${Math.round(full)} г`:"Остаток не задан");
-  const label=el("label","spool-amount","Осталось");
-  const input=el("input");input.type="number";input.min=0;input.max=5000;input.step=10;
-  input.value=typeof slot.remaining==="number"?Math.round(slot.remaining):full;
-  label.append(input," г");
+  const box=el("div","left-edit");
+  let full=Math.round(slot.full||1000);
+  const known=typeof slot.remaining==="number";
+  const big=el("div","left-big"),num=el("b"),part=el("small");
+  big.append(num,el("span","unit","г"),part);
+  const was=el("div","left-was",known?`Было по счёту: ${Math.round(slot.remaining)} г`:"Остаток ещё не задан");
+  const range=el("input","left-range");range.type="range";range.min=0;range.step=1;
+  range.setAttribute("aria-label",`Остаток в ${slot.label}`);
+  const scale=el("div","left-scale");
+  const grams=el("input");grams.type="number";grams.min=0;grams.max=5000;grams.step=1;
+  const fullIn=el("input");fullIn.type="number";fullIn.min=1;fullIn.max=5000;fullIn.step=10;fullIn.value=full;
+  const lg=el("label","spool-amount","Осталось");lg.append(grams," г");
+  const lf=el("label","spool-amount","Полная катушка");lf.append(fullIn," г");
+  const fields=el("div","left-fields");fields.append(lg,lf);
+  function show(v){
+    v=Math.max(0,Math.min(full,Math.round(v)||0));
+    range.max=full;range.value=v;grams.value=v;num.textContent=v;
+    const pct=full?Math.round(v/full*100):0;
+    part.textContent=`из ${full} г · ${pct}%`;
+    range.style.setProperty("--p",pct+"%");range.classList.toggle("low",v<100);
+    scale.replaceChildren(el("span","","0"),el("span","",Math.round(full/2)+""),el("span","",full+" г"));
+  }
+  range.oninput=()=>show(Number(range.value));
+  grams.oninput=()=>{const v=Number(grams.value);if(Number.isFinite(v)&&v>full){full=Math.min(5000,Math.round(v));fullIn.value=full}show(v)};
+  fullIn.oninput=()=>{const f=Math.round(Number(fullIn.value));if(f>=1&&f<=5000){full=f;show(Math.min(Number(grams.value),f))}};
+  show(known?slot.remaining:full);
   const quick=el("div","spool-quick");
-  [[1,"Полная"],[.75,"3/4"],[.5,"Половина"],[.25,"1/4"]].forEach(([part,text])=>{
-    const b=el("button","",text);b.type="button";b.onclick=()=>{input.value=Math.round(full*part)};quick.append(b);
+  [[1,"Полная"],[.75,"3/4"],[.5,"Половина"],[.25,"1/4"],[0,"Пустая"]].forEach(([k,text])=>{
+    const b=el("button","",text);b.type="button";b.onclick=()=>show(full*k);quick.append(b);
   });
   const save=el("button","action",`Сохранить для ${slot.label}`);save.type="button";
   const actions=el("div","actions");actions.append(save);
   const note=el("div","note");note.setAttribute("role","status");
   const say=(text,cls)=>{note.textContent=text;note.className="note"+(cls?" "+cls:"")};
+  let clear=null;
   async function send(body,done){
     save.disabled=true;if(clear)clear.disabled=true;
     try{await api("/api/spool",Object.assign({index:slot.index},body));say(done,"ok");onDone&&onDone()}
     catch(e){say(e.message,"err");save.disabled=false;if(clear)clear.disabled=false}
   }
   save.onclick=()=>{
-    const grams=Number(input.value);
-    if(!Number.isInteger(grams)||grams<0||grams>5000){say("Осталось: целое число от 0 до 5000","err");return}
-    send({grams},`Остаток ${grams} г сохранён`);
+    const v=Number(grams.value);
+    if(!Number.isInteger(v)||v<0||v>full){say(`Осталось: целое число от 0 до ${full}`,"err");return}
+    send({grams:v,full},`Сохранено: ${v} г из ${full} г`);
   };
-  let clear=null;
   if(slot.clear){
     clear=el("button","action alt",slot.tag?"Сбросить к весу метки":"Очистить слот");clear.type="button";
     clear.title=slot.tag?"Забыть счёт: катушка снова считается полной по метке":"Забыть катушку: слот снова ждёт выбора пластика";
@@ -3664,8 +3713,32 @@ function leftEditor(slot,onDone){
     };
     actions.append(clear);
   }
-  box.append(now,label,quick,actions,note);
+  box.append(big,was,range,scale,fields,quick,actions,note);
   return box;
+}
+/* What the spool in a slot is: the plastic, its color and material in the printer, and what its tag
+   holds, as on the slot card and in the slot editor. */
+function spoolCard(s){
+  const tag=s.tag&&!s.tag.empty?s.tag:null,sp=s.spool||{};
+  const color=tag&&tag.tag_color?tag.tag_color:s.color;
+  const card=el("div","spool-card"),pic=el("div","pic");pic.innerHTML=spool(isHex(color)?color:null);
+  const about=el("div","about");
+  const title=tag?(tag.unread?"Метка найдена, не прочитана":slotName(s)):(sp.name||materialName(s.filament)||"Катушка без метки");
+  about.append(el("h3","",title));
+  const sub=el("div","sub");
+  const chip=(text,hex)=>{const c=el("span","chip-tag");if(hex){const i=el("i");i.style.background="#"+hex;c.append(i)}c.append(text);sub.append(c)};
+  if(isHex(s.color))chip("#"+s.color,s.color);
+  chip(tag?(tag.stock?"Метка QIDI":tag.unread?"Метка не прочитана":tag.brand==="Bambu Lab"?"Метка Bambu Lab":"Своя метка"):"Без метки");
+  if(s.index===16)chip("Стойка");
+  about.append(sub);
+  const dl=el("dl"),fact=(k,v)=>{if(v)dl.append(el("dt","",k),el("dd","",v))};
+  fact("Материал в принтере",materialName(s.filament));
+  if(tag&&!tag.stock)tagFacts(tag).filter(([k])=>k!=="Цвет"&&(k!=="Материал"||!slotName(s).includes(tag.detail)))
+    .forEach(([k,v])=>fact(k==="Вес"?"Вес на метке":k,v));
+  if(!tag&&sp.full)fact("Полная катушка",`${Math.round(sp.full)} г`);
+  about.append(dl);
+  card.append(pic,about);
+  return card;
 }
 async function startPick(){
   document.body.classList.add("pick-mode");
@@ -3687,6 +3760,7 @@ async function startPick(){
     return;
   }
   const spoolNow=pickSlot.spool||{},tagged=!!(pickSlot.tag&&!pickSlot.tag.empty);
+  $("pick-hint").before(spoolCard(pickSlot));
   if(tagged||typeof spoolNow.remaining==="number"){
     // A counted spool: its remainder can be corrected here; a tagged one has nothing to pick.
     $("pick-left").replaceChildren(leftEditor({index:pickSlot.index,label:pickSlot.label,remaining:spoolNow.remaining,
@@ -3696,7 +3770,7 @@ async function startPick(){
   }
   if(tagged){
     $("pick-title").textContent=`Остаток в ${pickSlot.label}`;
-    $("pick-hint").textContent="Катушка с меткой: пластик известен по метке, здесь можно поправить остаток.";
+    $("pick-hint").textContent="Пластик известен по метке. Остаток можно поправить: потяни шкалу или впиши граммы.";
     ["pick-find","pick-list","pick-new"].forEach(id=>$(id).hidden=true);
     return;
   }

@@ -702,6 +702,16 @@ class SpoolTests(unittest.TestCase):
         printer.set_spool(1, None, clear=True)
         self.assertEqual(files, {"spool_set_16.txt": "420\n", "spool_set_1.txt": "clear\n"})
 
+    def test_full_weight_goes_with_the_remainder(self):
+        printer = self.printer()
+        files = {}
+        printer.upload = files.__setitem__
+        q.App(printer=printer).set_spool({"index": 0, "grams": 650, "full": 1000})
+        self.assertEqual(files, {"spool_set_0.txt": "650 1000\n"})
+        for grams, full in ((100, 0), (100, 6000), (100, True), (900, 800), (100, "1000")):
+            with self.assertRaises(q.PrinterError):
+                printer.set_spool(0, grams, full=full)
+
     def test_app_passes_clear_only_when_asked(self):
         printer = self.printer()
         files = {}

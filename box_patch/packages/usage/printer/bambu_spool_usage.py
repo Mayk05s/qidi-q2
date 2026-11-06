@@ -18,6 +18,9 @@
 # the material and color; during a print those two are written when it ends. With keep, the same
 # plastic was edited in the list: material, color and name change, the count stays.
 # The rack spool (slot16) is counted the same way, as a spool without a tag; SLOT=16 sets it.
+#   BAMBU_RFID_SPOOL_SET SLOT=0 GRAMS=700 FULL=1000
+#       the same, with the weight of the full spool, which the bars are drawn against. Without
+#       FULL the spool keeps the full weight it had. The panel's file then holds "700 1000".
 #   BAMBU_RFID_SPOOL_SET SLOT=0 CLEAR=1
 #       forget the count of the spool in the slot: a spool without a tag waits for a plastic again,
 #       a tagged one starts over from its tag. The panel's file holds "clear" for the same.
@@ -243,11 +246,15 @@ class SpoolLedger:
         entry["used_g"] += grams
         self.dirty = True
 
-    def set_remaining(self, key, grams, identity=None):
+    def set_remaining(self, key, grams, identity=None, full=None):
+        """grams left now; full: the weight of the full spool, kept from before when not given."""
         key = self._resolve(key)
         old = self._entry(key, identity) or {}
         entry = {"set_g": float(grams), "used_g": 0., "manual": True}
-        for field in ("uids", "name", "slot_as", "was"):
+        full = full if full else old.get("full_g") or old.get("set_g")
+        if full:
+            entry["full_g"] = float(max(full, grams))
+        for field in ("uids", "name", "slot_as", "was", "plastic", "color", "filament"):
             if field in old:
                 entry[field] = old[field]
         self._fresh(key, entry, None if "slot_as" in old else identity)
@@ -323,7 +330,7 @@ class SpoolLedger:
         remaining = None
         if entry["set_g"] is not None:
             remaining = max(0., entry["set_g"] - entry["used_g"])
-        return {"key": key, "remaining": remaining, "used": entry["used_g"], "full": entry["set_g"],
+        return {"key": key, "remaining": remaining, "used": entry["used_g"], "full": entry.get("full_g") or entry["set_g"],
                 "name": entry.get("name"), "plastic": entry.get("plastic")}
 
     def save(self):
@@ -337,7 +344,8 @@ class SpoolLedger:
 
 
 def take_spool_request(folder, slot):
-    """Grams asked for this slot, CLEAR_REQUEST, or None. The request is used up even when it is bad."""
+    """(grams, full or None) asked for this slot, CLEAR_REQUEST, or None. The request is used up
+    even when it is bad."""
     path = os.path.join(folder, SPOOL_REQUEST_FILE % (slot,))
     try:
         with open(path, encoding="utf-8") as f:
@@ -348,10 +356,15 @@ def take_spool_request(folder, slot):
     if text.strip() == CLEAR_REQUEST:
         return CLEAR_REQUEST
     try:
-        grams = int(text.strip())
+        numbers = [int(word) for word in text.split()]
     except ValueError:
         return None
-    return grams if 0 <= grams <= MAX_SPOOL_GRAMS else None
+    if len(numbers) not in (1, 2) or not 0 <= numbers[0] <= MAX_SPOOL_GRAMS:
+        return None
+    full = numbers[1] if len(numbers) == 2 else None
+    if full is not None and not 0 < full <= MAX_SPOOL_GRAMS:
+        return None
+    return numbers[0], full
 
 
 def take_pick_request(folder, slot):
@@ -548,9 +561,11 @@ class SpoolUsage:
         folder = os.path.dirname(self.ledger.path)
         scripts += [] if printing else self.ledger.pending()
         for slot in COUNTED_SLOTS:
-            grams = take_spool_request(folder, slot)
-            if grams is not None:
-                self._set(slot, grams)
+            request = take_spool_request(folder, slot)
+            if request == CLEAR_REQUEST:
+                self._set(slot, CLEAR_REQUEST)
+            elif request is not None:
+                self._set(slot, *request)
             plastic = take_pick_request(folder, slot)
             if plastic is not None:
                 scripts += self.ledger.pick(slot, plastic, slot_values(self._variables(), slot), printing)
@@ -570,13 +585,13 @@ class SpoolUsage:
             self._flush()
             self.next_save = eventtime + USAGE_SAVE_INTERVAL
 
-    def _set(self, slot, grams):
+    def _set(self, slot, grams, full=None):
         """Grams left on the spool in the slot, or CLEAR_REQUEST to forget its count."""
         variables = self._variables()
         if grams == CLEAR_REQUEST:
             self.ledger.forget(spool_key(variables, slot))
         else:
-            self.ledger.set_remaining(spool_key(variables, slot), grams, slot_values(variables, slot))
+            self.ledger.set_remaining(spool_key(variables, slot), grams, slot_values(variables, slot), full)
         self._flush()
 
     def get_status(self, eventtime):
@@ -600,7 +615,7 @@ class SpoolUsage:
             gcmd.respond_info("Slot %d: count forgotten" % (slot,))
             return
         grams = gcmd.get_float("GRAMS", minval=0., maxval=MAX_SPOOL_GRAMS)
-        self._set(slot, grams)
+        self._set(slot, grams, gcmd.get_float("FULL", 0., minval=0., maxval=MAX_SPOOL_GRAMS) or None)
         gcmd.respond_info("Slot %d: %.0f g left" % (slot, grams))
 
 
