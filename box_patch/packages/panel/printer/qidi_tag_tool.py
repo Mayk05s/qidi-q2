@@ -1751,7 +1751,26 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 @keyframes spin{to{transform:rotate(360deg)}}
 .hero .num .ico{align-self:center;margin-left:4px}
 .hero .chip-tag.live+.ico{width:26px;height:26px;margin-left:-4px}
-.hero-editing{padding:4px 20px 16px;border-top:1px solid var(--line)}
+.hero-editing{padding:14px 20px 16px;border-top:1px solid var(--line)}
+.hero .lbl{margin-top:12px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.hero .lbl+.num{margin-top:2px}
+.hero .num small{font-size:15px;font-weight:500;color:var(--muted);margin-left:6px}
+.ed-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.ed-row+.ed-row{margin-top:14px}
+.ed-label{font-size:14px;font-weight:600}.ed-label small{display:block;font-size:12px;font-weight:400;color:var(--muted)}
+.ed-val{display:flex;align-items:center;gap:6px;font-size:14px;color:var(--muted)}
+.ed-val input{width:96px;padding:7px 9px;font:inherit;font-size:16px;font-weight:600;text-align:right;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;font-variant-numeric:tabular-nums}
+.ed-val input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.ed-ticks{position:relative;height:22px;margin:0 12px 6px}
+.ed-ticks button{position:absolute;transform:translateX(-50%);padding:2px 6px;font:inherit;font-size:12px;color:var(--muted);background:none;border:0;border-radius:6px;cursor:pointer;white-space:nowrap;font-variant-numeric:tabular-nums}
+.ed-ticks button:hover{color:var(--ink);background:color-mix(in srgb,var(--ink) 10%,transparent)}
+.ed-ticks button.on{color:var(--ink);font-weight:700}
+.ed-ticks button:first-child{transform:translateX(-6px)}.ed-ticks button:last-child{transform:translateX(calc(-100% + 6px))}
+.ed-actions{display:flex;align-items:center;gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
+.ed-actions .grow{flex:1}
+.ed-actions .reset{font:inherit;font-size:13px;padding:0;border:0;background:none;color:var(--err);cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.ed-actions button.action{font-size:14px;padding:7px 16px}
+.ed-actions button.action.alt{border-color:transparent;background:transparent}
 .hero-editing .left-range{margin-top:10px}
 .hero-editing .actions{align-items:center;margin-top:12px}
 .hero-editing button.action{font-size:14px;padding:6px 14px}
@@ -3718,37 +3737,36 @@ function leftEditor(slot,opts){
   const box=el("div",opts.big===false?"":"left-edit");
   let full=Math.round(slot.full||1000);
   const known=typeof slot.remaining==="number";
-  const big=el("div","left-big"),num=el("b"),part=el("small");
-  big.append(num,el("span","unit","г"),part);
+  const number=(value,max,label)=>{const i=el("input");i.type="number";i.min=0;i.max=max;i.step=1;i.value=value;i.setAttribute("aria-label",label);return i};
+  const grams=number(0,5000,`Остаток в ${slot.label}, г`),fullIn=number(full,5000,"Полная катушка, г");
+  const valOf=input=>{const v=el("div","ed-val");v.append(input,"г");return v};
+  const rowLeft=el("div","ed-row"),labLeft=el("div","ed-label","Остаток");
+  rowLeft.append(labLeft,valOf(grams));
   const range=el("input","left-range");range.type="range";range.min=0;range.step=1;
   range.setAttribute("aria-label",`Остаток в ${slot.label}`);
-  const scale=el("div","left-scale");
-  const grams=el("input");grams.type="number";grams.min=0;grams.max=5000;grams.step=1;
-  const fullIn=el("input");fullIn.type="number";fullIn.min=1;fullIn.max=5000;fullIn.step=10;fullIn.value=full;
-  const lg=el("label","spool-amount","Осталось");lg.append(grams," г");
-  const lf=el("label","spool-amount","Полная катушка");lf.append(fullIn," г");
-  const fields=el("div","left-fields");fields.append(lg,lf);
+  // Marks under the slider: a click puts the spool at that part of the full one.
+  const ticks=el("div","ed-ticks"),marks=[[0,"0"],[.25,"¼"],[.5,"½"],[.75,"¾"],[1,""]].map(([k,text])=>{
+    const b=el("button","",text);b.type="button";b.style.left=k*100+"%";b.title=k?`${Math.round(k*100)}% полной катушки`:"Пустая";
+    b.onclick=()=>show(full*k);ticks.append(b);return [k,b];
+  });
+  const rowFull=el("div","ed-row"),labFull=el("div","ed-label","Полная катушка");
+  labFull.append(el("small","","сколько пластика на новой катушке"));
+  rowFull.append(labFull,valOf(fullIn));
   function show(v){
     v=Math.max(0,Math.min(full,Math.round(v)||0));
-    range.max=full;range.value=v;grams.value=v;num.textContent=v;
-    const pct=full?Math.round(v/full*100):0;
-    part.textContent=`из ${full} г · ${pct}%`;
+    range.max=full;range.value=v;if(Number(grams.value)!==v)grams.value=v;
+    const pct=full?v/full*100:0;
     range.style.setProperty("--p",pct+"%");range.classList.toggle("low",v<LOW_SPOOL_GRAMS);
-    scale.replaceChildren(el("span","","0"),el("span","",Math.round(full/2)+""),el("span","",full+" г"));
+    marks.forEach(([k,b])=>{if(k===1)b.textContent=full+" г";b.classList.toggle("on",Math.round(full*k)===v)});
     opts.onChange&&opts.onChange(v,full);
   }
   range.oninput=()=>show(Number(range.value));
-  grams.oninput=()=>{const v=Number(grams.value);if(Number.isFinite(v)&&v>full){full=Math.min(5000,Math.round(v));fullIn.value=full}show(v)};
+  grams.oninput=()=>{const v=Number(grams.value);if(!Number.isFinite(v))return;if(v>full){full=Math.min(5000,Math.round(v));fullIn.value=full}show(v)};
   fullIn.oninput=()=>{const f=Math.round(Number(fullIn.value));if(f>=1&&f<=5000){full=f;show(Math.min(Number(grams.value),f))}};
-  const quick=el("div","spool-quick");
-  [[1,"Полная"],[.75,"3/4"],[.5,"Половина"],[.25,"1/4"],[0,"Пустая"]].forEach(([k,text])=>{
-    const b=el("button","",text);b.type="button";b.onclick=()=>show(full*k);quick.append(b);
-  });
-  const save=el("button","action","Сохранить");save.type="button";
-  const actions=el("div","actions");actions.append(save);
-  if(opts.onCancel){const no=el("button","action alt","Отмена");no.type="button";no.onclick=opts.onCancel;actions.append(no)}
+  const actions=el("div","ed-actions");
   const note=el("div","note");note.setAttribute("role","status");
   const say=(text,cls)=>{note.textContent=text;note.className="note"+(cls?" "+cls:"")};
+  const save=el("button","action","Сохранить");save.type="button";
   let clear=null;
   async function send(body,done){
     save.disabled=true;if(clear)clear.disabled=true;
@@ -3757,22 +3775,23 @@ function leftEditor(slot,opts){
   }
   save.onclick=()=>{
     const v=Number(grams.value);
-    if(!Number.isInteger(v)||v<0||v>full){say(`Осталось: целое число от 0 до ${full}`,"err");return}
+    if(!Number.isInteger(v)||v<0||v>full){say(`Остаток: целое число от 0 до ${full}`,"err");return}
     send({grams:v,full},`Сохранено: ${v} г из ${full} г`);
   };
-  if(opts.big!==false)box.append(big);
-  box.append(range,scale,fields,quick,actions,note);
   if(slot.clear){
-    const danger=el("div","danger");
-    clear=el("button","",slot.tag?"Сбросить к весу метки":"Очистить слот");clear.type="button";
-    danger.append(slot.tag?"Забыть счёт, катушка снова полная по метке: ":"Забыть катушку, слот снова ждёт выбора пластика: ",clear);
+    clear=el("button","reset",slot.tag?"Сбросить к весу метки":"Очистить слот");clear.type="button";
+    clear.title=slot.tag?"Забыть счёт: катушка снова считается полной по метке":"Забыть катушку: слот снова ждёт выбора пластика";
     let sure=false;
     clear.onclick=()=>{
-      if(!sure){sure=true;clear.textContent="точно? нажми ещё раз";return}
+      if(!sure){sure=true;clear.textContent="Точно? Нажми ещё раз";return}
       send({clear:true},slot.tag?"Счёт сброшен":"Слот очищен");
     };
-    box.append(danger);
+    actions.append(clear);
   }
+  actions.append(el("span","grow"));
+  if(opts.onCancel){const no=el("button","action alt","Отмена");no.type="button";no.onclick=opts.onCancel;actions.append(no)}
+  actions.append(save);
+  box.append(rowLeft,range,ticks,rowFull,actions,note);
   show(known?slot.remaining:full);
   return box;
 }
@@ -3831,19 +3850,19 @@ function spoolWindow(s,onDone){
   const title=tag?(tag.unread?"Метка не прочитана":slotName(s)):(sp.name||materialName(s.filament)||"Катушка без метки");
   txt.append(tags,el("h3","",title));
   if(materialName(s.filament)&&materialName(s.filament)!==title)txt.append(el("div","mat",materialName(s.filament)));
-  const num=el("div","num"),numB=el("b"),of=el("div","of");
-  num.append(numB,el("span","","г"));
+  const num=el("div","num"),numB=el("b"),of=el("small");
+  num.append(numB,el("span","","г"),of);
   function draw(v,full){
     const k=full?Math.max(0,Math.min(1,v/full)):0;
     ring.querySelector(".arc").style.strokeDashoffset=C*(1-k);
     ring.classList.toggle("low",v<LOW_SPOOL_GRAMS);
     numB.textContent=Math.round(v);
-    of.textContent=`осталось из ${Math.round(full)} г · израсходовано ${Math.max(0,Math.round(full-v))} г`;
+    of.textContent=`из ${Math.round(full)} г`;
   }
   const edit=icoButton(PENCIL,"Изменить остаток");
   if(known||tag){
-    num.append(edit);txt.append(num,of);
-    if(known)draw(sp.remaining,full0);else{numB.textContent="—";of.textContent="остаток ещё не задан"}
+    num.append(edit);txt.append(el("div","lbl","Остаток"),num);
+    if(known)draw(sp.remaining,full0);else{numB.textContent="—";of.textContent="ещё не задан"}
   }else txt.append(el("div","unset","Остаток не задан: выбери пластик ниже"));
   // What matters when printing, from the tag, right on the card; the rest opens below.
   const facts=tag&&!tag.stock?tagFacts(tag).filter(([k])=>k!=="Цвет"&&(k!=="Материал"||!title.includes(tag.detail))):[];
