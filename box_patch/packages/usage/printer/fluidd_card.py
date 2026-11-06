@@ -114,10 +114,15 @@ style.textContent=[
 "#qidi-plastic-card .qw.risk,#qidi-plastic-card .qw.unknown{background:rgba(255,183,77,.12);color:#ffc370}",
 "#qidi-plastic-card .qw.ok{background:rgba(76,175,80,.12);color:#6fcf73}",
 "#qidi-plastic-card .qw.wait{background:rgba(127,168,245,.1);color:#9fbaf5}",
-"#qidi-plastic-card .qrow{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px}",
+"#qidi-plastic-card .qrow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,4.3fr);gap:10px;align-items:stretch}",
+"#qidi-plastic-card .qrow.norack{grid-template-columns:minmax(0,1fr)}",
+"#qidi-plastic-card .qbox{position:relative;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:18px 6px 6px;border-radius:12px;border:1px solid rgba(127,127,127,.35);background:rgba(127,127,127,.04)}",
+"#qidi-plastic-card .qbox>.qcap{position:absolute;top:3px;left:10px;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;opacity:.6}",
+"#qidi-plastic-card .qrack{display:flex;padding-top:18px}#qidi-plastic-card .qrack .qc{flex:1}",
 "#qidi-plastic-card .qc{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;padding:10px 8px 10px;border-radius:10px;border:1px solid rgba(127,127,127,.22);background:rgba(127,127,127,.06);min-width:0;text-align:center}",
 "#qidi-plastic-card .qc .ql{position:absolute;top:7px;left:8px;font-size:12px;font-weight:700;padding:1px 6px;border-radius:6px;background:rgba(127,127,127,.18)}",
-"#qidi-plastic-card .qc svg.qring{width:84px;height:84px;margin:4px 0 2px}",
+"#qidi-plastic-card .qc svg.qring{width:100%;max-width:84px;height:auto;aspect-ratio:1;margin:6px 0 2px}",
+"@media (max-width:640px){#qidi-plastic-card .qc .qof{display:none}#qidi-plastic-card .qc{padding:20px 4px 8px}#qidi-plastic-card .qc .qv{font-size:17px!important}}",
 "#qidi-plastic-card .qc .qv{font-size:22px;font-weight:700;margin:0;line-height:1.1;font-variant-numeric:tabular-nums}#qidi-plastic-card .qc .qv span{font-size:13px;font-weight:600;margin-left:2px}",
 "#qidi-plastic-card .qc .qof{font-size:11px;opacity:.65;font-variant-numeric:tabular-nums}",
 "#qidi-plastic-card .qc .qm{max-width:100%;margin-top:3px;font-size:12px;line-height:1.3;opacity:.85;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}",
@@ -261,7 +266,11 @@ function drawCard(card){
   box.appendChild(head);
   var body=el("div","qb");box.appendChild(body);
   // One row of compact tiles, the rack first: the spool with its ring, the grams, the plastic.
-  var row=el("div","qrow");body.appendChild(row);
+  // The rack on its own, the Box spools in a frame of their own; always one line.
+  var rack=data.spools.filter(function(s){return s.label==="Rack"})[0];
+  var row=el("div","qrow"+(rack?"":" norack"));body.appendChild(row);
+  var rackCol=el("div","qrack"),boxCol=el("div","qbox");boxCol.appendChild(el("span","qcap","Box"));
+  if(rack)row.appendChild(rackCol);row.appendChild(boxCol);
   data.spools.forEach(function(s){
     var p=problemOf(s.label);
     var t=el("div","qc"+(p?" "+p.verdict:"")+(s.empty?" empty":""));
@@ -280,7 +289,7 @@ function drawCard(card){
     }
     // Every spool in place opens the panel's window: the remainder corrected, a plastic picked.
     if(!s.empty&&s.index!=null){t.classList.add("pick");t.title=s.tagless?"Катушка без метки: остаток и пластик из своего списка":"Поправить остаток";t.onclick=function(){openPick(s)}}
-    row.appendChild(t);
+    (s===rack?rackCol:boxCol).appendChild(t);
   });
   var file=data.file?data.file.split("/").pop():"";
   var w;
