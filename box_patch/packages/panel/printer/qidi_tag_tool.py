@@ -1771,6 +1771,7 @@ html:has(body.pick-mode),body.pick-mode{overscroll-behavior:contain}
 .hero .txt h3{margin:0;padding:2px 104px 0 0}
 .hero .status{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:8px}
 .hero .relink{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;font:inherit;font-size:12px;font-weight:600;color:var(--accent);background:none;border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);border-radius:999px;cursor:pointer}
+.hero a.relink{text-decoration:none}
 .hero .relink:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}.hero .relink svg{width:13px;height:13px}
 .hero .relink:disabled{opacity:.5;cursor:default}.hero .relink.spin svg{animation:spin 1s linear infinite}
 .hero .info{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;margin-top:12px;font-size:13px}
@@ -3656,6 +3657,14 @@ $("sample-download").onclick=()=>withSampleProgress(async note=>{
   setTimeout(()=>URL.revokeObjectURL(url),5000);
   note.className="note ok";note.textContent="Файл скачан. Открой его в QIDI Studio, синхронизируй филаменты с Box, проверь и напечатай.";
 });
+// ?edit=<slot>: the spool window in Fluidd sends here to edit the tag of a slot.
+function openAskedSlot(){
+  const asked=new URLSearchParams(location.search).get("edit");
+  const r=asked!==null&&rows[Number(asked)];
+  if(!r)return;
+  r.card.scrollIntoView({block:"center"});
+  if(r.card.classList.contains("editable"))openEditor(Number(asked));
+}
 async function loadSlots(){
   const hint=$("slots-hint"),box=$("slots");
   try{
@@ -3800,7 +3809,6 @@ function leftEditor(slot,opts){
   const say=(text,cls)=>{note.textContent=text;note.className="note"+(cls?" "+cls:"")};
   const save=el("button","action","Сохранить");save.type="button";
   let clear=null;
-  const start={grams:null,full:null};
   async function send(body,done){
     save.disabled=true;if(clear)clear.disabled=true;
     try{await api("/api/spool",Object.assign({index:slot.index},body));say(done,"ok");opts.onDone&&opts.onDone()}
@@ -3809,13 +3817,6 @@ function leftEditor(slot,opts){
   save.onclick=async()=>{
     const v=Number(grams.value);
     if(!Number.isInteger(v)||v<0||v>full){say(`Остаток: целое число от 0 до ${full}`,"err");return}
-    // Only what changed is sent: the material of the slot (opts.beforeSave), then the remainder.
-    if(opts.beforeSave){
-      save.disabled=true;
-      try{if(await opts.beforeSave()&&v===start.grams&&full===start.full){say("Сохранено","ok");opts.onDone&&opts.onDone();return}}
-      catch(e){say(e.message,"err");save.disabled=false;return}
-    }
-    if(opts.beforeSave&&v===start.grams&&full===start.full){save.disabled=false;opts.onCancel&&opts.onCancel();return}
     send({grams:v,full},`Сохранено: ${v} г из ${full} г`);
   };
   if(slot.clear){
@@ -3831,11 +3832,8 @@ function leftEditor(slot,opts){
   actions.append(el("span","grow"));
   if(opts.onCancel){const no=el("button","action alt","Отмена");no.type="button";no.onclick=opts.onCancel;actions.append(no)}
   actions.append(save);
-  box.append(rowLeft,range,ticks,rowFull);
-  if(opts.extra)box.append(opts.extra);
-  box.append(actions,note);
+  box.append(rowLeft,range,ticks,rowFull,actions,note);
   show(known?slot.remaining:full);
-  start.grams=Number(grams.value);start.full=full;
   return box;
 }
 const PENCIL='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
@@ -3907,10 +3905,12 @@ function spoolWindow(s,onDone){
     };
     status.append(read);
   }
+  if(tag&&s.index!==16){
+    const page=el("a","relink","Изменить метку ↗");page.href="/?edit="+s.index;page.target="_blank";page.rel="noopener";
+    page.title="Открыть страницу меток: материал и цвет для этой метки";status.append(page);
+  }
   txt.append(status);
-  // What the printer uses for the slot; for a tag it is mapped by its plastic and color for every
-  // such spool, an unread one by its number, as in the slot editor of the panel.
-  const mappable=!!(tag&&tag.detail&&!tag.stock);
+  // What the printer uses for the slot: its material and color, set on the panel's slot page.
   const info=el("dl","info");
   const row=(k,v,hex)=>{if(!v)return;const dd=el("dd");if(hex){const i=el("i");i.style.background="#"+hex;dd.append(i)}dd.append(v);info.append(el("dt","",k),dd)};
   if(tag&&tag.tag_color&&isHex(tag.tag_color)&&!tag.unread)row("Цвет метки","#"+tag.tag_color,tag.tag_color);
@@ -3918,7 +3918,8 @@ function spoolWindow(s,onDone){
   const own=tag&&tag.tag_color&&!tag.unread&&tag.tag_color===s.color;
   row("В принтере",(materialName(s.filament)||"не задан")+(isHex(s.color)&&!own?" · #"+s.color:""),isHex(s.color)?s.color:null);
   txt.append(info);
-  // The one edit button: the remainder, the full spool and, for a tag, its material and color.
+  // The one edit button: the remainder and the full spool. The tag and what the printer uses for it
+  // are edited on the panel's slot page, where tags are read: «Изменить метку» opens it.
   const edit=el("button","corner");edit.type="button";edit.innerHTML=PENCIL;edit.append("Изменить");
   if(known||tag)hero.append(edit);
   // What matters when printing, from the tag, right on the card; the rest opens below.
@@ -3933,37 +3934,8 @@ function spoolWindow(s,onDone){
     if(known)draw(sp.remaining,full0);else numB.textContent="—"}
   edit.onclick=()=>{
     edit.hidden=true;
-    let beforeSave=null,extra=null;
-    if(mappable){
-      // What the printer uses for this tag, as in the slot editor of the panel.
-      extra=el("div","ed-section map-edit");
-      extra.append(el("h5","","Материал и цвет в принтере"),el("p","hint",tag.unread
-        ?`Данные метки не прочитаны: правило сохранится по её номеру ${tag.uid}, при следующих чтениях метка распознается.`
-        :`Для всех катушек ${tag.brand||""} ${tag.detail} этого цвета.`));
-      const preview=el("div","preview"),pv=el("div","pv"),pvText=el("div"),pvName=el("b"),pvHex=el("div","pvhex");
-      pv.innerHTML=spool(isHex(s.color)?s.color:null);pvName.textContent=materialName(s.filament)||"Материал не задан";
-      pvHex.textContent=isHex(s.color)?"#"+s.color:"цвет не задан";pvText.append(pvName,pvHex);preview.append(pv,pvText);
-      const select=el("div");
-      const material=makeMaterialField(select,slotMaterialItems(s.filament),s.filament,()=>{pvName.textContent=material.name()});
-      const pickerHost=el("div");
-      const startColor=isHex(s.color)?s.color:(tag.tag_color&&isHex(tag.tag_color)?tag.tag_color:"FAFAFA");
-      const picker=makePicker(pickerHost,startColor,c=>{pv.innerHTML=spool(c);pvHex.textContent="#"+c});
-      extra.append(preview,el("label","field","Материал"),select,el("label","field","Цвет"),pickerHost);
-      if(tag.tag_color&&isHex(tag.tag_color)){
-        const same=el("button","reset","Цвет как на метке");same.type="button";same.style.color="var(--accent)";same.style.marginTop="8px";
-        same.onclick=()=>{picker.set(tag.tag_color);pv.innerHTML=spool(tag.tag_color);pvHex.textContent="#"+tag.tag_color};extra.append(same);
-      }
-      const from=[s.filament,isHex(s.color)?s.color:null];
-      // True when the material or color was saved; nothing is sent when they stay.
-      beforeSave=async()=>{
-        if(material.get()===from[0]&&picker.get()===from[1])return false;
-        if(tag.unread)await api("/api/tag_rule",{index:s.index,uid:tag.uid,filament:material.get(),color:picker.get()});
-        else await api("/api/mapping",{index:s.index,detail:tag.detail,tag_color:tag.tag_color,filament:material.get(),color:picker.get()});
-        return true;
-      };
-    }
     editing.replaceChildren(leftEditor({index:s.index,label:s.label,remaining:sp.remaining,full:full0,tag:!!tag,clear:true},
-      {big:false,onChange:draw,onCancel:closeMode,onDone,extra,beforeSave}));
+      {big:false,onChange:draw,onCancel:closeMode,onDone}));
     editing.hidden=false;
     editing.scrollIntoView({block:"nearest",behavior:"smooth"});
   };
@@ -4067,7 +4039,7 @@ async function loadSpoolList(){
   buildTagMaterial();
   tagPicker=makePicker($("tag-picker"),"FAFAFA",renderTag);
   state.source=onPrinter()?null:"usb";renderTag();poll();setInterval(poll,1500);
-  if(hasSlots)loadSlots();else if(has("guide"))showTab("guide");else showTab("materials");
+  if(hasSlots)loadSlots().then(openAskedSlot);else if(has("guide"))showTab("guide");else showTab("materials");
 })();
 </script></body></html>
 """
