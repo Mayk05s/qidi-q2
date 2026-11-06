@@ -14,7 +14,8 @@
 # A spool without a tag is counted by its slot, and only while the slot keeps the material and
 # color it was counted with: a record of a tag that no longer matches the slot is an earlier spool's.
 # The Fluidd card puts a plastic from the user's list in such a slot with spool_pick_<slot>.json
-# ({name, filament, color, grams, plastic, keep}): the count starts at those grams and the slot gets
+# ({name, filament, color, grams, full, plastic, keep}): the count starts at those grams of a spool
+# of full grams (the plastic's weight in the list, for the bars) and the slot gets
 # the material and color; during a print those two are written when it ends. With keep, the same
 # plastic was edited in the list: material, color and name change, the count stays.
 # The rack spool (slot16) is counted the same way, as a spool without a tag; SLOT=16 sets it.
@@ -274,10 +275,14 @@ class SpoolLedger:
                  "slot_as": [plastic["filament"], plastic["color"]]}
         if plastic.get("plastic"):
             entry["plastic"] = plastic["plastic"]
+        if plastic.get("full"):
+            entry["full_g"] = float(max(plastic["full"], plastic["grams"]))
         old = self._entry("slot:%d" % (slot,), now)
         if plastic.get("keep") and old and old.get("plastic") == plastic.get("plastic"):
             # The plastic was edited in the list: the spool stays, so does its count.
             entry["set_g"], entry["used_g"] = old["set_g"], old["used_g"]
+            if old.get("full_g"):
+                entry["full_g"] = old["full_g"]
         if printing:
             entry["was"], scripts = list(now), []
         else:
@@ -389,6 +394,9 @@ def take_pick_request(folder, slot):
             or not isinstance(grams, int) or not 0 <= grams <= MAX_SPOOL_GRAMS:
         return None
     result = {"name": name, "filament": filament, "color": color, "grams": grams}
+    full = plastic.get("full")
+    if isinstance(full, int) and not isinstance(full, bool) and 0 < full <= MAX_SPOOL_GRAMS:
+        result["full"] = full
     # Which plastic of the panel's list it is; keep: the plastic was edited, the count stays.
     if isinstance(plastic.get("plastic"), str) and re.fullmatch(r"[0-9a-z]{1,16}", plastic["plastic"]):
         result["plastic"] = plastic["plastic"]

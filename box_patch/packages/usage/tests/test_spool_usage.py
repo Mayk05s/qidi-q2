@@ -330,12 +330,23 @@ class TaglessSpoolTests(unittest.TestCase):
         self.ledger.adopt(slot("QFA01", "000000", dict(BLACK_TAG, brand="Bambu Lab", detail="PLA Matte")))
         self.assertFalse(self.ledger.dirty)
 
+    def test_pick_keeps_the_full_spool_weight(self):
+        # The plastic's weight in the list is the full spool: a spool put back at 166 g of 250 g.
+        self.ledger.pick(1, dict(PLASTIC, grams=166, full=250), ["QFA01", "000000"], printing=False)
+        view = self.ledger.view("slot:1", ["QFA00", "A878FF"])
+        self.assertEqual((view["remaining"], view["full"]), (166, 250))
+
     def test_pick_request(self):
         path = os.path.join(self.folder, b.PICK_REQUEST_FILE % 1)
         with open(path, "w") as f:
             json.dump(dict(PLASTIC, name="  eSun   PLA+ ", color="a878ff"), f)
         self.assertEqual(b.take_pick_request(self.folder, 1), PLASTIC)
         self.assertIsNone(b.take_pick_request(self.folder, 1))
+        # The full spool weight comes along when it is sane, and is left out otherwise.
+        for full, wanted in ((250, 250), (0, None), (9999, None), (True, None), ("250", None)):
+            with open(path, "w") as f:
+                json.dump(dict(PLASTIC, full=full), f)
+            self.assertEqual(b.take_pick_request(self.folder, 1).get("full"), wanted)
         for bad in (dict(PLASTIC, filament="PLA"), dict(PLASTIC, color="red"), dict(PLASTIC, grams=9999),
                     dict(PLASTIC, grams=True), dict(PLASTIC, name=" "), {"name": "x"}):
             with open(path, "w") as f:

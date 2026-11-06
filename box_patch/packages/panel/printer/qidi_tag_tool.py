@@ -289,7 +289,31 @@ class Printer:
         order = [label for _, label in [(self.RACK, "Rack")] + self.SLOTS]
         result.sort(key=lambda s: (s["where"] is None, order.index(s["where"]) if s["where"] in order else 0,
                                    -s["remaining"]))
-        return {"spools": result, "state": data["state"]}
+        # Spools without a tag counted for a plastic of the user's list, by plastic: the slot, the
+        # grams left, and whether that spool stands there now (a slot keeps the count of a spool
+        # taken out while its material and color stay).
+        labels = dict(self.SLOTS + [(self.RACK, "Rack")])
+        plastics = {}
+        for key, entry in ledger.items():
+            if not key.startswith("slot:") or not isinstance(entry, dict) or not entry.get("plastic") \
+                    or entry.get("set_g") is None:
+                continue
+            try:
+                index = int(key[5:])
+            except ValueError:
+                continue
+            if index not in labels:
+                continue
+            # Standing: the slot shows this count now, not only holds it for a spool taken out.
+            standing = where.get(key)
+            shown = bool(standing and standing["index"] == index
+                         and (standing.get("spool") or {}).get("remaining") is not None)
+            plastics.setdefault(entry["plastic"], []).append(
+                {"where": labels[index], "index": index, "standing": shown,
+                 "remaining": max(0., entry["set_g"] - entry.get("used_g", 0.))})
+        for counts in plastics.values():
+            counts.sort(key=lambda c: (not c["standing"], c["index"]))
+        return {"spools": result, "state": data["state"], "plastics": plastics}
 
     def pick_plastic(self, index, plastic, grams, keep=False):
         """The usage module (bambu_spool_usage) takes the file: the count starts at grams and the
@@ -304,7 +328,7 @@ class Printer:
             name = next((m["name"] for m in load_materials() if m["id"] == plastic["filament"]), plastic["filament"])
         self.upload("spool_pick_%d.json" % (index,), json.dumps(
             {"name": name[:40], "filament": plastic["filament"], "color": plastic["color"], "grams": grams,
-             "plastic": plastic["id"], "keep": keep}, ensure_ascii=False))
+             "full": plastic["grams"], "plastic": plastic["id"], "keep": keep}, ensure_ascii=False))
 
     FEED_MODES = ("quiet", "normal", "fast", "custom")
     FEED_MODE_FILE = "box_feed.json"
@@ -1693,6 +1717,9 @@ html:has(body.pick-mode),body.pick-mode{overscroll-behavior:contain}
 .pick-tool:hover{background:var(--bg)}.pick-tool.sure{color:var(--err);font-size:13px}
 .pick-form{margin-top:12px}.pick-weight{margin-top:12px}
 .pick-text small.pick-here{color:var(--ok);font-weight:600}
+.pick-same{flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px;color:var(--muted)}
+.pick-same button{font:inherit;font-size:13px;padding:5px 11px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
+.pick-same button.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 15%,transparent);font-weight:600}.pick-text small.pick-was{font-size:12px}
 .spool-list{display:flex;flex-direction:column;gap:6px;margin-top:10px}
 .spool-line{display:flex;align-items:center;gap:12px;padding:6px 10px;background:var(--card);border:1px solid var(--line);border-radius:10px}
 .spool-line .pick-text{flex:1}
@@ -2277,6 +2304,7 @@ dialog .actions{justify-content:flex-end;margin:0}
 <div class="actions"><button class="action" id="pick-save" type="button">Сохранить в список</button><button class="action alt" id="pick-cancel" type="button">Отмена</button></div>
 </div>
 <div class="pick-put" id="pick-put" hidden>
+<div class="pick-same" id="pick-same" hidden></div>
 <label class="spool-amount">На катушке<input id="pick-grams" type="number" min="0" max="5000" step="10"> г</label>
 <button class="action" id="pick-apply" type="button">Поставить</button>
 </div>
@@ -3682,6 +3710,9 @@ async function loadSlots(){
 const PICK=new URLSearchParams(location.search).get("pick");
 // ?spools: every spool with its remainder, and the user's plastics, opened from the Fluidd card.
 const SPOOLS=new URLSearchParams(location.search).has("spools");
+// Plastic id to the spools counted for it (/api/spools): shown under each plastic of the list.
+let pickCounts={};
+async function loadPickCounts(){try{pickCounts=(await api("/api/spools")).plastics||{}}catch(e){pickCounts={}}}
 let pickSlot=null,pickInSlot=null,pickChosen=null,pickEditing=null,pickRemoving=null,pickMaterial=null,pickPicker=null;
 const plasticTitle=p=>[p.maker,p.name].filter(Boolean).join(" ")||materialName(p.filament);
 function pickSay(text,cls){const m=$("pick-msg");m.textContent=text||"";m.className="note"+(cls?" "+cls:"")}
@@ -3696,9 +3727,13 @@ function renderPickList(){
     const b=el("button","pick-item");b.type="button";
     const pic=el("span","pick-spool");pic.innerHTML=spool(p.color);
     const text=el("span","pick-text");text.append(el("b","",plasticTitle(p)),el("small","",`${materialName(p.filament)} · #${p.color} · ${p.grams} г`));
-    if(pickSlot&&pickInSlot===p.id)text.append(el("small","pick-here",`Стоит в ${pickSlot.label}`));
+    // Where a spool of this plastic is counted and what is left on it, small under the plastic.
+    const counts=pickCounts[p.id]||[];
+    counts.forEach(c=>text.append(el("small",c.standing?"pick-here":"pick-was",
+      `${c.standing?"Стоит в":"Была в"} ${c.where} · осталось ${Math.round(c.remaining)} г`)));
+    if(!counts.length&&pickSlot&&pickInSlot===p.id)text.append(el("small","pick-here",`Стоит в ${pickSlot.label}`));
     b.append(pic,text);
-    b.onclick=()=>{if(!pickSlot)return;pickChosen=p;pickRemoving=null;$("pick-grams").value=p.grams;renderPickList();$("pick-put").hidden=false;pickSay("")};
+    b.onclick=()=>{if(!pickSlot)return;pickChosen=p;pickRemoving=null;renderPickList();showPickSame(p);$("pick-put").hidden=false;pickSay("")};
     const edit=el("button","pick-tool","✎");edit.type="button";edit.title="Изменить";edit.onclick=()=>openPickForm(p);
     const x=el("button","pick-tool"+(pickRemoving===p.id?" sure":""),pickRemoving===p.id?"Удалить?":"×");x.type="button";x.title="Убрать из списка";
     x.onclick=async()=>{
@@ -3758,6 +3793,22 @@ $("pick-save").onclick=async()=>{
   }catch(e){pickSay(e.message,"err")}
   finally{$("pick-save").disabled=false}
 };
+/* A plastic already counted for a spool, in this slot or one it was taken out of: the same spool
+   put back keeps what is left on it, a new one starts full. The remembered count is offered first,
+   so putting a spool back does not start it over (6 Nov: the green Elegoo in 1B lost 84 g that way). */
+function showPickSame(p){
+  const box=$("pick-same"),counts=(pickCounts[p.id]||[]).slice()
+    .sort((a,b)=>(b.index===pickSlot.index)-(a.index===pickSlot.index)||(a.standing-b.standing));
+  const known=counts.find(c=>!c.standing||c.index===pickSlot.index);
+  box.replaceChildren();box.hidden=!known;
+  if(!known){$("pick-grams").value=p.grams;return}
+  const same=el("button","",`Та же катушка, что была в ${known.where}: ${Math.round(known.remaining)} г`);
+  const fresh=el("button","",`Новая катушка: ${p.grams} г`);same.type=fresh.type="button";
+  const choose=(b,g)=>{same.classList.toggle("on",b===same);fresh.classList.toggle("on",b===fresh);$("pick-grams").value=g};
+  same.onclick=()=>choose(same,Math.round(known.remaining));fresh.onclick=()=>choose(fresh,p.grams);
+  box.append(same,fresh);choose(same,Math.round(known.remaining));
+}
+$("pick-grams").addEventListener("input",()=>$("pick-same").querySelectorAll("button").forEach(b=>b.classList.remove("on")));
 $("pick-apply").onclick=async()=>{
   const grams=Number($("pick-grams").value);
   if(!Number.isInteger(grams)||grams<0||grams>5000){pickSay("На катушке: целое число от 0 до 5000","err");return}
@@ -3977,6 +4028,7 @@ async function startPick(){
     ["pick-find","pick-list","pick-new"].forEach(id=>$(id).hidden=true);
     return;
   }
+  await loadPickCounts();
   if(typeof spoolNow.remaining==="number"){
     $("pick-hint").textContent="Нажми другой пластик, чтобы поставить его в слот. Карандаш у пластика меняет его в списке.";
     $("pick-mine").hidden=false;$("pick-mine").after($("pick-hint"));
@@ -3996,6 +4048,7 @@ async function startSpools(){
 async function loadSpoolList(){
   try{
     const data=await api("/api/spools"),box=$("spool-list");
+    pickCounts=data.plastics||{};renderPickList();
     box.replaceChildren();
     if(!data.spools.length)box.append(el("p","hint","Принтер пока не считает ни одной катушки."));
     data.spools.forEach(s=>{

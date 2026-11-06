@@ -769,6 +769,39 @@ class EmptySlotTests(unittest.TestCase):
         spools = printer.spool_list()["spools"]
         self.assertEqual([(s["where"], s["index"]) for s in spools], [("1D", 3)])
 
+    def test_spool_list_tells_where_each_plastic_is_counted(self):
+        # The plastic list shows under each plastic where its spool is counted and what is left.
+        printer = self.printer([True] * 4)
+        status = printer.fetch("")["result"]["status"]
+        status["save_variables"]["variables"]["bambu_tag_slot1"] = {"empty": True}
+        status["bambu_spool_usage"]["slots"] = [None, {"key": "slot:1", "remaining": 250., "full": 250.,
+                                                       "name": "Elegoo PLA", "plastic": "green"}, None, None]
+        ledger = {"slot:1": {"set_g": 250., "used_g": 0., "plastic": "green"},
+                  "slot:0": {"set_g": 250., "used_g": 70., "plastic": "pink"},
+                  "slot:16": {"set_g": None, "used_g": 1., "plastic": "x"},
+                  "slot:9": {"set_g": 250., "used_g": 0., "plastic": "y"},
+                  "tray:T": {"set_g": 1000., "used_g": 360.}}
+        inner = printer.fetch
+        printer.fetch = lambda path, post=False: ledger if path.endswith("spool_usage.json") else inner(path)
+        plastics = printer.spool_list()["plastics"]
+        self.assertEqual(plastics, {
+            "green": [{"where": "1B", "index": 1, "standing": True, "remaining": 250.}],
+            "pink": [{"where": "1A", "index": 0, "standing": False, "remaining": 180.}]})
+
+    def test_count_of_a_spool_put_back_is_not_taken_for_standing(self):
+        # 6 Nov: the green Elegoo went back into 1B while the slot still had the white PLA Lite's
+        # material and color, so its count did not show: it was there, not standing. The pick
+        # window offers it as «the same spool», instead of starting it over at 250 g.
+        printer = self.printer([True] * 4)
+        status = printer.fetch("")["result"]["status"]
+        status["save_variables"]["variables"]["bambu_tag_slot1"] = {"empty": True}
+        status["bambu_spool_usage"]["slots"] = [None, {"key": "slot:1", "remaining": None}, None, None]
+        ledger = {"slot:1": {"set_g": 250., "used_g": 83.7, "plastic": "green", "slot_as": ["QFA01", "7ADE4B"]}}
+        inner = printer.fetch
+        printer.fetch = lambda path, post=False: ledger if path.endswith("spool_usage.json") else inner(path)
+        count = printer.spool_list()["plastics"]["green"][0]
+        self.assertEqual((count["where"], count["standing"], round(count["remaining"], 1)), ("1B", False, 166.3))
+
     def test_tagless_spool_in_place_can_be_corrected_from_the_list(self):
         printer = self.printer([True] * 4)
         status = printer.fetch("")["result"]["status"]
@@ -848,7 +881,7 @@ class MyPlasticsTests(unittest.TestCase):
         self.app.pick_plastic({"index": 1, "id": "a1", "grams": 640})
         self.assertEqual(q.json.loads(self.files["spool_pick_1.json"]),
                          {"name": "eSun PLA+ сиреневый", "filament": "QFA01", "color": "A878FF", "grams": 640,
-                          "plastic": "a1", "keep": False})
+                          "full": 1000, "plastic": "a1", "keep": False})
         # Without a maker and a name the slot shows the material.
         self.app.change_plastics({"add": dict(self.PLASTIC, id="b2", maker="", name="")})
         self.app.pick_plastic({"index": 0, "id": "b2", "grams": 10})
