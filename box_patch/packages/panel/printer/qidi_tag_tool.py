@@ -1728,8 +1728,24 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .hero .num{display:flex;align-items:baseline;gap:6px;margin-top:12px}
 .hero .num b{font-size:40px;line-height:1;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
 .hero .num span{font-size:18px;font-weight:600}
-.hero .num em{font-style:normal;margin-left:6px;font-size:15px;font-weight:700;color:var(--ok)}
-.hero .ring.low~.txt .num em{color:var(--err)}
+.hero .chip-tag.live{color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,transparent)}
+.hero .chip-tag.live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+.hero .chip-tag.reading{color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.hero .key{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:10px;font-size:13px}
+.hero .key span{color:var(--muted)}.hero .key b{font-weight:600;color:var(--ink);margin-left:4px}
+.hero .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.hero .btns .hero-edit{margin-top:0}
+.hero .more{grid-column:1/-1;margin-top:4px}
+.hero-wrap{position:relative;margin:12px 0;border-radius:18px;border:1px solid var(--line);overflow:hidden;background:linear-gradient(135deg,color-mix(in srgb,var(--tint,#888) 22%,var(--card)) 0%,var(--card) 70%)}
+.hero-wrap .hero{margin:0;border:0;border-radius:0;background:none}
+.tag-more{border-top:1px solid var(--line)}
+.tag-more summary{display:flex;align-items:center;gap:8px;padding:11px 20px;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;list-style:none}
+.tag-more summary::-webkit-details-marker{display:none}
+.tag-more summary::before{content:"";width:7px;height:7px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(-45deg);transition:transform .2s}
+.tag-more[open] summary::before{transform:rotate(45deg)}
+.tag-more .facts-grid{padding:0 20px 16px}
+.hero-note{padding:0 20px 14px;font-size:13px}.hero-note:empty{display:none}
+.hero-note.err{color:var(--err)}.hero-note.ok{color:var(--ok)}
 .hero .of{font-size:13px;color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums}
 .hero .unset{margin-top:12px;font-size:15px;color:var(--muted)}
 .hero-edit{display:inline-flex;align-items:center;gap:7px;margin-top:14px;padding:8px 14px;font:inherit;font-size:14px;font-weight:600;color:var(--ink);background:color-mix(in srgb,var(--ink) 8%,transparent);border:1px solid var(--line);border-radius:10px;cursor:pointer}
@@ -3753,60 +3769,90 @@ function spoolWindow(s,onDone){
   const color=tag&&tag.tag_color&&isHex(tag.tag_color)?tag.tag_color:isHex(s.color)?s.color:null;
   const known=typeof sp.remaining==="number";
   const full0=Math.round(sp.full||(tag&&tag.weight)||1000);
-  const wrap=el("div");
-  const hero=el("div","hero");if(color)hero.style.setProperty("--tint","#"+color);
+  const wrap=el("div"),box=el("div","hero-wrap");if(color)box.style.setProperty("--tint","#"+color);
+  const hero=el("div","hero");
   const ring=el("div","ring");
   const C=2*Math.PI*58;
   ring.innerHTML=`<svg class="gauge" viewBox="0 0 136 136"><circle class="track" cx="68" cy="68" r="58"/><circle class="arc" cx="68" cy="68" r="58" stroke-dasharray="${C}" stroke-dashoffset="${C}"/></svg>`;
   const pic=el("div","pic");pic.innerHTML=spool(color);ring.append(pic);
   const txt=el("div","txt"),tags=el("div","tags");
-  const chip=(text,cls,hex)=>{const c=el("span","chip-tag"+(cls?" "+cls:""));if(hex){const i=el("i");i.style.background="#"+hex;c.append(i)}c.append(text);tags.append(c)};
+  const chip=(text,cls,hex)=>{const c=el("span","chip-tag"+(cls?" "+cls:""));if(hex){const i=el("i");i.style.background="#"+hex;c.append(i)}c.append(text);tags.append(c);return c};
   chip(s.label,"slot");
-  chip(tag?(tag.stock?"Метка QIDI":tag.unread?"Метка не прочитана":tag.brand==="Bambu Lab"?"Метка Bambu Lab":"Своя метка"):"Без метки");
+  // The tag shown is the one of the spool in the slot now: a record left by an earlier spool, or
+  // of a slot the printer sees empty, never reaches this window (Printer.slots).
+  const kind=tag?(tag.stock?"метка QIDI":tag.unread?"метка не прочитана":tag.brand==="Bambu Lab"?"метка Bambu Lab":"своя метка"):null;
+  const live=chip(s.reading?"Читаю метку…":tag?`В слоте сейчас: ${kind}`:"Без метки",s.reading?"reading":tag?"live":"");
+  live.title=tag?`Метка прочитана с катушки, которая стоит в ${s.label}`:"Метка в этом слоте не прочитана";
   if(color)chip("#"+color,"",color);
   const title=tag?(tag.unread?"Метка не прочитана":slotName(s)):(sp.name||materialName(s.filament)||"Катушка без метки");
   txt.append(tags,el("h3","",title));
   if(materialName(s.filament)&&materialName(s.filament)!==title)txt.append(el("div","mat",materialName(s.filament)));
-  const num=el("div","num"),numB=el("b"),pct=el("em"),of=el("div","of");
-  num.append(numB,el("span","","г"),pct);
+  const num=el("div","num"),numB=el("b"),of=el("div","of");
+  num.append(numB,el("span","","г"));
   function draw(v,full){
     const k=full?Math.max(0,Math.min(1,v/full)):0;
     ring.querySelector(".arc").style.strokeDashoffset=C*(1-k);
     ring.classList.toggle("low",v<LOW_SPOOL_GRAMS);
-    numB.textContent=Math.round(v);pct.textContent=Math.round(k*100)+"%";
+    numB.textContent=Math.round(v);
     of.textContent=`осталось из ${Math.round(full)} г · израсходовано ${Math.max(0,Math.round(full-v))} г`;
   }
-  const editBtn=el("button","hero-edit");editBtn.type="button";editBtn.innerHTML=PENCIL;editBtn.append("Изменить остаток");
   if(known||tag){
     txt.append(num,of);
     if(known)draw(sp.remaining,full0);else{numB.textContent="—";of.textContent="остаток ещё не задан"}
-    txt.append(editBtn);
   }else txt.append(el("div","unset","Остаток не задан: выбери пластик ниже"));
-  hero.append(ring,txt);wrap.append(hero);
+  // What matters when printing, from the tag, right on the card; the rest opens below.
+  const facts=tag&&!tag.stock?tagFacts(tag).filter(([k])=>k!=="Цвет"&&(k!=="Материал"||!title.includes(tag.detail))):[];
+  const keyFacts=facts.filter(([k])=>k==="Сопло"||k==="Сушка");
+  if(keyFacts.length){
+    const key=el("div","key");
+    keyFacts.forEach(([k,v])=>{const i=el("span","",k);i.append(el("b","",v));key.append(i)});
+    txt.append(key);
+  }
+  const btns=el("div","btns");
+  const editBtn=el("button","hero-edit");editBtn.type="button";editBtn.innerHTML=PENCIL;editBtn.append("Изменить остаток");
+  if(known||tag)btns.append(editBtn);
+  const note=el("div","hero-note");note.setAttribute("role","status");
+  if(s.index!==16){
+    const read=el("button","hero-edit");read.type="button";
+    read.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>';
+    read.append(tag?"Перечитать метку":"Прочитать метку");read.disabled=!!s.reading;
+    read.onclick=async()=>{
+      const yes=await confirmDialog(`Перечитать слот ${s.label}?`,"Данные метки будут очищены и прочитаны заново. Мотор Box протянет филамент этого слота и вернёт на место.","Запустить");
+      if(!yes)return;
+      read.disabled=true;note.className="hero-note";note.textContent="Читаю метку, катушка крутится, до минуты…";
+      try{
+        await api("/api/slot_read",{index:s.index});
+        let data;
+        do{await new Promise(r=>setTimeout(r,1500));data=await api("/api/slots")}
+        while((data.slots.find(x=>x.index===s.index)||{}).reading);
+        const now=data.slots.find(x=>x.index===s.index);
+        if(now&&now.read_error)throw new Error(now.read_error);
+        location.reload();
+      }catch(e){note.className="hero-note err";note.textContent=e.message;read.disabled=false}
+    };
+    btns.append(read);
+  }
+  if(btns.children.length)txt.append(btns);
+  hero.append(ring,txt);box.append(hero,note);
+  const rest=facts.filter(([k])=>!keyFacts.some(([x])=>x===k));
+  if(rest.length){
+    const more=el("details","tag-more");more.append(el("summary","","Подробнее о метке"));
+    const grid=el("div","facts-grid");
+    rest.forEach(([k,v])=>{const d=el("div");d.append(el("small","",k==="Вес"?"Вес на метке":k),el("b","",v));grid.append(d)});
+    more.append(grid);box.append(more);
+  }
+  wrap.append(box);
   const editHost=el("div");wrap.append(editHost);
   editBtn.onclick=()=>{
     editBtn.hidden=true;
     const card=el("div","edit-card");card.append(el("h4","","Изменить остаток"),
       el("p","hint","Потяни шкалу или впиши граммы. Полную катушку тоже можно поправить, если начальный вес был задан неверно."));
-    const cancel=()=>{editHost.replaceChildren();editBtn.hidden=false;if(known)draw(sp.remaining,full0);else{numB.textContent="—";pct.textContent=""}};
+    const cancel=()=>{editHost.replaceChildren();editBtn.hidden=false;if(known)draw(sp.remaining,full0);else numB.textContent="—"};
     card.append(leftEditor({index:s.index,label:s.label,remaining:sp.remaining,full:full0,tag:!!tag,clear:true},
       {big:false,onChange:draw,onCancel:cancel,onDone}));
     editHost.replaceChildren(card);
     card.scrollIntoView({block:"nearest",behavior:"smooth"});
   };
-  // What the spool is: the printer's material and what its tag holds.
-  const facts=[["Материал в принтере",materialName(s.filament)]];
-  if(tag&&!tag.stock)tagFacts(tag).filter(([k])=>k!=="Цвет"&&(k!=="Материал"||!title.includes(tag.detail)))
-    .forEach(([k,v])=>facts.push([k==="Вес"?"Вес на метке":k,v]));
-  if(!tag&&sp.full)facts.push(["Полная катушка",`${Math.round(sp.full)} г`]);
-  const shown=facts.filter(([,v])=>v);
-  // A spool without a tag: the hero says what it is, and the plastic list follows to change it.
-  if(shown.length&&tag){
-    const card=el("div","facts-card"),grid=el("div","facts-grid");
-    card.append(el("h4","",tag?"С метки":"О катушке"),grid);
-    shown.forEach(([k,v])=>{const d=el("div");d.append(el("small","",k),el("b","",v));grid.append(d)});
-    wrap.append(card);
-  }
   return wrap;
 }
 async function startPick(){
