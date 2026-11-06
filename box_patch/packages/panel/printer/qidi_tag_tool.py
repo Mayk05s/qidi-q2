@@ -1745,6 +1745,21 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .tag-more[open] summary::before{transform:rotate(45deg)}
 .tag-more .facts-grid{padding:0 20px 16px}
 .hero-note{padding:0 20px 14px;font-size:13px}.hero-note:empty{display:none}
+.ico{display:inline-flex;align-items:center;justify-content:center;flex:none;width:30px;height:30px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--muted);cursor:pointer;vertical-align:middle}
+.ico:hover{background:color-mix(in srgb,var(--ink) 10%,transparent);color:var(--ink)}.ico:disabled{opacity:.4;cursor:default}
+.ico svg{width:16px;height:16px}.ico.spin svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.hero .num .ico{align-self:center;margin-left:4px}
+.hero .chip-tag.live+.ico{width:26px;height:26px;margin-left:-4px}
+.hero-editing{padding:4px 20px 16px;border-top:1px solid var(--line)}
+.hero-editing .left-range{margin-top:10px}
+.hero-editing .actions{align-items:center;margin-top:12px}
+.hero-editing button.action{font-size:14px;padding:6px 14px}
+.hero-editing button.action.alt{border-color:transparent;background:transparent}
+.hero-editing .danger{margin-top:12px;padding-top:10px}
+.hero-ask{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;padding:0 20px 14px;font-size:13px;color:var(--muted)}
+.hero-ask button{font:inherit;font-size:13px;font-weight:600;padding:4px 12px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
+.hero-ask button.yes{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .hero-note.err{color:var(--err)}.hero-note.ok{color:var(--ok)}
 .hero .of{font-size:13px;color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums}
 .hero .unset{margin-top:12px;font-size:15px;color:var(--muted)}
@@ -1752,8 +1767,8 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .hero-edit:hover{background:color-mix(in srgb,var(--ink) 14%,transparent)}.hero-edit svg{width:15px;height:15px}
 .edit-card{margin:0 0 12px;padding:16px;border-radius:16px;border:1px solid var(--accent);background:var(--card)}
 .edit-card h4{margin:0 0 4px;font-size:15px}
-.edit-card .danger{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
-.edit-card .danger button{font:inherit;font-size:13px;padding:0;border:0;background:none;color:var(--err);cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.left-edit .danger,.hero-editing .danger{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.left-edit .danger button,.hero-editing .danger button{font:inherit;font-size:13px;padding:0;border:0;background:none;color:var(--err);cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 .facts-card{margin:0 0 12px;padding:14px 16px;border-radius:16px;border:1px solid var(--line);background:var(--card)}
 .facts-card h4{margin:0 0 10px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
 .facts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
@@ -3764,12 +3779,14 @@ function leftEditor(slot,opts){
 const PENCIL='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 /* The spool window: first what is on the spool, big, with a ring of what is left, and what the spool
    is; «Изменить остаток» opens the edit mode under it, the ring follows the slider until saved. */
+const REREAD_ICON='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>';
+function icoButton(svg,title){const b=el("button","ico");b.type="button";b.innerHTML=svg;b.title=title;b.setAttribute("aria-label",title);return b}
 function spoolWindow(s,onDone){
   const tag=s.tag&&!s.tag.empty?s.tag:null,sp=s.spool||{};
   const color=tag&&tag.tag_color&&isHex(tag.tag_color)?tag.tag_color:isHex(s.color)?s.color:null;
   const known=typeof sp.remaining==="number";
   const full0=Math.round(sp.full||(tag&&tag.weight)||1000);
-  const wrap=el("div"),box=el("div","hero-wrap");if(color)box.style.setProperty("--tint","#"+color);
+  const box=el("div","hero-wrap");if(color)box.style.setProperty("--tint","#"+color);
   const hero=el("div","hero");
   const ring=el("div","ring");
   const C=2*Math.PI*58;
@@ -3783,6 +3800,33 @@ function spoolWindow(s,onDone){
   const kind=tag?(tag.stock?"метка QIDI":tag.unread?"метка не прочитана":tag.brand==="Bambu Lab"?"метка Bambu Lab":"своя метка"):null;
   const live=chip(s.reading?"Читаю метку…":tag?`В слоте сейчас: ${kind}`:"Без метки",s.reading?"reading":tag?"live":"");
   live.title=tag?`Метка прочитана с катушки, которая стоит в ${s.label}`:"Метка в этом слоте не прочитана";
+  const ask=el("div","hero-ask");ask.hidden=true;
+  const note=el("div","hero-note");note.setAttribute("role","status");
+  if(s.index!==16){
+    // Reading turns the spool with the Box motor: asked right in the card, no second window.
+    const read=icoButton(REREAD_ICON,tag?"Перечитать метку":"Прочитать метку");read.disabled=!!s.reading;
+    if(s.reading)read.classList.add("spin");
+    read.onclick=()=>{
+      ask.replaceChildren(el("span","",`${tag?"Перечитать":"Прочитать"} метку? Мотор Box протянет филамент ${s.label} и вернёт на место.`));
+      const yes=el("button","yes",tag?"Перечитать":"Прочитать"),no=el("button","","Нет");yes.type=no.type="button";
+      no.onclick=()=>{ask.hidden=true};
+      yes.onclick=async()=>{
+        ask.hidden=true;read.disabled=true;read.classList.add("spin");live.className="chip-tag reading";live.textContent="Читаю метку…";
+        note.className="hero-note";note.textContent="";
+        try{
+          await api("/api/slot_read",{index:s.index});
+          let data;
+          do{await new Promise(r=>setTimeout(r,1500));data=await api("/api/slots")}
+          while((data.slots.find(x=>x.index===s.index)||{}).reading);
+          const now=data.slots.find(x=>x.index===s.index);
+          if(now&&now.read_error)throw new Error(now.read_error);
+          location.reload();
+        }catch(e){note.className="hero-note err";note.textContent=e.message;read.disabled=false;read.classList.remove("spin")}
+      };
+      ask.append(yes,no);ask.hidden=false;
+    };
+    tags.append(read);
+  }
   if(color)chip("#"+color,"",color);
   const title=tag?(tag.unread?"Метка не прочитана":slotName(s)):(sp.name||materialName(s.filament)||"Катушка без метки");
   txt.append(tags,el("h3","",title));
@@ -3796,8 +3840,9 @@ function spoolWindow(s,onDone){
     numB.textContent=Math.round(v);
     of.textContent=`осталось из ${Math.round(full)} г · израсходовано ${Math.max(0,Math.round(full-v))} г`;
   }
+  const edit=icoButton(PENCIL,"Изменить остаток");
   if(known||tag){
-    txt.append(num,of);
+    num.append(edit);txt.append(num,of);
     if(known)draw(sp.remaining,full0);else{numB.textContent="—";of.textContent="остаток ещё не задан"}
   }else txt.append(el("div","unset","Остаток не задан: выбери пластик ниже"));
   // What matters when printing, from the tag, right on the card; the rest opens below.
@@ -3808,32 +3853,19 @@ function spoolWindow(s,onDone){
     keyFacts.forEach(([k,v])=>{const i=el("span","",k);i.append(el("b","",v));key.append(i)});
     txt.append(key);
   }
-  const btns=el("div","btns");
-  const editBtn=el("button","hero-edit");editBtn.type="button";editBtn.innerHTML=PENCIL;editBtn.append("Изменить остаток");
-  if(known||tag)btns.append(editBtn);
-  const note=el("div","hero-note");note.setAttribute("role","status");
-  if(s.index!==16){
-    const read=el("button","hero-edit");read.type="button";
-    read.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>';
-    read.append(tag?"Перечитать метку":"Прочитать метку");read.disabled=!!s.reading;
-    read.onclick=async()=>{
-      const yes=await confirmDialog(`Перечитать слот ${s.label}?`,"Данные метки будут очищены и прочитаны заново. Мотор Box протянет филамент этого слота и вернёт на место.","Запустить");
-      if(!yes)return;
-      read.disabled=true;note.className="hero-note";note.textContent="Читаю метку, катушка крутится, до минуты…";
-      try{
-        await api("/api/slot_read",{index:s.index});
-        let data;
-        do{await new Promise(r=>setTimeout(r,1500));data=await api("/api/slots")}
-        while((data.slots.find(x=>x.index===s.index)||{}).reading);
-        const now=data.slots.find(x=>x.index===s.index);
-        if(now&&now.read_error)throw new Error(now.read_error);
-        location.reload();
-      }catch(e){note.className="hero-note err";note.textContent=e.message;read.disabled=false}
-    };
-    btns.append(read);
-  }
-  if(btns.children.length)txt.append(btns);
-  hero.append(ring,txt);box.append(hero,note);
+  hero.append(ring,txt);
+  // The edit mode opens inside the card, under the remainder it changes.
+  const editing=el("div","hero-editing");editing.hidden=true;
+  box.append(hero,ask,note,editing);
+  edit.onclick=()=>{
+    if(!editing.hidden)return;
+    edit.hidden=true;
+    const cancel=()=>{editing.hidden=true;editing.replaceChildren();edit.hidden=false;if(known)draw(sp.remaining,full0);else numB.textContent="—"};
+    editing.replaceChildren(leftEditor({index:s.index,label:s.label,remaining:sp.remaining,full:full0,tag:!!tag,clear:true},
+      {big:false,onChange:draw,onCancel:cancel,onDone}));
+    editing.hidden=false;
+    editing.scrollIntoView({block:"nearest",behavior:"smooth"});
+  };
   const rest=facts.filter(([k])=>!keyFacts.some(([x])=>x===k));
   if(rest.length){
     const more=el("details","tag-more");more.append(el("summary","","Подробнее о метке"));
@@ -3841,19 +3873,7 @@ function spoolWindow(s,onDone){
     rest.forEach(([k,v])=>{const d=el("div");d.append(el("small","",k==="Вес"?"Вес на метке":k),el("b","",v));grid.append(d)});
     more.append(grid);box.append(more);
   }
-  wrap.append(box);
-  const editHost=el("div");wrap.append(editHost);
-  editBtn.onclick=()=>{
-    editBtn.hidden=true;
-    const card=el("div","edit-card");card.append(el("h4","","Изменить остаток"),
-      el("p","hint","Потяни шкалу или впиши граммы. Полную катушку тоже можно поправить, если начальный вес был задан неверно."));
-    const cancel=()=>{editHost.replaceChildren();editBtn.hidden=false;if(known)draw(sp.remaining,full0);else numB.textContent="—"};
-    card.append(leftEditor({index:s.index,label:s.label,remaining:sp.remaining,full:full0,tag:!!tag,clear:true},
-      {big:false,onChange:draw,onCancel:cancel,onDone}));
-    editHost.replaceChildren(card);
-    card.scrollIntoView({block:"nearest",behavior:"smooth"});
-  };
-  return wrap;
+  return box;
 }
 async function startPick(){
   document.body.classList.add("pick-mode");
