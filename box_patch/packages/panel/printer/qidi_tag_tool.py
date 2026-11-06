@@ -1718,7 +1718,8 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .hero .ring .arc{fill:none;stroke:var(--ok);stroke-width:10;stroke-linecap:round;transition:stroke-dashoffset .25s ease,stroke .25s}
 .hero .ring.low .arc{stroke:var(--err)}
 .hero .ring .pic{position:absolute;inset:19px}.hero .ring .pic svg{width:100%;height:100%}
-.hero .txt{min-width:0;flex:1}
+.hero .txt{min-width:0;flex:1;padding-right:96px}
+@media (max-width:460px){.hero .txt{padding-right:0}}
 .hero .tags{display:flex;flex-wrap:wrap;gap:6px}
 .hero .chip-tag{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;background:color-mix(in srgb,var(--ink) 8%,transparent)}
 .hero .chip-tag i{width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 1px color-mix(in srgb,var(--ink) 25%,transparent)}
@@ -1755,6 +1756,23 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .hero .lbl{margin-top:12px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .hero .lbl+.num{margin-top:2px}
 .hero .num small{font-size:15px;font-weight:500;color:var(--muted);margin-left:6px}
+.hero .corner{position:absolute;top:12px;right:12px;z-index:1;display:inline-flex;align-items:center;gap:6px;padding:6px 12px 6px 10px;font:inherit;font-size:13px;font-weight:600;color:var(--ink);background:color-mix(in srgb,var(--ink) 8%,transparent);border:1px solid var(--line);border-radius:999px;cursor:pointer}
+.hero .corner:hover{background:color-mix(in srgb,var(--ink) 15%,transparent)}.hero .corner svg{width:14px;height:14px}
+.hero .corner[hidden]{display:none}
+.hero .ring .reread{position:absolute;left:50%;top:50%;width:40px;height:40px;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;padding:0;border:0;border-radius:50%;background:rgba(20,20,20,.72);color:#fff;cursor:pointer;opacity:.85;transition:opacity .15s,transform .15s;box-shadow:0 0 0 2px rgba(255,255,255,.25)}
+.hero .ring .reread:hover{opacity:1;transform:translate(-50%,-50%) scale(1.08)}.hero .ring .reread svg{width:20px;height:20px}
+.hero .ring .reread:disabled{cursor:default}.hero .ring .reread.spin svg{animation:spin 1s linear infinite}
+.ed-section{margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
+.ed-section h5{margin:0 0 2px;font-size:14px}
+.hero .map{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;margin-top:6px;font-size:13px;color:var(--muted)}
+.hero .map b{display:inline-flex;align-items:center;gap:6px;color:var(--ink);font-weight:600}
+.hero .map b i{width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 1px color-mix(in srgb,var(--ink) 25%,transparent)}
+.hero .map .ico{width:26px;height:26px}
+.hero .set-map{margin-top:12px;font:inherit;font-size:14px;font-weight:600;padding:8px 14px;border-radius:10px;border:1px solid var(--accent);background:var(--accent);color:var(--on-accent);cursor:pointer}
+.map-edit h4{margin:0 0 2px;font-size:15px}.map-edit .hint{margin:0 0 6px}
+.map-edit .preview{display:flex;align-items:center;gap:12px;margin:10px 0 2px}
+.map-edit .preview .pv{flex:none;width:44px;height:44px}.map-edit .preview .pv svg{width:100%;height:100%}
+.map-edit .preview b{display:block;font-size:14px}.map-edit .preview .pvhex{color:var(--muted);font-size:12px;text-align:left}.map-edit .preview>div:last-child{text-align:left}
 .ed-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .ed-row+.ed-row{margin-top:14px}
 .ed-label{font-size:14px;font-weight:600}.ed-label small{display:block;font-size:12px;font-weight:400;color:var(--muted)}
@@ -3768,14 +3786,22 @@ function leftEditor(slot,opts){
   const say=(text,cls)=>{note.textContent=text;note.className="note"+(cls?" "+cls:"")};
   const save=el("button","action","Сохранить");save.type="button";
   let clear=null;
+  const start={grams:null,full:null};
   async function send(body,done){
     save.disabled=true;if(clear)clear.disabled=true;
     try{await api("/api/spool",Object.assign({index:slot.index},body));say(done,"ok");opts.onDone&&opts.onDone()}
     catch(e){say(e.message,"err");save.disabled=false;if(clear)clear.disabled=false}
   }
-  save.onclick=()=>{
+  save.onclick=async()=>{
     const v=Number(grams.value);
     if(!Number.isInteger(v)||v<0||v>full){say(`Остаток: целое число от 0 до ${full}`,"err");return}
+    // Only what changed is sent: the material of the slot (opts.beforeSave), then the remainder.
+    if(opts.beforeSave){
+      save.disabled=true;
+      try{if(await opts.beforeSave()&&v===start.grams&&full===start.full){say("Сохранено","ok");opts.onDone&&opts.onDone();return}}
+      catch(e){say(e.message,"err");save.disabled=false;return}
+    }
+    if(opts.beforeSave&&v===start.grams&&full===start.full){save.disabled=false;opts.onCancel&&opts.onCancel();return}
     send({grams:v,full},`Сохранено: ${v} г из ${full} г`);
   };
   if(slot.clear){
@@ -3791,8 +3817,11 @@ function leftEditor(slot,opts){
   actions.append(el("span","grow"));
   if(opts.onCancel){const no=el("button","action alt","Отмена");no.type="button";no.onclick=opts.onCancel;actions.append(no)}
   actions.append(save);
-  box.append(rowLeft,range,ticks,rowFull,actions,note);
+  box.append(rowLeft,range,ticks,rowFull);
+  if(opts.extra)box.append(opts.extra);
+  box.append(actions,note);
   show(known?slot.remaining:full);
+  start.grams=Number(grams.value);start.full=full;
   return box;
 }
 const PENCIL='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
@@ -3823,7 +3852,8 @@ function spoolWindow(s,onDone){
   const note=el("div","hero-note");note.setAttribute("role","status");
   if(s.index!==16){
     // Reading turns the spool with the Box motor: asked right in the card, no second window.
-    const read=icoButton(REREAD_ICON,tag?"Перечитать метку":"Прочитать метку");read.disabled=!!s.reading;
+    const read=el("button","reread");read.type="button";read.innerHTML=REREAD_ICON;
+    read.title=read.ariaLabel=tag?"Перечитать метку":"Прочитать метку";read.disabled=!!s.reading;
     if(s.reading)read.classList.add("spin");
     read.onclick=()=>{
       ask.replaceChildren(el("span","",`${tag?"Перечитать":"Прочитать"} метку? Мотор Box протянет филамент ${s.label} и вернёт на место.`));
@@ -3844,12 +3874,19 @@ function spoolWindow(s,onDone){
       };
       ask.append(yes,no);ask.hidden=false;
     };
-    tags.append(read);
+    ring.append(read);
   }
   if(color)chip("#"+color,"",color);
   const title=tag?(tag.unread?"Метка не прочитана":slotName(s)):(sp.name||materialName(s.filament)||"Катушка без метки");
   txt.append(tags,el("h3","",title));
-  if(materialName(s.filament)&&materialName(s.filament)!==title)txt.append(el("div","mat",materialName(s.filament)));
+  // What the printer uses for this tag: a tag with data is mapped by its plastic and color for
+  // every such spool, an unread one by its number, as in the slot editor of the panel.
+  const mappable=!!(tag&&tag.detail&&!tag.stock);
+  if(mappable){
+    const map=el("div","map",tag.unread?"Данные не прочитаны. В принтере:":"В принтере:"),what=el("b");
+    if(isHex(s.color)){const i=el("i");i.style.background="#"+s.color;what.append(i)}
+    what.append(materialName(s.filament)||"не задан");map.append(what);txt.append(map);
+  }else if(materialName(s.filament)&&materialName(s.filament)!==title)txt.append(el("div","mat",materialName(s.filament)));
   const num=el("div","num"),numB=el("b"),of=el("small");
   num.append(numB,el("span","","г"),of);
   function draw(v,full){
@@ -3859,9 +3896,10 @@ function spoolWindow(s,onDone){
     numB.textContent=Math.round(v);
     of.textContent=`из ${Math.round(full)} г`;
   }
-  const edit=icoButton(PENCIL,"Изменить остаток");
+  // The one edit button: the remainder, the full spool and, for a tag, its material and color.
+  const edit=el("button","corner");edit.type="button";edit.innerHTML=PENCIL;edit.append("Изменить");
   if(known||tag){
-    num.append(edit);txt.append(el("div","lbl","Остаток"),num);
+    hero.append(edit);txt.append(el("div","lbl","Остаток"),num);
     if(known)draw(sp.remaining,full0);else{numB.textContent="—";of.textContent="ещё не задан"}
   }else txt.append(el("div","unset","Остаток не задан: выбери пластик ниже"));
   // What matters when printing, from the tag, right on the card; the rest opens below.
@@ -3876,12 +3914,41 @@ function spoolWindow(s,onDone){
   // The edit mode opens inside the card, under the remainder it changes.
   const editing=el("div","hero-editing");editing.hidden=true;
   box.append(hero,ask,note,editing);
+  function closeMode(){editing.hidden=true;editing.replaceChildren();edit.hidden=false;
+    if(known)draw(sp.remaining,full0);else numB.textContent="—"}
   edit.onclick=()=>{
-    if(!editing.hidden)return;
     edit.hidden=true;
-    const cancel=()=>{editing.hidden=true;editing.replaceChildren();edit.hidden=false;if(known)draw(sp.remaining,full0);else numB.textContent="—"};
+    let beforeSave=null,extra=null;
+    if(mappable){
+      // What the printer uses for this tag, as in the slot editor of the panel.
+      extra=el("div","ed-section map-edit");
+      extra.append(el("h5","","Материал и цвет в принтере"),el("p","hint",tag.unread
+        ?`Данные метки не прочитаны: правило сохранится по её номеру ${tag.uid}, при следующих чтениях метка распознается.`
+        :`Для всех катушек ${tag.brand||""} ${tag.detail} этого цвета.`));
+      const preview=el("div","preview"),pv=el("div","pv"),pvText=el("div"),pvName=el("b"),pvHex=el("div","pvhex");
+      pv.innerHTML=spool(isHex(s.color)?s.color:null);pvName.textContent=materialName(s.filament)||"Материал не задан";
+      pvHex.textContent=isHex(s.color)?"#"+s.color:"цвет не задан";pvText.append(pvName,pvHex);preview.append(pv,pvText);
+      const select=el("div");
+      const material=makeMaterialField(select,slotMaterialItems(s.filament),s.filament,()=>{pvName.textContent=material.name()});
+      const pickerHost=el("div");
+      const startColor=isHex(s.color)?s.color:(tag.tag_color&&isHex(tag.tag_color)?tag.tag_color:"FAFAFA");
+      const picker=makePicker(pickerHost,startColor,c=>{pv.innerHTML=spool(c);pvHex.textContent="#"+c});
+      extra.append(preview,el("label","field","Материал"),select,el("label","field","Цвет"),pickerHost);
+      if(tag.tag_color&&isHex(tag.tag_color)){
+        const same=el("button","reset","Цвет как на метке");same.type="button";same.style.color="var(--accent)";same.style.marginTop="8px";
+        same.onclick=()=>{picker.set(tag.tag_color);pv.innerHTML=spool(tag.tag_color);pvHex.textContent="#"+tag.tag_color};extra.append(same);
+      }
+      const from=[s.filament,isHex(s.color)?s.color:null];
+      // True when the material or color was saved; nothing is sent when they stay.
+      beforeSave=async()=>{
+        if(material.get()===from[0]&&picker.get()===from[1])return false;
+        if(tag.unread)await api("/api/tag_rule",{index:s.index,uid:tag.uid,filament:material.get(),color:picker.get()});
+        else await api("/api/mapping",{index:s.index,detail:tag.detail,tag_color:tag.tag_color,filament:material.get(),color:picker.get()});
+        return true;
+      };
+    }
     editing.replaceChildren(leftEditor({index:s.index,label:s.label,remaining:sp.remaining,full:full0,tag:!!tag,clear:true},
-      {big:false,onChange:draw,onCancel:cancel,onDone}));
+      {big:false,onChange:draw,onCancel:closeMode,onDone,extra,beforeSave}));
     editing.hidden=false;
     editing.scrollIntoView({block:"nearest",behavior:"smooth"});
   };
