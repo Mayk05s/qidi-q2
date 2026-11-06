@@ -1711,15 +1711,39 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .left-scale{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
 .left-fields{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px}
 .left-edit .spool-quick{margin:10px 0 0}
-.spool-card{display:flex;gap:14px;align-items:flex-start;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px;margin:10px 0}
-.spool-card .pic{flex:none;width:76px;height:76px}.spool-card .pic svg{width:100%;height:100%}
-.spool-card .about{min-width:0;flex:1}
-.spool-card h3{margin:0;font-size:18px;line-height:1.25}
-.spool-card .sub{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.spool-card .chip-tag{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 8px;border-radius:10px;background:var(--bg);border:1px solid var(--line)}
-.spool-card .chip-tag i{width:10px;height:10px;border-radius:50%;border:1px solid var(--line)}
-.spool-card dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:10px 0 0;font-size:13px}
-.spool-card dt{color:var(--muted)}.spool-card dd{margin:0;overflow-wrap:anywhere}
+.hero{--tint:#888;position:relative;display:flex;gap:22px;align-items:center;padding:20px;margin:12px 0;border-radius:18px;border:1px solid var(--line);background:linear-gradient(135deg,color-mix(in srgb,var(--tint) 22%,var(--card)) 0%,var(--card) 70%);overflow:hidden}
+.hero .ring{position:relative;flex:none;width:136px;height:136px}
+.hero .ring svg.gauge{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.hero .ring .track{fill:none;stroke:color-mix(in srgb,var(--ink) 12%,transparent);stroke-width:10}
+.hero .ring .arc{fill:none;stroke:var(--ok);stroke-width:10;stroke-linecap:round;transition:stroke-dashoffset .25s ease,stroke .25s}
+.hero .ring.low .arc{stroke:var(--err)}
+.hero .ring .pic{position:absolute;inset:19px}.hero .ring .pic svg{width:100%;height:100%}
+.hero .txt{min-width:0;flex:1}
+.hero .tags{display:flex;flex-wrap:wrap;gap:6px}
+.hero .chip-tag{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;background:color-mix(in srgb,var(--ink) 8%,transparent)}
+.hero .chip-tag i{width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 1px color-mix(in srgb,var(--ink) 25%,transparent)}
+.hero .chip-tag.slot{background:var(--ink);color:var(--card)}
+.hero h3{margin:8px 0 0;font-size:19px;line-height:1.25}
+.hero .mat{font-size:13px;color:var(--muted);margin-top:2px}
+.hero .num{display:flex;align-items:baseline;gap:6px;margin-top:12px}
+.hero .num b{font-size:40px;line-height:1;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.hero .num span{font-size:18px;font-weight:600}
+.hero .num em{font-style:normal;margin-left:6px;font-size:15px;font-weight:700;color:var(--ok)}
+.hero .ring.low~.txt .num em{color:var(--err)}
+.hero .of{font-size:13px;color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums}
+.hero .unset{margin-top:12px;font-size:15px;color:var(--muted)}
+.hero-edit{display:inline-flex;align-items:center;gap:7px;margin-top:14px;padding:8px 14px;font:inherit;font-size:14px;font-weight:600;color:var(--ink);background:color-mix(in srgb,var(--ink) 8%,transparent);border:1px solid var(--line);border-radius:10px;cursor:pointer}
+.hero-edit:hover{background:color-mix(in srgb,var(--ink) 14%,transparent)}.hero-edit svg{width:15px;height:15px}
+.edit-card{margin:0 0 12px;padding:16px;border-radius:16px;border:1px solid var(--accent);background:var(--card)}
+.edit-card h4{margin:0 0 4px;font-size:15px}
+.edit-card .danger{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.edit-card .danger button{font:inherit;font-size:13px;padding:0;border:0;background:none;color:var(--err);cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.facts-card{margin:0 0 12px;padding:14px 16px;border-radius:16px;border:1px solid var(--line);background:var(--card)}
+.facts-card h4{margin:0 0 10px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.facts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.facts-grid div{padding:8px 10px;border-radius:10px;background:var(--bg)}
+.facts-grid small{display:block;font-size:11px;color:var(--muted)}.facts-grid b{display:block;font-size:14px;font-weight:600;margin-top:2px;overflow-wrap:anywhere}
+@media (max-width:460px){.hero{flex-direction:column;text-align:center}.hero .tags{justify-content:center}.hero .num{justify-content:center}}
 #pick-left{margin:12px 0 4px}#pick-left[hidden]{display:none}
 .spool-line .pick-tool{align-self:center}
 .spool-left{flex:none;width:110px;text-align:right}.spool-left b{font-size:16px;font-variant-numeric:tabular-nums}
@@ -2156,7 +2180,7 @@ dialog .actions{justify-content:flex-end;margin:0}
 <h2 class="pick-head" id="pick-title">Пластик</h2>
 <p class="hint" id="pick-hint">Катушка без метки: выбери пластик из своего списка, подтянутся материал, цвет и вес.</p>
 <div id="pick-left" hidden></div>
-<h3 class="pick-sub" id="pick-mine" hidden>Другой пластик из своего списка</h3>
+<h3 class="pick-sub" id="pick-mine" hidden>Сменить пластик</h3>
 <div id="spools-view" hidden><div class="spool-list" id="spool-list"></div><h3 class="pick-sub">Свои пластики для катушек без метки</h3></div>
 <input type="text" id="pick-find" placeholder="Поиск: производитель, название, материал" autocomplete="off">
 <div class="pick-list" id="pick-list"></div>
@@ -3656,14 +3680,15 @@ $("pick-apply").onclick=async()=>{
 };
 /* The remainder of a spool in a slot, corrected by hand: a wrong full weight set at the start,
    a spool weighed. The slider runs from empty to the full spool; the full weight is edited too.
-   Clear forgets the count: a spool without a tag waits for a plastic again. */
-function leftEditor(slot,onDone){
-  const box=el("div","left-edit");
+   opts: onDone after saving, onChange(grams, full) while editing, onCancel, big: the number on top
+   (the spools list; the spool window shows it in its hero instead). Clear forgets the count. */
+function leftEditor(slot,opts){
+  opts=opts||{};
+  const box=el("div",opts.big===false?"":"left-edit");
   let full=Math.round(slot.full||1000);
   const known=typeof slot.remaining==="number";
   const big=el("div","left-big"),num=el("b"),part=el("small");
   big.append(num,el("span","unit","г"),part);
-  const was=el("div","left-was",known?`Было по счёту: ${Math.round(slot.remaining)} г`:"Остаток ещё не задан");
   const range=el("input","left-range");range.type="range";range.min=0;range.step=1;
   range.setAttribute("aria-label",`Остаток в ${slot.label}`);
   const scale=el("div","left-scale");
@@ -3677,25 +3702,26 @@ function leftEditor(slot,onDone){
     range.max=full;range.value=v;grams.value=v;num.textContent=v;
     const pct=full?Math.round(v/full*100):0;
     part.textContent=`из ${full} г · ${pct}%`;
-    range.style.setProperty("--p",pct+"%");range.classList.toggle("low",v<100);
+    range.style.setProperty("--p",pct+"%");range.classList.toggle("low",v<LOW_SPOOL_GRAMS);
     scale.replaceChildren(el("span","","0"),el("span","",Math.round(full/2)+""),el("span","",full+" г"));
+    opts.onChange&&opts.onChange(v,full);
   }
   range.oninput=()=>show(Number(range.value));
   grams.oninput=()=>{const v=Number(grams.value);if(Number.isFinite(v)&&v>full){full=Math.min(5000,Math.round(v));fullIn.value=full}show(v)};
   fullIn.oninput=()=>{const f=Math.round(Number(fullIn.value));if(f>=1&&f<=5000){full=f;show(Math.min(Number(grams.value),f))}};
-  show(known?slot.remaining:full);
   const quick=el("div","spool-quick");
   [[1,"Полная"],[.75,"3/4"],[.5,"Половина"],[.25,"1/4"],[0,"Пустая"]].forEach(([k,text])=>{
     const b=el("button","",text);b.type="button";b.onclick=()=>show(full*k);quick.append(b);
   });
-  const save=el("button","action",`Сохранить для ${slot.label}`);save.type="button";
+  const save=el("button","action","Сохранить");save.type="button";
   const actions=el("div","actions");actions.append(save);
+  if(opts.onCancel){const no=el("button","action alt","Отмена");no.type="button";no.onclick=opts.onCancel;actions.append(no)}
   const note=el("div","note");note.setAttribute("role","status");
   const say=(text,cls)=>{note.textContent=text;note.className="note"+(cls?" "+cls:"")};
   let clear=null;
   async function send(body,done){
     save.disabled=true;if(clear)clear.disabled=true;
-    try{await api("/api/spool",Object.assign({index:slot.index},body));say(done,"ok");onDone&&onDone()}
+    try{await api("/api/spool",Object.assign({index:slot.index},body));say(done,"ok");opts.onDone&&opts.onDone()}
     catch(e){say(e.message,"err");save.disabled=false;if(clear)clear.disabled=false}
   }
   save.onclick=()=>{
@@ -3703,42 +3729,85 @@ function leftEditor(slot,onDone){
     if(!Number.isInteger(v)||v<0||v>full){say(`Осталось: целое число от 0 до ${full}`,"err");return}
     send({grams:v,full},`Сохранено: ${v} г из ${full} г`);
   };
+  if(opts.big!==false)box.append(big);
+  box.append(range,scale,fields,quick,actions,note);
   if(slot.clear){
-    clear=el("button","action alt",slot.tag?"Сбросить к весу метки":"Очистить слот");clear.type="button";
-    clear.title=slot.tag?"Забыть счёт: катушка снова считается полной по метке":"Забыть катушку: слот снова ждёт выбора пластика";
+    const danger=el("div","danger");
+    clear=el("button","",slot.tag?"Сбросить к весу метки":"Очистить слот");clear.type="button";
+    danger.append(slot.tag?"Забыть счёт, катушка снова полная по метке: ":"Забыть катушку, слот снова ждёт выбора пластика: ",clear);
     let sure=false;
     clear.onclick=()=>{
-      if(!sure){sure=true;clear.textContent="Точно? Нажми ещё раз";return}
+      if(!sure){sure=true;clear.textContent="точно? нажми ещё раз";return}
       send({clear:true},slot.tag?"Счёт сброшен":"Слот очищен");
     };
-    actions.append(clear);
+    box.append(danger);
   }
-  box.append(big,was,range,scale,fields,quick,actions,note);
+  show(known?slot.remaining:full);
   return box;
 }
-/* What the spool in a slot is: the plastic, its color and material in the printer, and what its tag
-   holds, as on the slot card and in the slot editor. */
-function spoolCard(s){
+const PENCIL='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+/* The spool window: first what is on the spool, big, with a ring of what is left, and what the spool
+   is; «Изменить остаток» opens the edit mode under it, the ring follows the slider until saved. */
+function spoolWindow(s,onDone){
   const tag=s.tag&&!s.tag.empty?s.tag:null,sp=s.spool||{};
-  const color=tag&&tag.tag_color?tag.tag_color:s.color;
-  const card=el("div","spool-card"),pic=el("div","pic");pic.innerHTML=spool(isHex(color)?color:null);
-  const about=el("div","about");
-  const title=tag?(tag.unread?"Метка найдена, не прочитана":slotName(s)):(sp.name||materialName(s.filament)||"Катушка без метки");
-  about.append(el("h3","",title));
-  const sub=el("div","sub");
-  const chip=(text,hex)=>{const c=el("span","chip-tag");if(hex){const i=el("i");i.style.background="#"+hex;c.append(i)}c.append(text);sub.append(c)};
-  if(isHex(s.color))chip("#"+s.color,s.color);
+  const color=tag&&tag.tag_color&&isHex(tag.tag_color)?tag.tag_color:isHex(s.color)?s.color:null;
+  const known=typeof sp.remaining==="number";
+  const full0=Math.round(sp.full||(tag&&tag.weight)||1000);
+  const wrap=el("div");
+  const hero=el("div","hero");if(color)hero.style.setProperty("--tint","#"+color);
+  const ring=el("div","ring");
+  const C=2*Math.PI*58;
+  ring.innerHTML=`<svg class="gauge" viewBox="0 0 136 136"><circle class="track" cx="68" cy="68" r="58"/><circle class="arc" cx="68" cy="68" r="58" stroke-dasharray="${C}" stroke-dashoffset="${C}"/></svg>`;
+  const pic=el("div","pic");pic.innerHTML=spool(color);ring.append(pic);
+  const txt=el("div","txt"),tags=el("div","tags");
+  const chip=(text,cls,hex)=>{const c=el("span","chip-tag"+(cls?" "+cls:""));if(hex){const i=el("i");i.style.background="#"+hex;c.append(i)}c.append(text);tags.append(c)};
+  chip(s.label,"slot");
   chip(tag?(tag.stock?"Метка QIDI":tag.unread?"Метка не прочитана":tag.brand==="Bambu Lab"?"Метка Bambu Lab":"Своя метка"):"Без метки");
-  if(s.index===16)chip("Стойка");
-  about.append(sub);
-  const dl=el("dl"),fact=(k,v)=>{if(v)dl.append(el("dt","",k),el("dd","",v))};
-  fact("Материал в принтере",materialName(s.filament));
-  if(tag&&!tag.stock)tagFacts(tag).filter(([k])=>k!=="Цвет"&&(k!=="Материал"||!slotName(s).includes(tag.detail)))
-    .forEach(([k,v])=>fact(k==="Вес"?"Вес на метке":k,v));
-  if(!tag&&sp.full)fact("Полная катушка",`${Math.round(sp.full)} г`);
-  about.append(dl);
-  card.append(pic,about);
-  return card;
+  if(color)chip("#"+color,"",color);
+  const title=tag?(tag.unread?"Метка не прочитана":slotName(s)):(sp.name||materialName(s.filament)||"Катушка без метки");
+  txt.append(tags,el("h3","",title));
+  if(materialName(s.filament)&&materialName(s.filament)!==title)txt.append(el("div","mat",materialName(s.filament)));
+  const num=el("div","num"),numB=el("b"),pct=el("em"),of=el("div","of");
+  num.append(numB,el("span","","г"),pct);
+  function draw(v,full){
+    const k=full?Math.max(0,Math.min(1,v/full)):0;
+    ring.querySelector(".arc").style.strokeDashoffset=C*(1-k);
+    ring.classList.toggle("low",v<LOW_SPOOL_GRAMS);
+    numB.textContent=Math.round(v);pct.textContent=Math.round(k*100)+"%";
+    of.textContent=`осталось из ${Math.round(full)} г · израсходовано ${Math.max(0,Math.round(full-v))} г`;
+  }
+  const editBtn=el("button","hero-edit");editBtn.type="button";editBtn.innerHTML=PENCIL;editBtn.append("Изменить остаток");
+  if(known||tag){
+    txt.append(num,of);
+    if(known)draw(sp.remaining,full0);else{numB.textContent="—";of.textContent="остаток ещё не задан"}
+    txt.append(editBtn);
+  }else txt.append(el("div","unset","Остаток не задан: выбери пластик ниже"));
+  hero.append(ring,txt);wrap.append(hero);
+  const editHost=el("div");wrap.append(editHost);
+  editBtn.onclick=()=>{
+    editBtn.hidden=true;
+    const card=el("div","edit-card");card.append(el("h4","","Изменить остаток"),
+      el("p","hint","Потяни шкалу или впиши граммы. Полную катушку тоже можно поправить, если начальный вес был задан неверно."));
+    const cancel=()=>{editHost.replaceChildren();editBtn.hidden=false;if(known)draw(sp.remaining,full0);else{numB.textContent="—";pct.textContent=""}};
+    card.append(leftEditor({index:s.index,label:s.label,remaining:sp.remaining,full:full0,tag:!!tag,clear:true},
+      {big:false,onChange:draw,onCancel:cancel,onDone}));
+    editHost.replaceChildren(card);
+    card.scrollIntoView({block:"nearest",behavior:"smooth"});
+  };
+  // What the spool is: the printer's material and what its tag holds.
+  const facts=[["Материал в принтере",materialName(s.filament)]];
+  if(tag&&!tag.stock)tagFacts(tag).filter(([k])=>k!=="Цвет"&&(k!=="Материал"||!title.includes(tag.detail)))
+    .forEach(([k,v])=>facts.push([k==="Вес"?"Вес на метке":k,v]));
+  if(!tag&&sp.full)facts.push(["Полная катушка",`${Math.round(sp.full)} г`]);
+  const shown=facts.filter(([,v])=>v);
+  // A spool without a tag: the hero says what it is, and the plastic list follows to change it.
+  if(shown.length&&tag){
+    const card=el("div","facts-card"),grid=el("div","facts-grid");
+    card.append(el("h4","",tag?"С метки":"О катушке"),grid);
+    shown.forEach(([k,v])=>{const d=el("div");d.append(el("small","",k),el("b","",v));grid.append(d)});
+    wrap.append(card);
+  }
+  return wrap;
 }
 async function startPick(){
   document.body.classList.add("pick-mode");
@@ -3760,24 +3829,19 @@ async function startPick(){
     return;
   }
   const spoolNow=pickSlot.spool||{},tagged=!!(pickSlot.tag&&!pickSlot.tag.empty);
-  $("pick-hint").before(spoolCard(pickSlot));
-  if(tagged||typeof spoolNow.remaining==="number"){
-    // A counted spool: its remainder can be corrected here; a tagged one has nothing to pick.
-    $("pick-left").replaceChildren(leftEditor({index:pickSlot.index,label:pickSlot.label,remaining:spoolNow.remaining,
-      full:spoolNow.full||(pickSlot.tag||{}).weight,tag:tagged,clear:true},
-      ()=>setTimeout(()=>parent.postMessage({qidiPick:"done"},"*"),900)));
-    $("pick-left").hidden=false;
-  }
+  // First what is on the spool; its remainder is edited in a mode of its own, see spoolWindow.
+  $("pick-left").replaceChildren(spoolWindow(pickSlot,()=>setTimeout(()=>parent.postMessage({qidiPick:"done"},"*"),900)));
+  $("pick-left").hidden=false;
+  $("pick-title").textContent=`Катушка в ${pickSlot.label==="Rack"?"стойке":pickSlot.label}`;
   if(tagged){
-    $("pick-title").textContent=`Остаток в ${pickSlot.label}`;
-    $("pick-hint").textContent="Пластик известен по метке. Остаток можно поправить: потяни шкалу или впиши граммы.";
+    $("pick-hint").hidden=true;
     ["pick-find","pick-list","pick-new"].forEach(id=>$(id).hidden=true);
     return;
   }
   if(typeof spoolNow.remaining==="number"){
-    $("pick-hint").textContent="Катушка без метки: поправь остаток или выбери другой пластик из своего списка.";
-    $("pick-mine").hidden=false;
-  }
+    $("pick-hint").textContent="Нажми другой пластик, чтобы поставить его в слот. Карандаш у пластика меняет его в списке.";
+    $("pick-mine").hidden=false;$("pick-mine").after($("pick-hint"));
+  }else $("pick-hint").textContent="Катушка без метки: выбери пластик из своего списка, подтянутся материал, цвет и вес.";
   renderPickList();
   if(!(state.codes.my_plastics||[]).length)openPickForm(null);
 }
@@ -3814,7 +3878,8 @@ async function loadSpoolList(){
         edit.onclick=()=>{
           const open=item.querySelector(".left-edit");
           if(open){open.remove();return}
-          item.append(leftEditor({index:s.index,label:s.where,remaining:s.remaining,full:s.full,tag:s.tag},()=>setTimeout(loadSpoolList,900)));
+          item.append(leftEditor({index:s.index,label:s.where,remaining:s.remaining,full:s.full,tag:s.tag},
+            {onDone:()=>setTimeout(loadSpoolList,900),onCancel:()=>item.querySelector(".left-edit").remove()}));
         };
         row.append(edit);
       }
