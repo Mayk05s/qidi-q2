@@ -693,6 +693,84 @@ class SpoolTests(unittest.TestCase):
                 printer.set_spool(index, grams)
         self.assertEqual(printer.sent, [])
 
+    def test_rack_and_clear_go_to_the_usage_module(self):
+        # Scenario 3 and 2: the remainder of the rack spool corrected, a slot cleared by hand.
+        printer = self.printer()
+        files = {}
+        printer.upload = files.__setitem__
+        printer.set_spool(16, 420)
+        printer.set_spool(1, None, clear=True)
+        self.assertEqual(files, {"spool_set_16.txt": "420\n", "spool_set_1.txt": "clear\n"})
+
+    def test_app_passes_clear_only_when_asked(self):
+        printer = self.printer()
+        files = {}
+        printer.upload = files.__setitem__
+        app = q.App(printer=printer)
+        app.set_spool({"index": 0, "grams": 300, "clear": "yes"})
+        app.set_spool({"index": 2, "clear": True})
+        self.assertEqual(files, {"spool_set_0.txt": "300\n", "spool_set_2.txt": "clear\n"})
+
+
+class EmptySlotTests(unittest.TestCase):
+    """A slot the printer sees empty is cleared with it: the old tag and count are not shown."""
+
+    BLACK = {"uid": "A", "tray": "T", "color": "000000", "filament": "QFA01", "detail": "PLA Matte"}
+
+    def printer(self, present):
+        variables = {}
+        for i in range(4):
+            variables.update({"filament_slot%d" % i: "QFA01", "color_slot%d" % i: ["000000"],
+                              "bambu_tag_slot%d" % i: dict(self.BLACK)})
+        status = {"save_variables": {"variables": variables}, "print_stats": {"state": "standby"},
+                  "bambu_spool_usage": {"slots": [{"key": "tray:T", "remaining": 640.}] * 4}}
+        for i, here in enumerate(present):
+            if here is not None:
+                status["box_stepper slot%d" % i] = {"runout_button": 0 if here else 1}
+        self.paths = []
+
+        def fetch(path, post=False):
+            self.paths.append(path)
+            return {"result": {"status": status}}
+        return q.Printer("printer", fetch=fetch)
+
+    def test_spool_moved_from_1a_to_1b_shows_only_in_1b(self):
+        slots = self.printer([False, True, None, None]).slots()["slots"]
+        self.assertIn("box_stepper%20slot0=runout_button", self.paths[0])
+        first = slots[0]
+        self.assertEqual((first["empty"], first["tag"], first["spool"]), (True, None, None))
+        self.assertEqual(slots[1]["tag"]["tray"], "T")
+        self.assertEqual(slots[1]["spool"]["remaining"], 640.)
+        # The same tag in 1A no longer makes 1B a spool seen twice.
+        self.assertEqual(slots[1]["same_tag"], [2, 3])
+        self.assertFalse(slots[2]["empty"])
+
+    def test_empty_view_of_the_usage_module_is_no_spool(self):
+        printer = self.printer([True] * 4)
+        status = printer.fetch("")["result"]["status"]
+        status["bambu_spool_usage"]["slots"] = [{"key": None, "remaining": None, "empty": True}] * 4
+        self.assertIsNone(printer.slots()["slots"][0]["spool"])
+
+    def test_spool_list_leaves_out_empty_slots(self):
+        printer = self.printer([False, True, True, True])
+        ledger = {"tray:T": {"set_g": 1000., "used_g": 360., "name": "Bambu Lab PLA Matte"}}
+        inner = printer.fetch
+        printer.fetch = lambda path, post=False: ledger if path.endswith("spool_usage.json") else inner(path)
+        spools = printer.spool_list()["spools"]
+        self.assertEqual([(s["where"], s["index"]) for s in spools], [("1D", 3)])
+
+    def test_tagless_spool_in_place_can_be_corrected_from_the_list(self):
+        printer = self.printer([True] * 4)
+        status = printer.fetch("")["result"]["status"]
+        status["save_variables"]["variables"]["bambu_tag_slot1"] = {"empty": True}
+        status["bambu_spool_usage"]["slots"] = [None, {"key": "slot:1", "remaining": 500., "full": 1000.,
+                                                       "name": "eSun PLA+"}, None, None]
+        inner = printer.fetch
+        printer.fetch = lambda path, post=False: {} if path.endswith("spool_usage.json") else inner(path)
+        spools = printer.spool_list()["spools"]
+        self.assertEqual([(s["name"], s["where"], s["index"], s["tag"]) for s in spools],
+                         [("eSun PLA+", "1B", 1, False)])
+
 
 class MyPlasticsTests(unittest.TestCase):
     PLASTIC = {"id": "a1", "maker": "eSun", "name": "PLA+ сиреневый", "filament": "QFA01", "color": "A878FF", "grams": 1000}

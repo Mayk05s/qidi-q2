@@ -20,7 +20,8 @@ class CardData(unittest.TestCase):
             {"label": "1D", "need": 300, "left_to_print": 300, "remaining": 247, "verdict": "short"}]}
         data = f.card_data(SLOTS, check)
         self.assertEqual(data["spools"][0], {"index": 0, "label": "1A", "color": "EFE255", "material": "PLA Lite",
-                                             "remaining": 996.4, "weight": 1000, "tagless": False, "need": 3})
+                                             "remaining": 996.4, "weight": 1000, "tagless": False, "need": 3,
+                                             "empty": False})
         self.assertEqual(data["spools"][1]["remaining"], None)
         self.assertTrue(data["spools"][1]["tagless"])
         self.assertEqual(data["problems"], [{"label": "1D", "need": 300, "remaining": 247, "verdict": "short"}])
@@ -70,6 +71,19 @@ class CardData(unittest.TestCase):
         slots = {"slots": [{"index": 0, "label": "1A", "tag": {"detail": "PLA", "weight": 1000},
                             "spool": {"remaining": 243, "full": 250}}]}
         self.assertEqual(f.card_data(slots, {})["spools"][0]["weight"], 250)
+
+    def test_empty_slot_shows_no_spool(self):
+        # The printer sees no spool in 1B: no count, no plastic to pick, whatever was saved.
+        slots = {"slots": [{"index": 1, "label": "1B", "color": "A878FF", "filament": "QFA00", "empty": True,
+                            "tag": None, "spool": None}]}
+        spool = f.card_data(slots, {})["spools"][0]
+        self.assertEqual((spool["empty"], spool["tagless"], spool["material"], spool["color"], spool["remaining"]),
+                         (True, False, "Слот пуст", None, None))
+
+    def test_every_spool_in_place_opens_the_window(self):
+        # Tagged spools too: their remainder is corrected in the panel's window.
+        self.assertIn('if(!s.empty&&s.index!=null){t.classList.add("pick")', f.SCRIPT)
+        self.assertIn('"Остаток в "', f.SCRIPT)
 
 
 if __name__ == "__main__":

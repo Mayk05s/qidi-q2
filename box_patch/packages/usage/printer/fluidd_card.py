@@ -4,10 +4,12 @@ and a card under it that warns when the running or the newest print will not las
 The Fluidd page loads SCRIPT from the panel (see qidi_panel_link.js); the data comes from
 /api/fluidd, which the panel answers to the printer's own page.
 
-A spool without a tag gets its plastic from the user's own list: a click on its tile opens the
-panel's page as /?pick=<slot> in a frame, with the panel's own form. The panel keeps the list and
-hands the choice to bambu_spool_usage as spool_pick_<slot>.json next to printer.cfg. The Остатки
-button opens /?spools: every counted spool with its remainder, and the list of plastics.
+A click on a spool's tile opens the panel's page as /?pick=<slot> in a frame: the remainder of a
+counted spool can be corrected there (spool_set_<slot>.txt), and a spool without a tag gets its
+plastic from the user's own list with the panel's own form. The panel keeps the list and hands the
+choice to bambu_spool_usage as spool_pick_<slot>.json next to printer.cfg. The Остатки button opens
+/?spools: every counted spool with its remainder, the standing ones correctable, and the plastics.
+A slot the printer sees empty shows so, without a count and without a click.
 The rack is a narrow column on the left, the Box two by two: the card stays low on a narrow page.
 """
 
@@ -51,11 +53,13 @@ def card_data(slots, check, names=None):
         tag = slot.get("tag") or {}
         # A spool without a tag gets its plastic from the user's list, see SCRIPT.
         tagless = not tag or bool(tag.get("empty"))
-        entry = {"index": slot.get("index"), "label": slot["label"], "color": slot.get("color"),
-                 "material": plastic_name(tag, spool, slot.get("filament"), names),
+        empty = bool(slot.get("empty"))
+        entry = {"index": slot.get("index"), "label": slot["label"], "color": None if empty else slot.get("color"),
+                 "material": "Слот пуст" if empty else plastic_name(tag, spool, slot.get("filament"), names),
                  "remaining": spool.get("remaining"),
                  # The counted full spool first: a tag says 1000 g even when the spool was set to 250 g.
-                 "weight": spool.get("full") or tag.get("weight") or 1000, "tagless": tagless}
+                 "weight": spool.get("full") or tag.get("weight") or 1000, "tagless": tagless and not empty,
+                 "empty": empty}
         if needs.get(slot["label"]):
             entry["need"] = round(needs[slot["label"]], 1)
         spools.append(entry)
@@ -76,6 +80,7 @@ style.textContent=[
 ".qidi-left i b{display:block;height:100%;background:#4caf50}",
 ".qidi-left.low{color:#ff6e6e;background:rgba(255,82,82,.14)}.qidi-left.low i b{background:#ff5252}",
 ".qidi-left i b.use{background:#7fa8f5}",
+"#qidi-plastic-card .qt.empty{opacity:.55;border-style:dashed}",
 "#qidi-plastic-card{margin-bottom:12px;border-radius:4px;overflow:hidden}",
 "#qidi-plastic-card .qh{display:flex;align-items:center;gap:10px;padding:12px 16px;font-size:16px;font-weight:500;border-bottom:1px solid rgba(127,127,127,.18)}",
 "#qidi-plastic-card .qh svg{width:20px;height:20px;opacity:.85}",
@@ -138,7 +143,7 @@ function barParts(s){
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
 // A spool without a tag gets its plastic in the panel's own form (maker and name with the lists,
 // material by type, the palette), opened in a frame; the panel says when it is done.
-function openPick(spool){openFrame("/?pick="+spool.index,"Пластик для "+spool.label)}
+function openPick(spool){openFrame("/?pick="+spool.index,(spool.tagless?"Пластик для ":"Остаток в ")+spool.label)}
 function openFrame(path,title){
   var old=document.getElementById("qidi-pick");if(old)old.remove();
   var bg=el("div");bg.id="qidi-pick";
@@ -223,12 +228,13 @@ function drawCard(card){
   var grid=el("div","qg");lay.appendChild(grid);
   data.spools.forEach(function(s){
     var p=problemOf(s.label);
-    var t=el("div","qt"+(p?" "+p.verdict:"")+(s.remaining!=null&&s.remaining<50?" low":""));
+    var t=el("div","qt"+(p?" "+p.verdict:"")+(s.remaining!=null&&s.remaining<50?" low":"")+(s.empty?" empty":""));
     t.innerHTML=spoolSvg(s.color);
     var n=el("div","qn"),top=el("div","qtop");top.appendChild(el("span","ql",s.label));
     if(s.remaining!=null)top.appendChild(el("span","qv",g(s.remaining)));
     n.appendChild(top);n.appendChild(el("div","qm",s.material||"Без метки"));
-    if(s.tagless&&s.remaining==null)n.appendChild(el("div","qpk","Выбрать пластик"));
+    if(s.empty){}
+    else if(s.tagless&&s.remaining==null)n.appendChild(el("div","qpk","Выбрать пластик"));
     else{
       var bar=el("div","qbar"+(s.need?" plan":""));bar.innerHTML=s.remaining==null?"":barParts(s);n.appendChild(bar);
       if(s.need&&s.remaining!=null){
@@ -238,7 +244,8 @@ function drawCard(card){
         n.appendChild(u);
       }
     }
-    if(s.tagless){t.classList.add("pick");t.title="Катушка без метки: выбрать пластик из своего списка";t.onclick=function(){openPick(s)}}
+    // Every spool in place opens the panel's window: the remainder corrected, a plastic picked.
+    if(!s.empty&&s.index!=null){t.classList.add("pick");t.title=s.tagless?"Катушка без метки: остаток и пластик из своего списка":"Поправить остаток";t.onclick=function(){openPick(s)}}
     t.appendChild(n);(s===rack?side:grid).appendChild(t);
   });
   var file=data.file?data.file.split("/").pop():"";

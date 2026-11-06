@@ -18,6 +18,13 @@
 # the material and color; during a print those two are written when it ends. With keep, the same
 # plastic was edited in the list: material, color and name change, the count stays.
 # The rack spool (slot16) is counted the same way, as a spool without a tag; SLOT=16 sets it.
+#   BAMBU_RFID_SPOOL_SET SLOT=0 CLEAR=1
+#       forget the count of the spool in the slot: a spool without a tag waits for a plastic again,
+#       a tagged one starts over from its tag. The panel's file holds "clear" for the same.
+# A slot the printer sees empty (the slot sensor, runout_button of box_stepper slotN) is cleared
+# with it: no count is shown there, and the tag record of the spool taken out is forgotten
+# ({'empty': True}, as the panel's «forget»), so a spool put in later is not taken for it. A spool
+# without a tag gets its old count back only while the slot keeps the material and color it had.
 #   BAMBU_SCREEN_WARNING BOX=3|4
 #       raise the stock Box 3 or 4 window of the printer screen for a moment; the panel turns
 #       those windows into the low-plastic window. At a print start the panel leaves
@@ -38,6 +45,12 @@ USAGE_FILE = "spool_usage.json"
 USAGE_INTERVAL = 1.
 USAGE_SAVE_INTERVAL = 30.
 SPOOL_REQUEST_FILE = "spool_set_%d.txt"
+# A spool request asking to forget the count instead of grams.
+CLEAR_REQUEST = "clear"
+# Seconds a slot sensor must show no spool before the slot counts as empty: a spool turning
+# in the reader must not clear it.
+EMPTY_SECONDS = 3.
+EMPTY_RECORD = {"empty": True}
 PICK_REQUEST_FILE = "spool_pick_%d.json"
 SCREEN_REQUEST_FILE = "screen_warning.txt"
 SCREEN_REQUEST_AGE = 600.
@@ -113,6 +126,59 @@ def pick_scripts(slot, entry):
     return scripts
 
 
+def forget_script(slot):
+    return "SAVE_VARIABLE VARIABLE=bambu_tag_slot%d VALUE=\"{'empty': True}\"" % (slot,)
+
+
+class SlotWatch:
+    """Clears a Box slot the printer sees empty. The tag record of the spool taken out is
+    forgotten, so the spool put in next is not counted as that one until its own tag is read.
+    During a print G-code waits behind the print: the record is then only hidden (see overlay)
+    and forgotten once the print is over. The slot whose filament is in the toolhead is left
+    alone: the end of a spool passes the sensor while the rest of it is still printed."""
+
+    def __init__(self, slots=BOX_SLOTS):
+        self.slots = slots
+        self.since = {}
+        self.empty = set()
+        self.hidden = {}
+
+    def feed(self, present, variables, now, printing, loaded=None):
+        """present: slot to True (a spool), False (none) or None (not known). Returns the G-code
+        that forgets the records of spools taken out."""
+        scripts = []
+        for slot in range(self.slots):
+            state = present.get(slot)
+            if state is None or state:
+                self.since.pop(slot, None)
+                self.empty.discard(slot)
+            elif slot != loaded:
+                self.since.setdefault(slot, now)
+                if now - self.since[slot] >= EMPTY_SECONDS:
+                    self.empty.add(slot)
+            name = "bambu_tag_slot%d" % (slot,)
+            record = variables.get(name)
+            if slot in self.empty and isinstance(record, dict) and not record.get("empty"):
+                self.hidden.setdefault(slot, record)
+            if slot in self.hidden and self.hidden[slot] != record:
+                # Read again since: a new spool, or the same one put back, has its own record now.
+                del self.hidden[slot]
+            if slot in self.hidden and not printing:
+                scripts.append(forget_script(slot))
+                del self.hidden[slot]
+        return scripts
+
+    def overlay(self, variables):
+        """The saved variables with the records of spools taken out hidden."""
+        if not self.hidden:
+            return variables
+        seen = dict(variables)
+        for slot, record in self.hidden.items():
+            if seen.get("bambu_tag_slot%d" % (slot,)) == record:
+                seen["bambu_tag_slot%d" % (slot,)] = dict(EMPTY_RECORD)
+        return seen
+
+
 class SpoolLedger:
     """Grams set by the user and grams printed since, per spool."""
 
@@ -185,6 +251,13 @@ class SpoolLedger:
             if field in old:
                 entry[field] = old[field]
         self._fresh(key, entry, None if "slot_as" in old else identity)
+
+    def forget(self, key):
+        """Drop the count: a spool without a tag waits for a plastic, a tagged one is adopted
+        again from its tag."""
+        key = self._resolve(key)
+        if self.spools.pop(key, None) is not None:
+            self.dirty = True
 
     def pick(self, slot, plastic, now, printing):
         """A plastic from the user's list put in a slot without a tag: its count starts at the
@@ -264,7 +337,7 @@ class SpoolLedger:
 
 
 def take_spool_request(folder, slot):
-    """Grams asked for this slot, or None. The request is used up even when it is bad."""
+    """Grams asked for this slot, CLEAR_REQUEST, or None. The request is used up even when it is bad."""
     path = os.path.join(folder, SPOOL_REQUEST_FILE % (slot,))
     try:
         with open(path, encoding="utf-8") as f:
@@ -272,6 +345,8 @@ def take_spool_request(folder, slot):
         os.remove(path)
     except OSError:
         return None
+    if text.strip() == CLEAR_REQUEST:
+        return CLEAR_REQUEST
     try:
         grams = int(text.strip())
     except ValueError:
@@ -416,6 +491,7 @@ class SpoolUsage:
         self.warnings = warnings
         self.ledger = SpoolLedger(path)
         self.meter = FilamentMeter()
+        self.watch = SlotWatch()
         self.next_save = 0.
         printer.register_event_handler("klippy:ready", self._start)
         printer.register_event_handler("klippy:disconnect", self._flush)
@@ -423,8 +499,25 @@ class SpoolUsage:
             "BAMBU_RFID_SPOOL_SET", self.cmd_SET, desc="Set the filament left on a spool")
 
     def _variables(self):
+        """The saved variables as the count sees them: tags of spools taken out are hidden."""
         saved = self.printer.lookup_object("save_variables", None)
-        return saved.allVariables if saved is not None else {}
+        return self.watch.overlay(saved.allVariables if saved is not None else {})
+
+    def _in_head(self, eventtime, box_status):
+        """The slot whose filament is in the toolhead. loaded_slot alone stays after an unload."""
+        sensor = self.printer.lookup_object("filament_switch_sensor filament_switch_sensor", None)
+        if sensor is not None and not sensor.get_status(eventtime).get("filament_detected"):
+            return None
+        return active_slot(box_status)
+
+    def _present(self, eventtime):
+        """Slot to whether its sensor sees a spool; None where the printer does not say."""
+        present = {}
+        for slot in range(BOX_SLOTS):
+            stepper = self.printer.lookup_object("box_stepper slot%d" % (slot,), None)
+            state = stepper.get_status(eventtime).get("runout_button") if stepper is not None else None
+            present[slot] = None if state is None else state == 0
+        return present
 
     def _start(self):
         self.reactor.register_timer(self._tick, self.reactor.monotonic() + USAGE_INTERVAL)
@@ -447,16 +540,17 @@ class SpoolUsage:
         stats = self.printer.lookup_object("print_stats").get_status(eventtime)
         box = self.printer.lookup_object("box_extras", None)
         box_status = box.get_status(eventtime) if box is not None else {}
+        printing = stats["state"] in ("printing", "paused")
+        saved = self.printer.lookup_object("save_variables", None)
+        scripts = self.watch.feed(self._present(eventtime), saved.allVariables if saved is not None else {},
+                                  eventtime, printing, self._in_head(eventtime, box_status))
         self.ledger.adopt(self._variables())
         folder = os.path.dirname(self.ledger.path)
-        printing = stats["state"] in ("printing", "paused")
-        scripts = [] if printing else self.ledger.pending()
+        scripts += [] if printing else self.ledger.pending()
         for slot in COUNTED_SLOTS:
             grams = take_spool_request(folder, slot)
             if grams is not None:
-                variables = self._variables()
-                self.ledger.set_remaining(spool_key(variables, slot), grams, slot_values(variables, slot))
-                self._flush()
+                self._set(slot, grams)
             plastic = take_pick_request(folder, slot)
             if plastic is not None:
                 scripts += self.ledger.pick(slot, plastic, slot_values(self._variables(), slot), printing)
@@ -476,19 +570,37 @@ class SpoolUsage:
             self._flush()
             self.next_save = eventtime + USAGE_SAVE_INTERVAL
 
+    def _set(self, slot, grams):
+        """Grams left on the spool in the slot, or CLEAR_REQUEST to forget its count."""
+        variables = self._variables()
+        if grams == CLEAR_REQUEST:
+            self.ledger.forget(spool_key(variables, slot))
+        else:
+            self.ledger.set_remaining(spool_key(variables, slot), grams, slot_values(variables, slot))
+        self._flush()
+
     def get_status(self, eventtime):
         variables = self._variables()
-        views = [self.ledger.view(spool_key(variables, slot), slot_values(variables, slot)) for slot in COUNTED_SLOTS]
+        views = []
+        for slot in COUNTED_SLOTS:
+            if slot in self.watch.empty:
+                # The printer sees no spool there: nothing to count, whatever was there before.
+                views.append({"key": None, "remaining": None, "used": 0., "full": None, "name": None,
+                              "plastic": None, "empty": True})
+            else:
+                views.append(self.ledger.view(spool_key(variables, slot), slot_values(variables, slot)))
         return {"slots": views[:BOX_SLOTS], "rack": views[BOX_SLOTS]}
 
     def cmd_SET(self, gcmd):
         slot = gcmd.get_int("SLOT", minval=0, maxval=RACK_SLOT)
         if slot not in COUNTED_SLOTS:
             raise gcmd.error("SLOT is 0-%d or %d for the rack" % (BOX_SLOTS - 1, RACK_SLOT))
+        if gcmd.get_int("CLEAR", 0):
+            self._set(slot, CLEAR_REQUEST)
+            gcmd.respond_info("Slot %d: count forgotten" % (slot,))
+            return
         grams = gcmd.get_float("GRAMS", minval=0., maxval=MAX_SPOOL_GRAMS)
-        variables = self._variables()
-        self.ledger.set_remaining(spool_key(variables, slot), grams, slot_values(variables, slot))
-        self._flush()
+        self._set(slot, grams)
         gcmd.respond_info("Slot %d: %.0f g left" % (slot, grams))
 
 

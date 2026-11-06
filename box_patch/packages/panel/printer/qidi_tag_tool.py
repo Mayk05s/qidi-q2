@@ -185,8 +185,11 @@ class Printer:
         except (urllib.error.URLError, OSError, ValueError) as e:
             raise PrinterError("Принтер %s не отвечает: %s" % (self.host, e))
 
+    # The slot sensors: runout_button is 0 while a spool is in the slot.
+    SENSORS = "".join("&" + urllib.parse.quote("box_stepper slot%d" % (i,)) + "=runout_button" for i in range(4))
+
     def _status(self):
-        data = self.fetch("/printer/objects/query?save_variables&print_stats=state&bambu_spool_usage")
+        data = self.fetch("/printer/objects/query?save_variables&print_stats=state&bambu_spool_usage" + self.SENSORS)
         try:
             return data["result"]["status"]
         except (KeyError, TypeError):
@@ -205,15 +208,18 @@ class Printer:
             tag = values.get("bambu_tag_slot%d" % index)
             # A record that no longer matches the slot belongs to an earlier spool;
             # {"empty": True} means the last read started and found nothing yet.
-            if not isinstance(tag, dict):
+            # The printer sees no spool in the slot: it is empty, whatever was saved for it.
+            empty = (status.get("box_stepper slot%d" % index) or {}).get("runout_button") not in (None, 0)
+            if not isinstance(tag, dict) or empty:
                 tag = None
             elif tag.get("unread"):
                 pass  # a tag was there but its data could not be read: shown as such
             elif not tag.get("empty") and (tag.get("color") != color or tag.get("filament") != filament):
                 tag = None
-            result.append({"index": index, "label": label, "filament": filament,
+            spool = spools[index] if index < len(spools) and not empty else None
+            result.append({"index": index, "label": label, "filament": filament, "empty": empty,
                            "color": color, "tag": tag, "reading": bool(self.reading.get(index)),
-                           "spool": spools[index] if index < len(spools) else None,
+                           "spool": spool if spool and not spool.get("empty") else None,
                            "read_error": self.read_errors.get(index)})
         for slot in result:
             key = tag_identity(slot["tag"])
@@ -227,9 +233,14 @@ class Printer:
                 "tag": None, "spool": (status.get("bambu_spool_usage") or {}).get("rack")}
         return {"slots": result, "rack": rack, "state": status["print_stats"]["state"]}
 
-    def set_spool(self, index, grams):
-        if index not in [i for i, _ in self.SLOTS]:
+    def set_spool(self, index, grams, clear=False):
+        """Grams left on the spool in a slot or on the rack; clear forgets its count instead: a spool
+        without a tag waits for a plastic again, a tagged one starts over from its tag."""
+        if index not in [i for i, _ in self.SLOTS] + [self.RACK]:
             raise PrinterError("Нет такого слота")
+        if clear:
+            self.upload("spool_set_%d.txt" % (index,), "clear\n")
+            return
         if isinstance(grams, bool) or not isinstance(grams, int) or not 0 <= grams <= 5000:
             raise PrinterError("Остаток должен быть от 0 до 5000 г")
         # A file rather than G-code: G-code waits behind a running print.
@@ -252,9 +263,9 @@ class Printer:
         for slot in data["slots"] + [data["rack"]]:
             spool = slot.get("spool") or {}
             if spool.get("key"):
-                where[spool["key"]] = slot["label"]
-            if spool.get("key", "").startswith("slot:") and spool.get("remaining") is not None:
-                result.append({"key": spool["key"], "tag": False, "where": slot["label"],
+                where[spool["key"]] = slot
+            if (spool.get("key") or "").startswith("slot:") and spool.get("remaining") is not None:
+                result.append({"key": spool["key"], "tag": False, "where": slot["label"], "index": slot["index"],
                                "name": spool.get("name") or names.get(slot["filament"], slot["filament"]),
                                "color": slot["color"], "material": names.get(slot["filament"], slot["filament"]),
                                "remaining": spool["remaining"], "full": spool.get("full")})
@@ -262,7 +273,9 @@ class Printer:
             if key.startswith("slot:") or not isinstance(entry, dict) or entry.get("set_g") is None:
                 continue
             uid = key.split(":", 1)[1]
-            result.append({"key": key, "tag": True, "where": where.get(key),
+            standing = where.get(key)
+            result.append({"key": key, "tag": True, "where": standing["label"] if standing else None,
+                           "index": standing["index"] if standing else None,
                            "name": entry.get("name") or names.get(entry.get("filament"))
                            or "Метка " + (entry.get("uids") or [uid])[0][-8:],
                            "color": entry.get("color"), "material": names.get(entry.get("filament"), entry.get("filament")),
@@ -1287,7 +1300,7 @@ class App:
             return self.plastic().check(name)
 
     def set_spool(self, body):
-        self._require_printer().set_spool(body.get("index"), body.get("grams"))
+        self._require_printer().set_spool(body.get("index"), body.get("grams"), body.get("clear") is True)
         return {"ok": True}
 
     def feed_mode(self):
@@ -1675,6 +1688,12 @@ button.action:disabled{opacity:.45;cursor:not-allowed}
 .spool-list{display:flex;flex-direction:column;gap:6px;margin-top:10px}
 .spool-line{display:flex;align-items:center;gap:12px;padding:6px 10px;background:var(--card);border:1px solid var(--line);border-radius:10px}
 .spool-line .pick-text{flex:1}
+.spool-item{display:flex;flex-direction:column}
+.left-edit{margin-top:6px;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:10px}
+.left-edit .left-now{font-size:13px;color:var(--muted);margin-bottom:8px}
+.left-edit .spool-quick{margin:10px 0 0}
+#pick-left{margin:12px 0 4px}#pick-left[hidden]{display:none}
+.spool-line .pick-tool{align-self:center}
 .spool-left{flex:none;width:110px;text-align:right}.spool-left b{font-size:16px;font-variant-numeric:tabular-nums}
 .spool-bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:4px}.spool-bar i{display:block;height:100%;background:var(--ok)}
 .spool-bar i.low{background:var(--err)}
@@ -2108,6 +2127,8 @@ dialog .actions{justify-content:flex-end;margin:0}
 <div id="panel-pick" hidden>
 <h2 class="pick-head" id="pick-title">Пластик</h2>
 <p class="hint" id="pick-hint">Катушка без метки: выбери пластик из своего списка, подтянутся материал, цвет и вес.</p>
+<div id="pick-left" hidden></div>
+<h3 class="pick-sub" id="pick-mine" hidden>Другой пластик из своего списка</h3>
 <div id="spools-view" hidden><div class="spool-list" id="spool-list"></div><h3 class="pick-sub">Свои пластики для катушек без метки</h3></div>
 <input type="text" id="pick-find" placeholder="Поиск: производитель, название, материал" autocomplete="off">
 <div class="pick-list" id="pick-list"></div>
@@ -3118,9 +3139,13 @@ function renderSlot(s){
   if(!tag&&editing===s.index)closeEditor();
   r.card.classList.toggle("editable",!!tag&&!s.reading);
   r.editSlot.innerHTML="";r.mapped.innerHTML="";
-  if(r.read)r.read.disabled=s.reading;
-  r.spool.innerHTML=spool(blank?null:tag&&tag.tag_color?tag.tag_color:s.color);
-  if(s.reading){
+  if(r.read)r.read.disabled=s.reading||!!s.empty;
+  r.spool.innerHTML=spool(blank||s.empty?null:tag&&tag.tag_color?tag.tag_color:s.color);
+  if(s.empty&&!s.reading){
+    // The printer sees no spool there: the slot is cleared with it.
+    r.name.textContent="Слот пуст";r.hex.textContent="";
+    r.mapped.append(el("div","map-empty","Принтер не видит катушку"));
+  }else if(s.reading){
     r.name.textContent="Читаю метку…";r.hex.textContent="";
     r.mapped.append(el("div","map-empty","Катушка крутится, до минуты"));
   }else if(s.tag&&s.tag.empty){
@@ -3601,6 +3626,47 @@ $("pick-apply").onclick=async()=>{
     setTimeout(()=>parent.postMessage({qidiPick:"done"},"*"),printing?2500:900);
   }catch(e){pickSay(e.message,"err");$("pick-apply").disabled=false}
 };
+/* The remainder of a spool in a slot, corrected by hand: a wrong full weight set at the start,
+   a spool weighed. Clear forgets the count: a spool without a tag waits for a plastic again. */
+function leftEditor(slot,onDone){
+  const box=el("div","left-edit"),full=slot.full||1000;
+  const now=el("div","left-now",typeof slot.remaining==="number"?`Сейчас ≈ ${Math.round(slot.remaining)} г из ${Math.round(full)} г`:"Остаток не задан");
+  const label=el("label","spool-amount","Осталось");
+  const input=el("input");input.type="number";input.min=0;input.max=5000;input.step=10;
+  input.value=typeof slot.remaining==="number"?Math.round(slot.remaining):full;
+  label.append(input," г");
+  const quick=el("div","spool-quick");
+  [[1,"Полная"],[.75,"3/4"],[.5,"Половина"],[.25,"1/4"]].forEach(([part,text])=>{
+    const b=el("button","",text);b.type="button";b.onclick=()=>{input.value=Math.round(full*part)};quick.append(b);
+  });
+  const save=el("button","action",`Сохранить для ${slot.label}`);save.type="button";
+  const actions=el("div","actions");actions.append(save);
+  const note=el("div","note");note.setAttribute("role","status");
+  const say=(text,cls)=>{note.textContent=text;note.className="note"+(cls?" "+cls:"")};
+  async function send(body,done){
+    save.disabled=true;if(clear)clear.disabled=true;
+    try{await api("/api/spool",Object.assign({index:slot.index},body));say(done,"ok");onDone&&onDone()}
+    catch(e){say(e.message,"err");save.disabled=false;if(clear)clear.disabled=false}
+  }
+  save.onclick=()=>{
+    const grams=Number(input.value);
+    if(!Number.isInteger(grams)||grams<0||grams>5000){say("Осталось: целое число от 0 до 5000","err");return}
+    send({grams},`Остаток ${grams} г сохранён`);
+  };
+  let clear=null;
+  if(slot.clear){
+    clear=el("button","action alt",slot.tag?"Сбросить к весу метки":"Очистить слот");clear.type="button";
+    clear.title=slot.tag?"Забыть счёт: катушка снова считается полной по метке":"Забыть катушку: слот снова ждёт выбора пластика";
+    let sure=false;
+    clear.onclick=()=>{
+      if(!sure){sure=true;clear.textContent="Точно? Нажми ещё раз";return}
+      send({clear:true},slot.tag?"Счёт сброшен":"Слот очищен");
+    };
+    actions.append(clear);
+  }
+  box.append(now,label,quick,actions,note);
+  return box;
+}
 async function startPick(){
   document.body.classList.add("pick-mode");
   $("panel-slots").hidden=true;$("panel-pick").hidden=false;
@@ -3614,6 +3680,30 @@ async function startPick(){
     // The plastic already in the slot is marked; editing it changes the spool without a new count.
     pickInSlot=(pickSlot.spool||{}).plastic||null;
   }catch(e){pickSay(e.message,"err");return}
+  if(pickSlot.empty){
+    $("pick-title").textContent=`Слот ${pickSlot.label} пуст`;
+    $("pick-hint").textContent="Принтер не видит катушку в этом слоте. Вставь катушку, и её можно будет выбрать.";
+    ["pick-find","pick-list","pick-new"].forEach(id=>$(id).hidden=true);
+    return;
+  }
+  const spoolNow=pickSlot.spool||{},tagged=!!(pickSlot.tag&&!pickSlot.tag.empty);
+  if(tagged||typeof spoolNow.remaining==="number"){
+    // A counted spool: its remainder can be corrected here; a tagged one has nothing to pick.
+    $("pick-left").replaceChildren(leftEditor({index:pickSlot.index,label:pickSlot.label,remaining:spoolNow.remaining,
+      full:spoolNow.full||(pickSlot.tag||{}).weight,tag:tagged,clear:true},
+      ()=>setTimeout(()=>parent.postMessage({qidiPick:"done"},"*"),900)));
+    $("pick-left").hidden=false;
+  }
+  if(tagged){
+    $("pick-title").textContent=`Остаток в ${pickSlot.label}`;
+    $("pick-hint").textContent="Катушка с меткой: пластик известен по метке, здесь можно поправить остаток.";
+    ["pick-find","pick-list","pick-new"].forEach(id=>$(id).hidden=true);
+    return;
+  }
+  if(typeof spoolNow.remaining==="number"){
+    $("pick-hint").textContent="Катушка без метки: поправь остаток или выбери другой пластик из своего списка.";
+    $("pick-mine").hidden=false;
+  }
   renderPickList();
   if(!(state.codes.my_plastics||[]).length)openPickForm(null);
 }
@@ -3624,6 +3714,9 @@ async function startSpools(){
   $("pick-hint").textContent="Все катушки, которые считает принтер: с меткой и без. Сначала те, что стоят сейчас.";
   pickPicker=makePicker($("pick-picker"),"FAFAFA",()=>{});
   renderPickList();
+  loadSpoolList();
+}
+async function loadSpoolList(){
   try{
     const data=await api("/api/spools"),box=$("spool-list");
     box.replaceChildren();
@@ -3638,7 +3731,20 @@ async function startSpools(){
       const left=el("span","spool-left");left.append(el("b","",Math.round(s.remaining)+" г"));
       const bar=el("div","spool-bar"),fill=el("i",s.remaining<50?"low":"");
       fill.style.width=Math.max(0,Math.min(1,s.remaining/(s.full||1000)))*100+"%";bar.append(fill);left.append(bar);
-      row.append(pic,text,left);box.append(row);
+      row.append(pic,text,left);
+      const item=el("div","spool-item");item.append(row);
+      // A spool standing in the printer: its remainder can be corrected.
+      if(s.index!=null){
+        const edit=el("button","pick-tool","✎");edit.type="button";edit.title=`Поправить остаток в ${s.where}`;
+        edit.setAttribute("aria-label",`Поправить остаток в ${s.where}`);
+        edit.onclick=()=>{
+          const open=item.querySelector(".left-edit");
+          if(open){open.remove();return}
+          item.append(leftEditor({index:s.index,label:s.where,remaining:s.remaining,full:s.full,tag:s.tag},()=>setTimeout(loadSpoolList,900)));
+        };
+        row.append(edit);
+      }
+      box.append(item);
     });
   }catch(e){pickSay(e.message,"err")}
 }

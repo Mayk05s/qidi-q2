@@ -7,6 +7,7 @@ for folder in ("usage/printer",):
     sys.path.insert(0, str(PACKAGES / folder))
 import json
 import os
+import re
 import tempfile
 import unittest
 
@@ -379,6 +380,220 @@ class FilamentMeterTests(unittest.TestCase):
         self.assertIsNone(b.active_slot({"loaded_slot": ""}))
         self.assertEqual(b.slot_density(status, 2), 1.27)
         self.assertEqual(b.slot_density({}, 2), b.DEFAULT_DENSITY)
+
+
+class FakePrinter:
+    """Klipper objects the usage module reads: saved variables, slot sensors, print state.
+    SAVE_VARIABLE G-code changes the saved variables, as in Klipper."""
+
+    def __init__(self, variables, state="standby"):
+        import ast
+        outer = self
+        self.state = state
+        self.present = {slot: True for slot in range(b.BOX_SLOTS)}
+        self.loaded = None
+        self.scripts = []
+        self.commands = {}
+
+        class Saved:
+            allVariables = variables
+
+        class Gcode:
+            def register_command(self, name, func, desc=None):
+                outer.commands[name] = func
+
+            def run_script(self, script):
+                outer.scripts.append(script)
+                match = re.fullmatch(r'SAVE_VARIABLE VARIABLE=(\w+) VALUE="(.*)"', script)
+                Saved.allVariables[match.group(1)] = ast.literal_eval(match.group(2))
+
+        class Stepper:
+            def __init__(self, slot):
+                self.slot = slot
+
+            def get_status(self, eventtime):
+                return {"runout_button": 0 if outer.present[self.slot] else 1}
+
+        class Stats:
+            def get_status(self, eventtime):
+                return {"state": outer.state, "filament_used": 0.}
+
+        class Box:
+            def get_status(self, eventtime):
+                return {"loaded_slot": "slot%d" % (outer.loaded,) if outer.loaded is not None else "slot-1"}
+
+        class Sensor:
+            def get_status(self, eventtime):
+                return {"filament_detected": outer.loaded is not None}
+
+        class Reactor:
+            def monotonic(self):
+                return 0.
+
+        self.saved = Saved
+        self.objects = {"save_variables": Saved(), "gcode": Gcode(), "print_stats": Stats(), "box_extras": Box(),
+                        "filament_switch_sensor filament_switch_sensor": Sensor()}
+        self.objects.update({"box_stepper slot%d" % (slot,): Stepper(slot) for slot in range(b.BOX_SLOTS)})
+        self.reactor = Reactor()
+
+    def get_reactor(self):
+        return self.reactor
+
+    def register_event_handler(self, name, func):
+        pass
+
+    def lookup_object(self, name, default=None):
+        return self.objects.get(name, default)
+
+
+class SlotChangeTests(unittest.TestCase):
+    """What the user saw on the printer: a spool taken out still counted, one spool in two slots."""
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = folder.name
+        self.time = 0.
+
+    def usage(self, variables, state="standby"):
+        self.printer = FakePrinter(variables, state)
+        return b.SpoolUsage(self.printer, os.path.join(self.folder, b.USAGE_FILE))
+
+    def run_for(self, usage, seconds):
+        for _ in range(int(seconds)):
+            self.time += 1.
+            usage._count(self.time)
+
+    def view(self, usage, slot):
+        return usage.get_status(self.time)["slots"][slot]
+
+    def test_tagged_spool_taken_out_is_forgotten(self):
+        # Scenario 1: a tagged spool out, a spool without a tag in; the slot keeps its material.
+        usage = self.usage(slot("QFA01", "000000", dict(BLACK_TAG)))
+        self.run_for(usage, 2)
+        usage.ledger.set_remaining("tray:T", 640)
+        self.assertEqual(self.view(usage, 1)["remaining"], 640)
+        self.printer.present[1] = False
+        self.run_for(usage, 1)
+        # A moment without a spool, e.g. while it turns in the reader, changes nothing.
+        self.assertEqual(self.view(usage, 1)["remaining"], 640)
+        self.run_for(usage, 3)
+        self.assertTrue(self.view(usage, 1)["empty"])
+        self.assertIsNone(self.view(usage, 1)["remaining"])
+        self.assertEqual(self.printer.saved.allVariables["bambu_tag_slot1"], {"empty": True})
+        self.printer.present[1] = True
+        self.run_for(usage, 1)
+        view = self.view(usage, 1)
+        self.assertEqual((view["key"], view["remaining"]), ("slot:1", None))
+        # The tagged spool keeps its count for when it comes back.
+        self.assertEqual(usage.ledger.view("tray:T")["remaining"], 640)
+
+    def test_same_tag_read_again_gets_its_count_back(self):
+        usage = self.usage(slot("QFA01", "000000", dict(BLACK_TAG)))
+        self.run_for(usage, 1)
+        usage.ledger.set_remaining("tray:T", 640)
+        self.printer.present[1] = False
+        self.run_for(usage, 5)
+        self.printer.present[1] = True
+        self.printer.saved.allVariables["bambu_tag_slot1"] = dict(BLACK_TAG)
+        self.run_for(usage, 1)
+        self.assertEqual(self.view(usage, 1)["remaining"], 640)
+
+    def test_taken_out_during_a_print_is_forgotten_after_it(self):
+        usage = self.usage(slot("QFA01", "000000", dict(BLACK_TAG)), state="printing")
+        self.run_for(usage, 1)
+        usage.ledger.set_remaining("tray:T", 640)
+        self.printer.present[1] = False
+        self.run_for(usage, 5)
+        # G-code waits behind a print: nothing is written, the record is only hidden meanwhile.
+        self.assertEqual(self.printer.scripts, [])
+        self.printer.present[1] = True
+        self.run_for(usage, 1)
+        self.assertEqual(self.view(usage, 1)["key"], "slot:1")
+        self.printer.state = "complete"
+        self.run_for(usage, 1)
+        self.assertEqual(self.printer.saved.allVariables["bambu_tag_slot1"], {"empty": True})
+
+    def test_spool_in_the_toolhead_is_not_cleared(self):
+        # The end of a spool passes the sensor while the rest of it is still printed.
+        usage = self.usage(slot("QFA01", "000000", dict(BLACK_TAG)), state="printing")
+        self.printer.loaded = 1
+        self.printer.present[1] = False
+        self.run_for(usage, 10)
+        self.assertEqual(self.view(usage, 1)["key"], "tray:T")
+        self.printer.loaded = None
+        self.run_for(usage, 4)
+        self.assertTrue(self.view(usage, 1)["empty"])
+
+    def test_tagless_spool_moved_to_another_slot_leaves_the_first(self):
+        # Scenario 2: a spool without a tag moved from 1A to 1B, both slots with the same plastic.
+        variables = {"filament_slot0": "QFA00", "color_slot0": ["A878FF"],
+                     "filament_slot1": "QFA00", "color_slot1": ["A878FF"]}
+        usage = self.usage(variables)
+        usage.ledger.pick(0, PLASTIC, ["QFA00", "A878FF"], printing=False)
+        usage.ledger.add("slot:0", 100, ["QFA00", "A878FF"])
+        self.printer.present[0] = False
+        self.run_for(usage, 4)
+        usage.ledger.pick(1, dict(PLASTIC, grams=900), ["QFA00", "A878FF"], printing=False)
+        self.assertTrue(self.view(usage, 0)["empty"])
+        self.assertEqual(self.view(usage, 1)["remaining"], 900)
+
+    def test_tagless_spool_back_with_the_same_plastic_keeps_its_count(self):
+        # The user's rule: the old count comes back only while the slot's material and color match.
+        variables = {"filament_slot0": "QFA00", "color_slot0": ["A878FF"]}
+        usage = self.usage(variables)
+        usage.ledger.pick(0, PLASTIC, ["QFA00", "A878FF"], printing=False)
+        self.printer.present[0] = False
+        self.run_for(usage, 4)
+        self.printer.present[0] = True
+        self.run_for(usage, 1)
+        self.assertEqual(self.view(usage, 0)["remaining"], 1000)
+        variables["color_slot0"] = ["FFFFFF"]
+        self.assertIsNone(self.view(usage, 0)["remaining"])
+
+    def test_clear_request_forgets_a_tagless_spool(self):
+        # Scenario 2: another spool without a tag of the same plastic, the count cleared by hand.
+        usage = self.usage({"filament_slot0": "QFA00", "color_slot0": ["A878FF"]})
+        usage.ledger.pick(0, PLASTIC, ["QFA00", "A878FF"], printing=False)
+        with open(os.path.join(self.folder, b.SPOOL_REQUEST_FILE % (0,)), "w") as f:
+            f.write("clear\n")
+        self.run_for(usage, 1)
+        self.assertIsNone(self.view(usage, 0)["remaining"])
+        self.assertNotIn("slot:0", usage.ledger.spools)
+
+    def test_remaining_of_a_tagged_spool_is_corrected(self):
+        # Scenario 3: a wrong weight set at the start, corrected from the card.
+        usage = self.usage(slot("QFA01", "000000", dict(BLACK_TAG)))
+        self.run_for(usage, 1)
+        usage.ledger.set_remaining("tray:T", 2000)
+        usage.ledger.add("tray:T", 50)
+        with open(os.path.join(self.folder, b.SPOOL_REQUEST_FILE % (1,)), "w") as f:
+            f.write("700\n")
+        self.run_for(usage, 1)
+        self.assertEqual(self.view(usage, 1)["remaining"], 700)
+        with open(os.path.join(self.folder, b.USAGE_FILE)) as f:
+            self.assertEqual(json.load(f)["tray:T"]["set_g"], 700)
+
+    def test_sensors_unknown_change_nothing(self):
+        usage = self.usage(slot("QFA01", "000000", dict(BLACK_TAG)))
+        del self.printer.objects["box_stepper slot1"]
+        self.run_for(usage, 10)
+        self.assertEqual(self.view(usage, 1)["key"], "tray:T")
+
+    def test_clear_command(self):
+        usage = self.usage({"filament_slot0": "QFA00", "color_slot0": ["A878FF"]})
+        usage.ledger.pick(0, PLASTIC, ["QFA00", "A878FF"], printing=False)
+        said = []
+
+        class Command:
+            def get_int(self, name, default=None, minval=None, maxval=None):
+                return {"SLOT": 0, "CLEAR": 1}[name]
+
+            def respond_info(self, text):
+                said.append(text)
+        self.printer.commands["BAMBU_RFID_SPOOL_SET"](Command())
+        self.assertIsNone(self.view(usage, 0)["remaining"])
+        self.assertEqual(said, ["Slot 0: count forgotten"])
 
 
 if __name__ == "__main__":
