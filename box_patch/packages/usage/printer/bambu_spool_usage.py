@@ -29,6 +29,10 @@
 # with it: no count is shown there, and the tag record of the spool taken out is forgotten
 # ({'empty': True}, as the panel's «forget»), so a spool put in later is not taken for it. A spool
 # without a tag gets its old count back only while the slot keeps the material and color it had.
+# A slot whose material or color is changed by hand (the printer screen, the panel's pencil) loses
+# its tag record the same way: it now holds a spool without a tag of the plastic chosen. Each such
+# change is added to spool_history.jsonl next to printer.cfg (the last 500): the tag, the count of
+# that spool and the material and color chosen, to tell later which spool stood with which color.
 #   BAMBU_SCREEN_WARNING BOX=3|4
 #       raise the stock Box 3 or 4 window of the printer screen for a moment; the panel turns
 #       those windows into the low-plastic window. At a print start the panel leaves
@@ -56,6 +60,11 @@ CLEAR_REQUEST = "clear"
 EMPTY_SECONDS = 3.
 EMPTY_RECORD = {"empty": True}
 PICK_REQUEST_FILE = "spool_pick_%d.json"
+# Seconds a slot must keep a material or color other than its tag's before that counts as changed
+# by hand: the panel writes the slot and then the tag record one call after the other.
+MANUAL_SECONDS = 3.
+HISTORY_FILE = "spool_history.jsonl"
+HISTORY_LINES = 500
 SCREEN_REQUEST_FILE = "screen_warning.txt"
 SCREEN_REQUEST_AGE = 600.
 MAX_SPOOL_GRAMS = 5000
@@ -181,6 +190,56 @@ class SlotWatch:
             if seen.get("bambu_tag_slot%d" % (slot,)) == record:
                 seen["bambu_tag_slot%d" % (slot,)] = dict(EMPTY_RECORD)
         return seen
+
+
+class ManualWatch:
+    """Forgets the tag of a slot whose material or color was changed by hand, on the printer
+    screen or with the panel's pencil: the tag read a white spool, the user set black. The slot
+    then holds a spool without a tag of the plastic chosen, and the change goes to the history.
+    The readers write a tag record together with the slot's material and color, so a record that
+    stays different from the slot for MANUAL_SECONDS was not written with it. Nothing is written
+    during a print: G-code waits behind it, so the change is taken once the print is over."""
+
+    def __init__(self, slots=BOX_SLOTS):
+        self.slots = slots
+        self.since = {}
+
+    def feed(self, variables, now, printing, skip=()):
+        """Returns [(slot, record, slot values)] for the slots changed by hand."""
+        changed = []
+        for slot in range(self.slots):
+            record = variables.get("bambu_tag_slot%d" % (slot,))
+            values = slot_values(variables, slot)
+            differs = (not printing and slot not in skip and isinstance(record, dict)
+                       and not record.get("empty") and not record.get("unread")
+                       and isinstance(record.get("color"), str)
+                       and (record["color"] != values[1]
+                            or bool(record.get("filament")) and record["filament"] != values[0]))
+            if not differs:
+                self.since.pop(slot, None)
+                continue
+            seen = (repr(record), values)
+            if self.since.get(slot, (None,))[0] != seen:
+                self.since[slot] = (seen, now)
+            elif now - self.since[slot][1] >= MANUAL_SECONDS:
+                del self.since[slot]
+                changed.append((slot, record, values))
+        return changed
+
+
+def write_history(folder, entry, keep=HISTORY_LINES):
+    """Adds a line to the history of slot changes, which keeps its last lines."""
+    path = os.path.join(folder, HISTORY_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        lines = []
+    lines = lines[-(keep - 1):] + [json.dumps(entry, ensure_ascii=False, sort_keys=True)]
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
 
 
 class SpoolLedger:
@@ -513,6 +572,7 @@ class SpoolUsage:
         self.ledger = SpoolLedger(path)
         self.meter = FilamentMeter()
         self.watch = SlotWatch()
+        self.manual = ManualWatch()
         self.next_save = 0.
         printer.register_event_handler("klippy:ready", self._start)
         printer.register_event_handler("klippy:disconnect", self._flush)
@@ -565,8 +625,9 @@ class SpoolUsage:
         saved = self.printer.lookup_object("save_variables", None)
         scripts = self.watch.feed(self._present(eventtime), saved.allVariables if saved is not None else {},
                                   eventtime, printing, self._in_head(eventtime, box_status))
-        self.ledger.adopt(self._variables())
         folder = os.path.dirname(self.ledger.path)
+        scripts += self._manual(eventtime, printing, folder)
+        self.ledger.adopt(self._variables())
         scripts += [] if printing else self.ledger.pending()
         for slot in COUNTED_SLOTS:
             request = take_spool_request(folder, slot)
@@ -592,6 +653,29 @@ class SpoolUsage:
         if self.ledger.dirty and (self.meter.last is None or eventtime >= self.next_save):
             self._flush()
             self.next_save = eventtime + USAGE_SAVE_INTERVAL
+
+    def _manual(self, eventtime, printing, folder):
+        """G-code forgetting the tags of slots changed by hand, each change written to the history."""
+        saved = self.printer.lookup_object("save_variables", None)
+        variables = saved.allVariables if saved is not None else {}
+        scripts = []
+        for slot, record, values in self.manual.feed(variables, eventtime, printing, self.watch.empty):
+            key = spool_key({"bambu_tag_slot%d" % (slot,): record, "filament_slot%d" % (slot,): record.get("filament"),
+                             "color_slot%d" % (slot,): [record["color"]]}, slot)
+            view = self.ledger.view(key)
+            entry = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "event": "manual", "slot": slot,
+                     "tag": {k: record[k] for k in ("uid", "tray", "brand", "detail", "color", "filament")
+                             if k in record},
+                     "spool": key, "remaining": view.get("remaining"),
+                     "now": {"filament": values[0], "color": values[1]}}
+            try:
+                write_history(folder, entry)
+            except OSError:
+                logging.exception("bambu_rfid: could not write %s", HISTORY_FILE)
+            logging.info("bambu_rfid: slot%d changed by hand to %s, tag %s forgotten", slot, values,
+                         record.get("uid"))
+            scripts.append(forget_script(slot))
+        return scripts
 
     def _set(self, slot, grams, full=None):
         """Grams left on the spool in the slot, or CLEAR_REQUEST to forget its count."""

@@ -536,6 +536,65 @@ class SlotChangeTests(unittest.TestCase):
         self.run_for(usage, 4)
         self.assertTrue(self.view(usage, 1)["empty"])
 
+    def history(self):
+        path = os.path.join(self.folder, b.HISTORY_FILE)
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def test_color_changed_on_the_screen_forgets_the_tag(self):
+        # The tag read black, the user set white for the slot on the printer screen.
+        usage = self.usage(slot("QFA01", "000000", dict(BLACK_TAG)))
+        self.run_for(usage, 1)
+        usage.ledger.set_remaining("tray:T", 640)
+        self.printer.saved.allVariables["color_slot1"] = ["FFFFFF"]
+        self.run_for(usage, 2)
+        self.assertEqual(self.printer.saved.allVariables["bambu_tag_slot1"]["tray"], "T")
+        self.run_for(usage, 3)
+        self.assertEqual(self.printer.saved.allVariables["bambu_tag_slot1"], {"empty": True})
+        # Setting black again does not bring the tag back: the slot holds a spool without a tag.
+        self.printer.saved.allVariables["color_slot1"] = ["000000"]
+        self.run_for(usage, 1)
+        self.assertEqual(self.view(usage, 1)["key"], "slot:1")
+        self.assertEqual(usage.ledger.view("tray:T")["remaining"], 640)
+        [entry] = self.history()
+        self.assertEqual((entry["event"], entry["slot"], entry["spool"], entry["remaining"]),
+                         ("manual", 1, "tray:T", 640))
+        self.assertEqual(entry["tag"]["uid"], "A")
+        self.assertEqual(entry["now"], {"filament": "QFA01", "color": "FFFFFF"})
+
+    def test_panel_writing_slot_then_tag_is_not_a_change(self):
+        # «Изменить метку»: the panel writes the slot, then the tag record with the same values.
+        usage = self.usage(slot("QFA01", "000000", dict(BLACK_TAG)))
+        self.run_for(usage, 1)
+        self.printer.saved.allVariables["color_slot1"] = ["FFFFFF"]
+        self.run_for(usage, 1)
+        self.printer.saved.allVariables["bambu_tag_slot1"] = dict(BLACK_TAG, color="FFFFFF")
+        self.run_for(usage, 10)
+        self.assertEqual(self.printer.saved.allVariables["bambu_tag_slot1"]["tray"], "T")
+        self.assertEqual(self.history(), [])
+
+    def test_change_during_a_print_waits_for_its_end(self):
+        usage = self.usage(slot("QFA01", "000000", dict(BLACK_TAG)), state="printing")
+        self.printer.saved.allVariables["filament_slot1"] = "QFA00"
+        self.run_for(usage, 10)
+        self.assertEqual(self.printer.scripts, [])
+        self.printer.state = "complete"
+        self.run_for(usage, 4)
+        self.assertEqual(self.printer.saved.allVariables["bambu_tag_slot1"], {"empty": True})
+        self.assertEqual(len(self.history()), 1)
+
+    def test_unread_tag_is_left_alone(self):
+        usage = self.usage(slot("QFA01", "000000", {"uid": "B", "unread": "locked"}))
+        self.run_for(usage, 10)
+        self.assertEqual(self.printer.saved.allVariables["bambu_tag_slot1"]["uid"], "B")
+
+    def test_history_keeps_its_last_lines(self):
+        for n in range(5):
+            b.write_history(self.folder, {"n": n}, keep=3)
+        self.assertEqual([e["n"] for e in self.history()], [2, 3, 4])
+
     def test_tagless_spool_moved_to_another_slot_leaves_the_first(self):
         # Scenario 2: a spool without a tag moved from 1A to 1B, both slots with the same plastic.
         variables = {"filament_slot0": "QFA00", "color_slot0": ["A878FF"],
