@@ -100,10 +100,12 @@ python -B installer/build_exe.py
 
 ## Лицензия и благодарности
 
-Код распространяется по [GNU GPL v3](LICENSE), как и Klipper, в который ставятся модули.
+Автор: Михаил Шоколов, [mayk05.pro](https://mayk05.pro), [contact@mayk05.pro](mailto:contact@mayk05.pro).
+
+Copyright (C) 2026 Mikhail Shokolov, https://mayk05.pro. Код распространяется по [GNU GPL v3](LICENSE), как и Klipper, в который ставятся модули.
 
 Чтение меток Bambu Lab опирается на открытое исследование формата меток [Bambu Research Group, RFID-Tag-Guide](https://github.com/Bambu-Research-Group/RFID-Tag-Guide).
 
 ## In English
 
-Unofficial tools for the QIDI Q2 printer with the QIDI Box: reading Bambu Lab RFID tags, writing your own NFC tags, parallel spool feeding, filament usage tracking and an adaptive bed mesh. They are installed by **QIDI Q2 Patcher**, a macOS app built from this repository with `python3 -B installer/build_app.py`, or a Windows .exe built by the "Windows exe" GitHub Actions workflow (`installer/build_exe.py`). The interface and documentation are in Russian. Not affiliated with QIDI Tech or Bambu Lab. Tested only on firmware `QD_Q2_01.01.03.02`. Use at your own risk. License: GPL-3.0.
+Unofficial tools for the QIDI Q2 printer with the QIDI Box: reading Bambu Lab RFID tags, writing your own NFC tags, parallel spool feeding, filament usage tracking and an adaptive bed mesh. They are installed by **QIDI Q2 Patcher**, a macOS app built from this repository with `python3 -B installer/build_app.py`, or a Windows .exe built by the "Windows exe" GitHub Actions workflow (`installer/build_exe.py`). The interface and documentation are in Russian. Not affiliated with QIDI Tech or Bambu Lab. Tested only on firmware `QD_Q2_01.01.03.02`. Use at your own risk. License: GPL-3.0. Author: Mikhail Shokolov, [mayk05.pro](https://mayk05.pro).
