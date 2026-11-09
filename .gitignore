@@ -1,0 +1,11 @@
+.env
+.DS_Store
+__pycache__/
+*.pyc
+tag_writer/backups/
+box_patch/packages/panel/printer/my_colors.json
+box_patch/packages/panel/printer/my_names.json
+tag_writer/result.json
+QIDI Q2 Patcher.app/
+box_patch/packages/panel/printer/features.json
+dist/

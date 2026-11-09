@@ -1,0 +1,506 @@
+[
+ {
+  "id": "QFA00",
+  "name": "QIDI PLA Basic",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFA01",
+  "name": "QIDI PLA Matte Basic",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFA02",
+  "name": "QIDI PLA Rapido",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFA03",
+  "name": "QIDI PLA Rapido Matte",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFA04",
+  "name": "QIDI PLA Rapido Metal",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFA05",
+  "name": "QIDI PLA Silk",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFA16",
+  "name": "QIDI WOOD Rapido",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 220,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFA50",
+  "name": "QIDI PLA-CF",
+  "type": "PLA-CF",
+  "min_temp": 210,
+  "max_temp": 250,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFB01",
+  "name": "QIDI ASA",
+  "type": "ASA",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFB02",
+  "name": "QIDI ASA-Aero",
+  "type": "ASA-AERO",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFB50",
+  "name": "QIDI ABS-GF",
+  "type": "ABS-GF",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFB51",
+  "name": "QIDI ASA-CF20 Core",
+  "type": "ASA-CF",
+  "min_temp": 260,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFB53",
+  "name": "QIDI ABS Odorless",
+  "type": "ABS",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFB54",
+  "name": "QIDI ABS Rapido",
+  "type": "ABS",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFB55",
+  "name": "QIDI ABS Rapido Metal",
+  "type": "ABS",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFC02",
+  "name": "QIDI PC/ABS-FR",
+  "type": "PC-ABS-FR",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFG00",
+  "name": "QIDI PETG Basic",
+  "type": "PETG",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFG02",
+  "name": "QIDI PETG Rapido",
+  "type": "PETG",
+  "min_temp": 240,
+  "max_temp": 275,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFG03",
+  "name": "QIDI PETG Tough",
+  "type": "PETG",
+  "min_temp": 220,
+  "max_temp": 270,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFG04",
+  "name": "QIDI PETG Translucent",
+  "type": "PETG",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFG50",
+  "name": "QIDI PETG-CF",
+  "type": "PETG-CF",
+  "min_temp": 240,
+  "max_temp": 270,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFG51",
+  "name": "QIDI PETG-GF",
+  "type": "PETG-GF",
+  "min_temp": 240,
+  "max_temp": 270,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFN04",
+  "name": "QIDI PAHT-CF",
+  "type": "PAHT-CF",
+  "min_temp": 300,
+  "max_temp": 320,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFN05",
+  "name": "QIDI PA6-CF",
+  "type": "PA6-CF",
+  "min_temp": 280,
+  "max_temp": 300,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFN12",
+  "name": "QIDI PA12-CF",
+  "type": "PA12-CF",
+  "min_temp": 280,
+  "max_temp": 300,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFN14",
+  "name": "QIDI PAHT-GF",
+  "type": "PAHT-GF",
+  "min_temp": 300,
+  "max_temp": 320,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFN20",
+  "name": "QIDI UltraPA",
+  "type": "UltraPA",
+  "min_temp": 250,
+  "max_temp": 290,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFN21",
+  "name": "QIDI UltraPA-CF25",
+  "type": "UltraPA-CF25",
+  "min_temp": 300,
+  "max_temp": 320,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFP01",
+  "name": "QIDI PPS-CF",
+  "type": "PPS-CF",
+  "min_temp": 300,
+  "max_temp": 350,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFP02",
+  "name": "QIDI PPS-GF",
+  "type": "PPS-GF",
+  "min_temp": 300,
+  "max_temp": 350,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFS01",
+  "name": "QIDI Support For PET/PA",
+  "type": "PA-S",
+  "min_temp": 260,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFS03",
+  "name": "QIDI Support For PAHT",
+  "type": "PAHT-S",
+  "min_temp": 260,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFT01",
+  "name": "QIDI PET-CF",
+  "type": "PET-CF",
+  "min_temp": 280,
+  "max_temp": 320,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFT02",
+  "name": "QIDI PET-GF",
+  "type": "PET-GF",
+  "min_temp": 280,
+  "max_temp": 320,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFU00",
+  "name": "QIDI TPU-Aero",
+  "type": "TPU-AERO",
+  "min_temp": 230,
+  "max_temp": 270,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFU01",
+  "name": "QIDI TPU 95A-HF",
+  "type": "TPU",
+  "min_temp": 200,
+  "max_temp": 250,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFU02",
+  "name": "QIDI TPU-GF",
+  "type": "TPU-GF",
+  "min_temp": 240,
+  "max_temp": 270,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFU03",
+  "name": "QIDI PEBA 95A",
+  "type": "PEBA",
+  "min_temp": 230,
+  "max_temp": 260,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFB91",
+  "name": "Generic ABS",
+  "type": "ABS",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFC90",
+  "name": "Generic PC",
+  "type": "PC",
+  "min_temp": 260,
+  "max_temp": 290,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFG90",
+  "name": "Generic PETG",
+  "type": "PETG",
+  "min_temp": 220,
+  "max_temp": 270,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFA90",
+  "name": "Generic PLA",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFA92",
+  "name": "Generic PLA Silk",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFA91",
+  "name": "Generic PLA+",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFU91",
+  "name": "Generic TPU 95A",
+  "type": "TPU",
+  "min_temp": 200,
+  "max_temp": 250,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL32",
+  "name": "Bambu ABS",
+  "type": "ABS",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL31",
+  "name": "Bambu PETG",
+  "type": "PETG",
+  "min_temp": 220,
+  "max_temp": 270,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL30",
+  "name": "Bambu PLA",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL12",
+  "name": "HATCHBOX ABS",
+  "type": "ABS",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL11",
+  "name": "HATCHBOX PETG",
+  "type": "PETG",
+  "min_temp": 220,
+  "max_temp": 270,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL10",
+  "name": "HATCHBOX PLA",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL62",
+  "name": "Overture ABS",
+  "type": "ABS",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL60",
+  "name": "Overture PLA",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL22",
+  "name": "Polymaker ABS",
+  "type": "ABS",
+  "min_temp": 240,
+  "max_temp": 280,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL20",
+  "name": "Polymaker PLA",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ },
+ {
+  "id": "QFL24",
+  "name": "Polymaker PLA-HT",
+  "type": "PLA",
+  "min_temp": 190,
+  "max_temp": 240,
+  "dry_temp": 45,
+  "dry_hours": 12
+ }
+]

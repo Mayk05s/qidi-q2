@@ -1,0 +1,26 @@
+{
+  "id": "rfid_core",
+  "version": "1.5.2",
+  "hidden": true,
+  "title": "Модуль Klipper для Box",
+  "summary": "Общая основа меток, подачи и расхода",
+  "install": [
+    {
+      "from": "box_patch/packages/rfid_core/printer/bambu_rfid.py",
+      "to": "klipper/klippy/extras/bambu_rfid.py"
+    }
+  ],
+  "uninstall": [
+    "klipper/klippy/extras/bambu_rfid.py"
+  ],
+  "klipper_section": true,
+  "hooks": [
+    "ssh_key"
+  ],
+  "changes": [
+    "printer.cfg: одна строка [include qidi_patcher.cfg]",
+    "printer_data/config/qidi_patcher.cfg: секции считывателей [bambu_rfid card_reader_1] и [bambu_rfid card_reader_2]",
+    "~/.ssh/authorized_keys пользователя mks: ключ этого компьютера для входа без пароля",
+    "printer_data/config/bambu_tag_rules.json: правила для отдельных меток по номеру, пишет панель, модуль только читает"
+  ]
+}

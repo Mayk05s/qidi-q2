@@ -1,0 +1,45 @@
+{
+  "id": "spools",
+  "version": "1.6.2",
+  "icon": "square.stack.3d.up",
+  "title": "Мультиподача",
+  "summary": "Катушки подаются одновременно, метки определяются по паре",
+  "details": "Вставленные катушки подаются одновременно, без штатной очереди по одной, и во время печати тоже, кроме печатающего слота. На каждом считывателе пара катушек: метка приписывается катушке, только если появилась, когда крутилась она одна. Потом, когда принтер свободен, каждая катушка по очереди доходит до датчика сплиттера и возвращается: так известна её длина. Выгрузка незаправленного слота идёт только мотором, без движения головы, и во время печати тоже.",
+  "note": "Логика проверена в эмуляторе и в тесте с моделью моторов; на принтере подача проверена, замер до сплиттера, выгрузка во время печати и пауза при смене цвета ещё нет",
+  "requires": [
+    "bambu"
+  ],
+  "install": [
+    {
+      "from": "box_patch/packages/spools/printer/box_feed.py",
+      "to": "klipper/klippy/extras/box_feed.py"
+    },
+    {
+      "from": "box_patch/packages/spools/printer/pair_feed.py",
+      "to": "klipper/klippy/extras/pair_feed.py"
+    },
+    {
+      "from": "box_patch/packages/spools/printer/pair_logic.py",
+      "to": "klipper/klippy/extras/pair_logic.py"
+    }
+  ],
+  "klipper_options": {
+    "box_takeover": true
+  },
+  "saved_variables": {
+    "auto_read_rfid": 0
+  },
+  "changes": [
+    "printer_data/config/qidi_patcher.cfg: опция box_takeover в секциях считывателей",
+    "printer_data/config/box_feed.json: режим, свои скорости, моторов сразу и ночное время, пишет панель",
+    "printer_data/config/box_feed_slots.json: где у каждого слота нашёлся датчик сплиттера, пишет пакет",
+    "saved_variables.cfg: auto_read_rfid = 0, материал, цвет, готовность слота и пустой слот (0) после выхода нити",
+    "В памяти Klipper: штатные slot_load, EJECT_FILAMENT_CONTROL, READ_RFID, LOAD_FILAMENT_CONTROL, UNLOAD_FILAMENT_CONTROL и T_MANAGER перехватываются, движения моторов Box штатным кодом ждут конца наших; файлы box_*.so не меняются"
+  ],
+  "screen_patch": "Отдельно от этого пакета: маска кнопок Box в QIDI_Client/bin/qidiclient, байт 0x109db0: a1 вместо e1 снимает «голова занята», 21 снимает ещё и «идёт печать». Оригинал в qidiclient.orig",
+  "uninstall": [
+    "klipper/klippy/extras/box_feed.py",
+    "klipper/klippy/extras/pair_feed.py",
+    "klipper/klippy/extras/pair_logic.py"
+  ]
+}

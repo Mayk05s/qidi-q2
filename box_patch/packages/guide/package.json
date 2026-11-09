@@ -1,0 +1,22 @@
+{
+  "id": "guide",
+  "version": "1.0.1",
+  "order": 6,
+  "icon": "book",
+  "title": "Справка по пластику",
+  "summary": "Подсказки по сушке и хранению",
+  "details": "Кнопка «Справка» в меню Fluidd и вкладка в панели: сушка, температуры, хранение и силикагель для Box. В Klipper ничего не меняет.",
+  "note": "Черновик",
+  "requires": [
+    "panel"
+  ],
+  "install": [
+    {
+      "from": "box_patch/packages/guide/printer/drying_guide.html",
+      "to": "qidi_panel/drying_guide.html"
+    }
+  ],
+  "uninstall": [
+    "qidi_panel/drying_guide.html"
+  ]
+}

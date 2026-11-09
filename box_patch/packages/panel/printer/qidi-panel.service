@@ -1,0 +1,14 @@
+[Unit]
+Description=QIDI Box panel
+After=network.target moonraker.service
+
+[Service]
+Type=simple
+User=qidi
+WorkingDirectory=/home/qidi/qidi_panel
+ExecStart=/usr/bin/python3 -B /home/qidi/qidi_panel/qidi_tag_tool.py --printer
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

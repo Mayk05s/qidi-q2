@@ -1,0 +1,71 @@
+{
+  "id": "panel",
+  "version": "1.12.4",
+  "hidden": true,
+  "title": "Панель на принтере",
+  "summary": "Страница слотов, меток и материалов на порту 18770",
+  "install": [
+    {
+      "from": "box_patch/packages/panel/printer/qidi_tag_tool.py",
+      "to": "qidi_panel/qidi_tag_tool.py"
+    },
+    {
+      "from": "box_patch/packages/panel/printer/sample_model.py",
+      "to": "qidi_panel/sample_model.py"
+    },
+    {
+      "from": "box_patch/packages/panel/printer/sample_font.json",
+      "to": "qidi_panel/sample_font.json"
+    },
+    {
+      "from": "box_patch/packages/panel/printer/sample_project_settings.json",
+      "to": "qidi_panel/sample_project_settings.json"
+    },
+    {
+      "from": "box_patch/packages/panel/printer/qidi_materials.json",
+      "to": "qidi_panel/qidi_materials.json"
+    },
+    {
+      "from": "box_patch/packages/rfid_core/printer/bambu_rfid.py",
+      "to": "qidi_panel/bambu_rfid.py"
+    },
+    {
+      "from": "box_patch/packages/panel/printer/my_materials.json",
+      "to": "qidi_panel/my_materials.json",
+      "keep": true,
+      "optional": true
+    },
+    {
+      "from": "box_patch/packages/panel/printer/my_colors.json",
+      "to": "qidi_panel/my_colors.json",
+      "keep": true,
+      "optional": true
+    },
+    {
+      "from": "box_patch/packages/panel/printer/my_names.json",
+      "to": "qidi_panel/my_names.json",
+      "keep": true,
+      "optional": true
+    }
+  ],
+  "uninstall": [],
+  "hooks": [
+    "panel"
+  ],
+  "changes": [
+    "fluidd/index.html: одна строка, кнопки панели в меню Fluidd",
+    "fluidd/qidi_panel_link.js: добавляется",
+    "Служба qidi-panel: /etc/systemd/system/qidi-panel.service",
+    "qidi_panel/my_plastics.json: твой список пластиков для катушек без метки, при удалении остаётся"
+  ],
+  "service": "box_patch/packages/panel/printer/qidi-panel.service",
+  "fluidd_script": "box_patch/packages/panel/printer/qidi_panel_link.js",
+  "backup": [
+    "/home/qidi/fluidd/index.html",
+    "/home/qidi/fluidd/qidi_panel_link.js",
+    "/etc/systemd/system/qidi-panel.service"
+  ],
+  "restore_restart": [
+    "qidi-panel.service"
+  ]
+}

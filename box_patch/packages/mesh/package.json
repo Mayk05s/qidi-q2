@@ -1,0 +1,17 @@
+{
+  "id": "mesh",
+  "version": "1.0.0",
+  "order": 5,
+  "icon": "square.grid.3x3",
+  "title": "Быстрая печать",
+  "summary": "Замер стола только в зоне модели",
+  "details": "Перед печатью принтер замеряет зону модели с запасом 10 мм и линию очистки спереди, а не весь стол. Нужна нарезка с подписью объектов, в профиле Q2 она включена; без неё замеряется весь стол.",
+  "note": "На настоящей печати не проверено",
+  "install": [],
+  "uninstall": [],
+  "klipper_config": "mesh.cfg",
+  "changes": [
+    "printer.cfg: одна строка [include qidi_patcher.cfg]",
+    "printer_data/config/qidi_patcher.cfg: макрос BED_MESH_CALIBRATE. Штатный макрос из klipper-macros-qd/KAMP_Settings.cfg перекрывается, сам файл не меняется"
+  ]
+}

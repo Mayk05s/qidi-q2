@@ -1,0 +1,73 @@
+{
+  "id": "usage",
+  "version": "1.7.4",
+  "order": 4,
+  "icon": "scalemass",
+  "title": "Расход пластика",
+  "summary": "Остаток на катушках и хватит ли на печать",
+  "details": "Новая катушка считается полной: вес берётся с метки, иначе 1000 г. При печати остаток уменьшается на израсходованное. Во Fluidd под каждой катушкой виден остаток, ниже карточка «Остаток пластика» с предупреждением. При старте печати, если пластика не хватит или он впритык, на экране принтера появляется одно окно с катушками и цифрами. Катушке без метки и катушке на стойке (Rack) пластик выбирается из своего списка нажатием на её плитку во Fluidd: подтягиваются материал, цвет и вес. Правка пластика в списке меняет и катушку, где он стоит, остаток при этом не сбрасывается. Остаток любой стоящей катушки, с меткой и без, правится по нажатию на её плитку во Fluidd и в окне «Остатки». Слот, который принтер видит пустым, очищается: прежняя катушка в нём больше не показывается. Печать ничто не останавливает.",
+  "note": "Окно на экране проверено вручную в простое, на настоящей печати не проверено. Карточка, выбор пластика и правка остатка во Fluidd проверены только на макете страницы; очистка пустого слота проверена тестами, на принтере нет",
+  "requires": [
+    "bambu"
+  ],
+  "install": [
+    {
+      "from": "box_patch/packages/usage/printer/bambu_spool_usage.py",
+      "to": "klipper/klippy/extras/bambu_spool_usage.py"
+    },
+    {
+      "from": "box_patch/packages/usage/printer/print_check.py",
+      "to": "qidi_panel/print_check.py"
+    },
+    {
+      "from": "box_patch/packages/usage/printer/fluidd_card.py",
+      "to": "qidi_panel/fluidd_card.py"
+    },
+    {
+      "from": "box_patch/packages/usage/printer/screen_popup.py",
+      "to": "qidi_panel/screen_popup.py"
+    },
+    {
+      "from": "box_patch/packages/usage/printer/plastic_picture.py",
+      "to": "qidi_panel/plastic_picture.py"
+    },
+    {
+      "from": "box_patch/packages/usage/printer/slot_font.json",
+      "to": "qidi_panel/slot_font.json"
+    }
+  ],
+  "uninstall": [
+    "klipper/klippy/extras/bambu_spool_usage.py",
+    "qidi_panel/print_check.py",
+    "qidi_panel/fluidd_card.py",
+    "qidi_panel/screen_popup.py",
+    "qidi_panel/plastic_picture.py",
+    "qidi_panel/slot_font.json",
+    "qidi_panel/print_plans.json"
+  ],
+  "changes": [
+    "printer_data/config/spool_usage.json: остаток по катушкам, ведёт модуль bambu_rfid",
+    "QIDI_Client/resource/qidi_client_error/QDC_300_002_005_003 и 004/0.json: штатные окна ошибок BOX 3 и 4 используются под окно «мало пластика». Копии штатных лежат в qidi_panel/screen_stock и возвращаются при удалении",
+    "QIDI_Client/access/plastic: картинки для окна, добавляются",
+    "/etc/systemd/system/qidi-screen-reload.path и .service: перезапуск программы экрана qidi-client, чтобы она прочитала текст окна",
+    "Программа экрана перезапускается на несколько секунд при показе окна",
+    "Fluidd: граммы под катушками и карточка добавляются скриптом панели fluidd_card.js через уже вставленный qidi_panel_link.js, файлы Fluidd не меняются",
+    "qidi_panel/print_plans.json: расход по уже прочитанным файлам печати, чтобы не читать их заново, удаляется вместе с пакетом",
+    "printer_data/config/spool_pick_N.json: выбор пластика для слота без метки, пишет панель, модуль забирает и удаляет",
+    "saved_variables.cfg: при выборе пластика материал и цвет слота, запись метки слота становится пустой, как при «Забыть метку» в панели; так же и когда материал или цвет слота сменили вручную",
+    "printer_data/config/spool_history.jsonl: история ручных смен материала и цвета слота (последние 500), ведёт модуль, при удалении остаётся"
+  ],
+  "setup": "box_patch/packages/usage/screen_popup_setup.py",
+  "panel_feature": "usage",
+  "klipper_config": "printer/bambu_spool_usage.cfg",
+  "backup": [
+    "/home/qidi/QIDI_Client/resource/qidi_client_error/QDC_300_002_005_003/0.json",
+    "/home/qidi/QIDI_Client/resource/qidi_client_error/QDC_300_002_005_004/0.json",
+    "/home/qidi/QIDI_Client/access/plastic",
+    "/etc/systemd/system/qidi-screen-reload.path",
+    "/etc/systemd/system/qidi-screen-reload.service"
+  ],
+  "restore_restart": [
+    "qidi-client.service"
+  ]
+}
